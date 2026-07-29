@@ -11,16 +11,11 @@ from routers import (
 )
 from sync_odoo import start_sync
 
-models.Base.metadata.create_all(bind=engine)
-
-
 @asynccontextmanager
-async def lifespan(app):
-    # Startup: launch Odoo background sync
+async def lifespan(app: FastAPI):
+    models.Base.metadata.create_all(bind=engine)
     start_sync()
     yield
-    # Shutdown: nothing to clean up (daemon threads die with process)
-
 
 app = FastAPI(
     title="ERP Finca Aguacates CORVUS",
