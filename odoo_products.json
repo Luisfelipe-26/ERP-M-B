@@ -1,0 +1,1604 @@
+[
+  {
+    "odoo_id": 1849,
+    "name": "12-12-17 FERTINAGRO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 51.68
+  },
+  {
+    "odoo_id": 1981,
+    "name": "A F STIM BIO",
+    "code": "",
+    "category_odoo": "REGULADOR DE CRECIMIENTO",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 2137.12
+  },
+  {
+    "odoo_id": 448,
+    "name": "A-MIC SUR ZN",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 437.2
+  },
+  {
+    "odoo_id": 2014,
+    "name": "ABAMEX PLUS",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 563.86
+  },
+  {
+    "odoo_id": 2313,
+    "name": "ABANEX PLUS",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 1587,
+    "name": "ABINBAO",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 215.47
+  },
+  {
+    "odoo_id": 1001,
+    "name": "ABONO LOMBRICOMPOST",
+    "code": "",
+    "category_odoo": "ENMIENDAS - MATERIA ORGÁNICA",
+    "tipo_erp": "OTRO",
+    "uom": "Kg",
+    "costo": 4.09
+  },
+  {
+    "odoo_id": 449,
+    "name": "ACIDO BORICO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 92.34
+  },
+  {
+    "odoo_id": 1717,
+    "name": "ACIDO HUMICOS  Y FULVICOS",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 162.98
+  },
+  {
+    "odoo_id": 1355,
+    "name": "AFINAO 20 SL",
+    "code": "",
+    "category_odoo": "HERBICIDA / GLUFOSINATO DE AMONIO",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 157.55
+  },
+  {
+    "odoo_id": 450,
+    "name": "AGROGIBB",
+    "code": "",
+    "category_odoo": "REGULADOR HORMONAL ",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "Kg",
+    "costo": 9815.0
+  },
+  {
+    "odoo_id": 451,
+    "name": "AGROSOL",
+    "code": "",
+    "category_odoo": "REGULADOR HORMONAL ",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 1407.0
+  },
+  {
+    "odoo_id": 1783,
+    "name": "ALGA 600",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 1165.23
+  },
+  {
+    "odoo_id": 880,
+    "name": "ALGA PLUS K",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 943.74
+  },
+  {
+    "odoo_id": 2113,
+    "name": "ALGAXIN",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 698.24
+  },
+  {
+    "odoo_id": 1882,
+    "name": "ALONE 25 SC",
+    "code": "",
+    "category_odoo": "REGULADOR DE CRECIMIENTO",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 263.97
+  },
+  {
+    "odoo_id": 2384,
+    "name": "AMINOCROPS",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 2509,
+    "name": "AMINOVER 24 AA",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 452,
+    "name": "ANASAC IMPERIO",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 1998.51
+  },
+  {
+    "odoo_id": 453,
+    "name": "ANASAC MITERRA",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 2181.96
+  },
+  {
+    "odoo_id": 1784,
+    "name": "ANHUIGLIFOSATO",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 172.43
+  },
+  {
+    "odoo_id": 1388,
+    "name": "ARAMITE",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 2504.7200000000003
+  },
+  {
+    "odoo_id": 454,
+    "name": "ATLANTE PLUS",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 977.7
+  },
+  {
+    "odoo_id": 455,
+    "name": "ATP UP",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 627.76
+  },
+  {
+    "odoo_id": 1024,
+    "name": "AUXIGRO",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 7944.2
+  },
+  {
+    "odoo_id": 456,
+    "name": "AZA-DIRECT",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 4991.25
+  },
+  {
+    "odoo_id": 1422,
+    "name": "AZUBSANZ 80 WG",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "Kg",
+    "costo": 170.0
+  },
+  {
+    "odoo_id": 598,
+    "name": "Activos Fijos",
+    "code": "Maquinaria y equipos",
+    "category_odoo": "Activos Fijos",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 1189,
+    "name": "BACINUS 30 SL",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 3384.16
+  },
+  {
+    "odoo_id": 457,
+    "name": "BELTANOL 50 SL",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 2368.8
+  },
+  {
+    "odoo_id": 458,
+    "name": "BIO FERTILIZANTE ORGANICA",
+    "code": "",
+    "category_odoo": "AMINOACIDOS",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 1.0
+  },
+  {
+    "odoo_id": 1750,
+    "name": "BIOFASE",
+    "code": "",
+    "category_odoo": "COADYUVANTE",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 516.6
+  },
+  {
+    "odoo_id": 1091,
+    "name": "BORO GRANULAR**",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 42.27
+  },
+  {
+    "odoo_id": 960,
+    "name": "CAL AGRICOLA",
+    "code": "",
+    "category_odoo": "ENMIENDAS - MATERIA ORGÁNICA",
+    "tipo_erp": "OTRO",
+    "uom": "Kg",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 1002,
+    "name": "CAPSIALIL 86",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 3264.25
+  },
+  {
+    "odoo_id": 459,
+    "name": "CARBENDAZINM",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 440.0
+  },
+  {
+    "odoo_id": 2382,
+    "name": "CARBOXY K",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 460,
+    "name": "CARBOXY SELECTO",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 1766.48
+  },
+  {
+    "odoo_id": 2383,
+    "name": "CARBOXY ZN",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 1886,
+    "name": "CLORPIKING 40 EC",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 374.85
+  },
+  {
+    "odoo_id": 2412,
+    "name": "CLOSTROBIN 25 EC",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 461,
+    "name": "COMPLEFOL DESARROLLADO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 300.0
+  },
+  {
+    "odoo_id": 462,
+    "name": "COP-STAR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 2445.0
+  },
+  {
+    "odoo_id": 463,
+    "name": "COSMO AGUA",
+    "code": "",
+    "category_odoo": "REG -ACONDICIONADOR DE AGUA",
+    "tipo_erp": "OTRO",
+    "uom": "Kg",
+    "costo": 803.58
+  },
+  {
+    "odoo_id": 464,
+    "name": "COSMO QUEL BALANCE MENORES",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 728.5
+  },
+  {
+    "odoo_id": 2378,
+    "name": "COSMO-AGUA DUREZA",
+    "code": "",
+    "category_odoo": "COADYUVANTE",
+    "tipo_erp": "OTRO",
+    "uom": "Kg",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 2377,
+    "name": "COSMO-IN D",
+    "code": "",
+    "category_odoo": "COADYUVANTE",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 465,
+    "name": "CRYSTAL KOETEL",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "Kg",
+    "costo": 604.8000000000001
+  },
+  {
+    "odoo_id": 1057,
+    "name": "CULTAR 2E SC",
+    "code": "",
+    "category_odoo": "REGULADOR HORMONAL ",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 3426.64
+  },
+  {
+    "odoo_id": 466,
+    "name": "CUPRIMICIN 44.8 WP",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "Kg",
+    "costo": 1950.0
+  },
+  {
+    "odoo_id": 2311,
+    "name": "CUSTODIA",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 2002.6000000000001
+  },
+  {
+    "odoo_id": 467,
+    "name": "CYTOPLANT",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 1792.02
+  },
+  {
+    "odoo_id": 468,
+    "name": "DIFFUSION 97.8 SC",
+    "code": "",
+    "category_odoo": "PROTECTOR SOLAR",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 469.13
+  },
+  {
+    "odoo_id": 469,
+    "name": "DIMETRIN FACIL",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "Kg",
+    "costo": 891.25
+  },
+  {
+    "odoo_id": 1787,
+    "name": "DISPREYTHRU",
+    "code": "",
+    "category_odoo": "ACONDICIONADOR DE AGUA ",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 843.37
+  },
+  {
+    "odoo_id": 1684,
+    "name": "DUOKING CLOPIRIFOS+CIPERMETRINA",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 462.54
+  },
+  {
+    "odoo_id": 959,
+    "name": "ESLABON 27.5 SL",
+    "code": "",
+    "category_odoo": "ACONDICIONADOR DE AGUA ",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 769.6
+  },
+  {
+    "odoo_id": 2411,
+    "name": "EXPERT GROW",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 834.3000000000001
+  },
+  {
+    "odoo_id": 615,
+    "name": "Equipo de Transporte",
+    "code": "Activos",
+    "category_odoo": "Activos Fijos",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 727,
+    "name": "FASCINATE 15 SL",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 398.94
+  },
+  {
+    "odoo_id": 2443,
+    "name": "FERSAN SNP - 3445",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 2213,
+    "name": "FERSAN SNP 3280-IC",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 885,
+    "name": "FERSAN SNP 3281-IC",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 2115,
+    "name": "FERTICA ( FERTICOMPLEX ) 15-03-28+S",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 48.5
+  },
+  {
+    "odoo_id": 2179,
+    "name": "FERTICA 12-11-18+ME",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 1915,
+    "name": "FERTICA 15-1,5-25-3,5-0,25 (B)",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 48.31
+  },
+  {
+    "odoo_id": 470,
+    "name": "FINALES",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 685.8000000000001
+  },
+  {
+    "odoo_id": 471,
+    "name": "FLORIMAX ECO",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 633.22
+  },
+  {
+    "odoo_id": 2048,
+    "name": "FOGON 36 SL",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 150.02
+  },
+  {
+    "odoo_id": 884,
+    "name": "FOSFATO MONOAMONICO (MAP) GRANULAR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 66.51
+  },
+  {
+    "odoo_id": 881,
+    "name": "FOSFATO MONOAMONICO (MAP) HIDROSOLUBLE",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 113.15
+  },
+  {
+    "odoo_id": 958,
+    "name": "FOSFATO MONOPOTASICO (MKP)",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 124.32000000000001
+  },
+  {
+    "odoo_id": 472,
+    "name": "FUNCLORAZ",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 1079.48
+  },
+  {
+    "odoo_id": 473,
+    "name": "GARLITROL FORTE",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 1361.45
+  },
+  {
+    "odoo_id": 1222,
+    "name": "GF-120 SUCCESS",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 1226.14
+  },
+  {
+    "odoo_id": 1190,
+    "name": "GLIFOKING 35.6 SL",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 870.84
+  },
+  {
+    "odoo_id": 1423,
+    "name": "GLIFOMATE PLUS",
+    "code": "",
+    "category_odoo": "HERBICIDA / HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 157.25
+  },
+  {
+    "odoo_id": 1585,
+    "name": "GLIFOSAN",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 176.56
+  },
+  {
+    "odoo_id": 1420,
+    "name": "GLUFOSIN 20 SL",
+    "code": "",
+    "category_odoo": "HERBICIDA / GLUFOSINATO DE AMONIO",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 163.58
+  },
+  {
+    "odoo_id": 2379,
+    "name": "GLUFOX 20 AS",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 995,
+    "name": "GRAP STPRO",
+    "code": "",
+    "category_odoo": "REGULADOR HORMONAL ",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 4307.0
+  },
+  {
+    "odoo_id": 1486,
+    "name": "GRAP SUPER GUN",
+    "code": "",
+    "category_odoo": "COADYUVANTE",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 1747.49
+  },
+  {
+    "odoo_id": 1883,
+    "name": "HADDAK PLUS",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 1803.39
+  },
+  {
+    "odoo_id": 2381,
+    "name": "HD CUPROMIX",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 528,
+    "name": "Hilo, aceite, limas, goteros, sacos, boquillas.",
+    "code": "",
+    "category_odoo": "Otros gastos 8%",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 208.70000000000002
+  },
+  {
+    "odoo_id": 999,
+    "name": "IMPULX",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 1923.1100000000001
+  },
+  {
+    "odoo_id": 474,
+    "name": "INIMECTIN 1.8 EC",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 759.52
+  },
+  {
+    "odoo_id": 475,
+    "name": "KELPAK",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 683.19
+  },
+  {
+    "odoo_id": 1888,
+    "name": "KIYON 25 SC",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 1386.0
+  },
+  {
+    "odoo_id": 476,
+    "name": "LOWICK",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 890.8000000000001
+  },
+  {
+    "odoo_id": 992,
+    "name": "MANNIPLEX B-MOLY",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 522.72
+  },
+  {
+    "odoo_id": 991,
+    "name": "MANNIPLEX ZN",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 534.32
+  },
+  {
+    "odoo_id": 2114,
+    "name": "MARINE SYMBIOTIC",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 950.0
+  },
+  {
+    "odoo_id": 2410,
+    "name": "MARITIME",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 1552,
+    "name": "MAS RAIZ",
+    "code": "",
+    "category_odoo": "ENRAIZADOR",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 348.16
+  },
+  {
+    "odoo_id": 1288,
+    "name": "MASTERCOP",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 2057.92
+  },
+  {
+    "odoo_id": 1884,
+    "name": "MASVITAL",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 156.24
+  },
+  {
+    "odoo_id": 477,
+    "name": "MERTECT",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 4098.53
+  },
+  {
+    "odoo_id": 478,
+    "name": "METALOSATE BORO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 1492.31
+  },
+  {
+    "odoo_id": 479,
+    "name": "METALOSATE POTASIO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 1292.26
+  },
+  {
+    "odoo_id": 480,
+    "name": "METALOSATE ZIN",
+    "code": "",
+    "category_odoo": "FERTILIZANTE / FERTILIZANTE LIQUIDO A BASE DE ZINC",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 1195.02
+  },
+  {
+    "odoo_id": 1586,
+    "name": "METHOMIL ORUKING",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "Kg",
+    "costo": 948.1
+  },
+  {
+    "odoo_id": 481,
+    "name": "MICROESSENTIALS",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 56.980000000000004
+  },
+  {
+    "odoo_id": 2476,
+    "name": "Mant. maquinaria y equpios",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 2477,
+    "name": "Mantenimiento Local",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 612,
+    "name": "Material Gastable oficina",
+    "code": "",
+    "category_odoo": "Material Gastable oficina",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 2080,
+    "name": "Materiales para Riego",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 482,
+    "name": "NATUFRUIT",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 437.13
+  },
+  {
+    "odoo_id": 483,
+    "name": "NATURAMIN WSP",
+    "code": "",
+    "category_odoo": "AMINOACIDOS",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 1121.28
+  },
+  {
+    "odoo_id": 484,
+    "name": "NATURCOMPLE G",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 94.05
+  },
+  {
+    "odoo_id": 485,
+    "name": "NATURFOS",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 396.72
+  },
+  {
+    "odoo_id": 486,
+    "name": "NATURMIX L",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 453.6
+  },
+  {
+    "odoo_id": 487,
+    "name": "NATURQUEL FE EVOLUTION",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 851.0
+  },
+  {
+    "odoo_id": 488,
+    "name": "NATURQUEL-CA/B",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 321.47
+  },
+  {
+    "odoo_id": 489,
+    "name": "NATURVITAL PLUS",
+    "code": "",
+    "category_odoo": "AMINOACIDOS",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 261.39
+  },
+  {
+    "odoo_id": 1255,
+    "name": "NITRATO DE AMONIO CRISTALINO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE / ABONO HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 51.03
+  },
+  {
+    "odoo_id": 997,
+    "name": "NITRATO DE AMONIO GRANULAR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 45.37
+  },
+  {
+    "odoo_id": 889,
+    "name": "NITRATO DE CALCIO CRISTAL",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 36.54
+  },
+  {
+    "odoo_id": 890,
+    "name": "NITRATO DE CALCIO GRANULAR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 56.58
+  },
+  {
+    "odoo_id": 891,
+    "name": "NITRATO DE POTASIO GRANULAR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 61.78
+  },
+  {
+    "odoo_id": 490,
+    "name": "NITRATO DE POTASIO HIDROSOLUBLE",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 65.42
+  },
+  {
+    "odoo_id": 491,
+    "name": "NORDOX 7 WG",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "Kg",
+    "costo": 1416.9
+  },
+  {
+    "odoo_id": 1553,
+    "name": "NUFOS",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 510.0
+  },
+  {
+    "odoo_id": 887,
+    "name": "NUTRIMON 15-4-23",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 48.65
+  },
+  {
+    "odoo_id": 888,
+    "name": "NUTRIMON 17-6-18",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 53.83
+  },
+  {
+    "odoo_id": 1948,
+    "name": "NUTRIMON PRODUMON 12-8-24",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 52.67
+  },
+  {
+    "odoo_id": 493,
+    "name": "ORSILIK",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 63.01
+  },
+  {
+    "odoo_id": 1887,
+    "name": "ORUKING 90 SP ( METOMIL )",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "Kg",
+    "costo": 1171.8
+  },
+  {
+    "odoo_id": 1090,
+    "name": "OXIDO DE ZINC ( 0X ZINC RAPIZINC )",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 53.99
+  },
+  {
+    "odoo_id": 2380,
+    "name": "PANDA 32.5 SC",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 494,
+    "name": "PERLI HUMUS",
+    "code": "",
+    "category_odoo": "ACONDICIONADOR DE SUELOS",
+    "tipo_erp": "OTRO",
+    "uom": "Kg",
+    "costo": 56.0
+  },
+  {
+    "odoo_id": 495,
+    "name": "PH 4",
+    "code": "",
+    "category_odoo": "ACONDICIONADOR DE AGUA ",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 497.07
+  },
+  {
+    "odoo_id": 496,
+    "name": "PH OK",
+    "code": "",
+    "category_odoo": "ACONDICIONADOR DE AGUA ",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 379.68
+  },
+  {
+    "odoo_id": 2146,
+    "name": "PH PLUS",
+    "code": "",
+    "category_odoo": "COADYUVANTE / CORRECTOR DE PH",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 397.06
+  },
+  {
+    "odoo_id": 497,
+    "name": "PHYTO ROOT",
+    "code": "",
+    "category_odoo": "ENRAIZADOR",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 1143.29
+  },
+  {
+    "odoo_id": 498,
+    "name": "PIRIFOS",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 591.5500000000001
+  },
+  {
+    "odoo_id": 1786,
+    "name": "PLENIFLOR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 822.8000000000001
+  },
+  {
+    "odoo_id": 1354,
+    "name": "PONTESATO 35.6 SL",
+    "code": "",
+    "category_odoo": "HERBICIDA / HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 180.58
+  },
+  {
+    "odoo_id": 499,
+    "name": "PREVALOR 84 SL",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 2379.07
+  },
+  {
+    "odoo_id": 2312,
+    "name": "PROBORATE",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 379.85
+  },
+  {
+    "odoo_id": 500,
+    "name": "PROMESOL 5X",
+    "code": "",
+    "category_odoo": "ACONDICIONADOR DE SUELOS",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 401.2
+  },
+  {
+    "odoo_id": 501,
+    "name": "PROMOSTART",
+    "code": "",
+    "category_odoo": "FERTILIZANTE FOLIAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 313.16
+  },
+  {
+    "odoo_id": 502,
+    "name": "PRONTO",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 1278.14
+  },
+  {
+    "odoo_id": 1453,
+    "name": "PURE NITRO",
+    "code": "",
+    "category_odoo": "BIOESTIMULANTE",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 524.48
+  },
+  {
+    "odoo_id": 503,
+    "name": "PYTAVIT MZ 72 WP",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "Kg",
+    "costo": 600.0
+  },
+  {
+    "odoo_id": 2245,
+    "name": "Pintura para poda",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "unidad",
+    "costo": 0.0
+  },
+  {
+    "odoo_id": 504,
+    "name": "RADI GROW 7 SL",
+    "code": "",
+    "category_odoo": "ENRAIZADOR",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 852.39
+  },
+  {
+    "odoo_id": 505,
+    "name": "RAIZA",
+    "code": "",
+    "category_odoo": "ENRAIZADOR",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "L",
+    "costo": 932.35
+  },
+  {
+    "odoo_id": 506,
+    "name": "REGNUM 25 EC",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "L",
+    "costo": 4539.0
+  },
+  {
+    "odoo_id": 1982,
+    "name": "REGULADOR DE PH",
+    "code": "",
+    "category_odoo": "COADYUVANTE",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 363.90000000000003
+  },
+  {
+    "odoo_id": 507,
+    "name": "RELEVO",
+    "code": "",
+    "category_odoo": "FITOSANITARIO / INSECTICIDAS",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 3932.79
+  },
+  {
+    "odoo_id": 996,
+    "name": "RESILIENT 25 SC",
+    "code": "PACLOBUTRAZOL",
+    "category_odoo": "REGULADOR HORMONAL ",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 1475.0
+  },
+  {
+    "odoo_id": 508,
+    "name": "RIDOZEB 72 WP",
+    "code": "",
+    "category_odoo": "FUNGICIDA",
+    "tipo_erp": "FUNGICIDAS",
+    "uom": "Kg",
+    "costo": 646.97
+  },
+  {
+    "odoo_id": 925,
+    "name": "RIPPER ULTRA",
+    "code": "",
+    "category_odoo": "HERBICIDA",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 208.44
+  },
+  {
+    "odoo_id": 509,
+    "name": "ROOT FREE DRY",
+    "code": "",
+    "category_odoo": "ENRAIZADOR",
+    "tipo_erp": "BIOESTIMULANTE",
+    "uom": "Kg",
+    "costo": 270.44
+  },
+  {
+    "odoo_id": 510,
+    "name": "SELECTO",
+    "code": "",
+    "category_odoo": "REGULADOR HORMONAL ",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 1631.52
+  },
+  {
+    "odoo_id": 1885,
+    "name": "SELEX 20 AS ( GLUFOSINATO DE AMONIO )",
+    "code": "",
+    "category_odoo": "Todos los productos",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 147.42000000000002
+  },
+  {
+    "odoo_id": 511,
+    "name": "SEVIN",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "Kg",
+    "costo": 1419.4
+  },
+  {
+    "odoo_id": 2047,
+    "name": "SILEX 20 AS",
+    "code": "",
+    "category_odoo": "HERBICIDA / GLUFOSINATO DE AMONIO",
+    "tipo_erp": "HERBICIDA",
+    "uom": "L",
+    "costo": 140.48
+  },
+  {
+    "odoo_id": 1387,
+    "name": "SM6 X",
+    "code": "",
+    "category_odoo": "FERTILIZANTE / REGULADOR DE CRECIMIENTO",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "L",
+    "costo": 926.73
+  },
+  {
+    "odoo_id": 512,
+    "name": "SPINTOR",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 13270.92
+  },
+  {
+    "odoo_id": 513,
+    "name": "SPRAY FIX",
+    "code": "",
+    "category_odoo": "COADYUVANTE",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 926.57
+  },
+  {
+    "odoo_id": 514,
+    "name": "SPREADER",
+    "code": "",
+    "category_odoo": "COADYUVANTE",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 313.34000000000003
+  },
+  {
+    "odoo_id": 515,
+    "name": "STIMULATE",
+    "code": "",
+    "category_odoo": "REGULADOR HORMONAL ",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 3198.08
+  },
+  {
+    "odoo_id": 883,
+    "name": "SULFATO DE AMONIO CRISTALINO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 26.13
+  },
+  {
+    "odoo_id": 766,
+    "name": "SULFATO DE AMONIO GRANULAR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE / FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 30.900000000000002
+  },
+  {
+    "odoo_id": 516,
+    "name": "SULFATO DE MAGNESIO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 34.05
+  },
+  {
+    "odoo_id": 517,
+    "name": "SULFATO DE POTASIO",
+    "code": "",
+    "category_odoo": "FERTILIZANTE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 61.940000000000005
+  },
+  {
+    "odoo_id": 998,
+    "name": "SULFATO DE POTASIO GRANULAR",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 75.84
+  },
+  {
+    "odoo_id": 518,
+    "name": "SULFATO DE ZIN",
+    "code": "",
+    "category_odoo": "FERTILIZANTE HIDROSOLUBLE",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 123.67
+  },
+  {
+    "odoo_id": 519,
+    "name": "SUNRROUD",
+    "code": "",
+    "category_odoo": "PROTECTOR SOLAR",
+    "tipo_erp": "OTRO",
+    "uom": "Kg",
+    "costo": 147.64000000000001
+  },
+  {
+    "odoo_id": 1421,
+    "name": "SURFACID",
+    "code": "",
+    "category_odoo": "COADYUVANTE / CORRECTOR DE PH",
+    "tipo_erp": "OTRO",
+    "uom": "L",
+    "costo": 557.0
+  },
+  {
+    "odoo_id": 520,
+    "name": "TRITEK 80 EO",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 374.82
+  },
+  {
+    "odoo_id": 1321,
+    "name": "TYSON 48 EC",
+    "code": "",
+    "category_odoo": "INSECTICIDA",
+    "tipo_erp": "INSECTICIDAS",
+    "uom": "L",
+    "costo": 388.05
+  },
+  {
+    "odoo_id": 882,
+    "name": "UREA",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 37.06
+  },
+  {
+    "odoo_id": 521,
+    "name": "UREAM",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 34.19
+  },
+  {
+    "odoo_id": 993,
+    "name": "XCYTE",
+    "code": "",
+    "category_odoo": "REGULADOR DE CRECIMIENTO",
+    "tipo_erp": "REGULADOR HORMONAL",
+    "uom": "L",
+    "costo": 2079.0
+  },
+  {
+    "odoo_id": 492,
+    "name": "agrgar",
+    "code": "",
+    "category_odoo": "FERTILIZANTE GRANULAR",
+    "tipo_erp": "FERTILIZANTE",
+    "uom": "Kg",
+    "costo": 56.31
+  }
+]

@@ -1,0 +1,295 @@
+from pydantic import BaseModel, EmailStr
+from typing import Optional, List
+from datetime import datetime
+
+
+# Auth
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+# Usuario
+class UsuarioCreate(BaseModel):
+    nombre: str
+    email: str
+    password: str
+    rol: str = "operador"
+
+class UsuarioOut(BaseModel):
+    id: int
+    nombre: str
+    email: str
+    rol: str
+    activo: bool
+    class Config:
+        from_attributes = True
+
+# Campo
+class CampoCreate(BaseModel):
+    id_campo: str
+    bloque: Optional[str] = None
+    nombre: Optional[str] = None
+    area_ha: Optional[float] = None
+    n_plantas: Optional[int] = None
+    variedad: str = "Hass"
+    ano_siembra: Optional[int] = None
+    sistema_riego: Optional[str] = None
+    etapa: Optional[str] = None
+    suelo: Optional[str] = None
+
+class CampoOut(CampoCreate):
+    id: int
+    activo: bool
+    class Config:
+        from_attributes = True
+
+# Trabajador
+class TrabajadorCreate(BaseModel):
+    id_trab: str
+    nombre: str
+    cargo: Optional[str] = None
+    costo_hora: float = 62.50
+    observaciones: Optional[str] = None
+
+class TrabajadorOut(TrabajadorCreate):
+    id: int
+    activo: bool
+    class Config:
+        from_attributes = True
+
+# Actividad
+class ActividadCreate(BaseModel):
+    id_act: str
+    actividad: str
+    tipo: Optional[str] = None
+    unidad_rendimiento: Optional[str] = None
+    kpi_principal: Optional[str] = None
+    tarifa_jornada: Optional[float] = None
+    tarifa_ajuste: Optional[float] = None
+
+class ActividadOut(ActividadCreate):
+    id: int
+    activo: bool
+    class Config:
+        from_attributes = True
+
+# Producto
+class ProductoCreate(BaseModel):
+    id_prod: str
+    producto: str
+    tipo: Optional[str] = None
+    unidad: Optional[str] = None
+    costo_unitario: Optional[float] = None
+    costo_promedio: Optional[float] = None
+    stock_actual: float = 0
+    stock_minimo: float = 0
+    stock_maximo: Optional[float] = None
+    proveedor: Optional[str] = None
+    concentracion: Optional[str] = None
+    es_inventariable: bool = True
+
+class ProductoOut(ProductoCreate):
+    id: int
+    activo: bool
+    valor_inventario: Optional[float] = None
+    es_inventariable: bool = True
+    class Config:
+        from_attributes = True
+
+    @classmethod
+    def from_orm_with_value(cls, p):
+        obj = cls.model_validate(p)
+        cp = p.costo_promedio or p.costo_unitario or 0
+        obj.valor_inventario = round((p.stock_actual or 0) * cp, 2)
+        return obj
+
+# OT Mano Obra
+class OTManoObraCreate(BaseModel):
+    trabajador_id: str
+    fecha: Optional[datetime] = None
+    hora_inicio: Optional[str] = None
+    hora_fin: Optional[str] = None
+    pausa_min: int = 0
+    horas_netas: Optional[float] = None
+    modalidad: str = "Jornada"
+    costo_hora: Optional[float] = None
+    costo_mo: Optional[float] = None
+
+class OTManoObraOut(OTManoObraCreate):
+    id: int
+    ot_id: int
+    class Config:
+        from_attributes = True
+
+# OT Detalle
+class OTDetalleCreate(BaseModel):
+    producto_id: str
+    fecha: Optional[datetime] = None
+    cantidad_usada: Optional[float] = None
+    cantidad_tanque: Optional[float] = None
+    unidad: Optional[str] = None
+    costo_unitario: Optional[float] = None
+    costo_real: Optional[float] = None
+    observacion: Optional[str] = None
+
+class OTDetalleOut(OTDetalleCreate):
+    id: int
+    ot_id: int
+    class Config:
+        from_attributes = True
+
+# Orden Trabajo
+class OrdenTrabajoCreate(BaseModel):
+    ot_id: Optional[int] = None
+    fecha_ejecucion: Optional[datetime] = None
+    hora_inicio: Optional[str] = None
+    campo_id: str
+    actividad_id: str
+    supervisor: Optional[str] = None
+    estado: str = "Abierta"
+    equipo: Optional[str] = None
+    horas_equipo: Optional[float] = None
+    tarifa_equipo: Optional[float] = None
+    observaciones: Optional[str] = None
+    mano_obra: Optional[List[OTManoObraCreate]] = []
+    detalles: Optional[List[OTDetalleCreate]] = []
+
+class OrdenTrabajoOut(BaseModel):
+    id: int
+    ot_id: int
+    fecha_ejecucion: Optional[datetime]
+    hora_inicio: Optional[str]
+    campo_id: Optional[str]
+    actividad_id: Optional[str]
+    supervisor: Optional[str]
+    estado: str
+    equipo: Optional[str]
+    costo_insumos: float
+    costo_mano_obra: float
+    costo_equipo: Optional[float]
+    costo_total: float
+    costo_ha: Optional[float]
+    horas_mo: Optional[float]
+    observaciones: Optional[str]
+    hora_cierre: Optional[str]
+    creado_en: Optional[datetime]
+    class Config:
+        from_attributes = True
+
+# Movimiento Inventario — schemas legacy (compatibilidad OT)
+class MovimientoCreate(BaseModel):
+    producto_id: str
+    tipo: str  # entrada, salida
+    cantidad: float
+    costo_unitario: Optional[float] = None
+    referencia: Optional[str] = None
+    observacion: Optional[str] = None
+
+class MovimientoOut(BaseModel):
+    id: int
+    producto_id: str
+    tipo_doc: Optional[str] = None
+    tipo: Optional[str] = None
+    motivo: Optional[str] = None
+    cantidad: float
+    costo_unitario: Optional[float] = None
+    costo_promedio_post: Optional[float] = None
+    stock_post: Optional[float] = None
+    lote: Optional[str] = None
+    vencimiento: Optional[datetime] = None
+    proveedor: Optional[str] = None
+    num_factura: Optional[str] = None
+    referencia: Optional[str] = None
+    observacion: Optional[str] = None
+    fecha: datetime
+    usuario_id: Optional[int] = None
+    class Config:
+        from_attributes = True
+
+# Inventario SAP B1-style document schemas
+class GRCreate(BaseModel):
+    """Goods Receipt — Entrada de Mercancía"""
+    producto_id: str
+    cantidad: float
+    precio_compra: float               # precio unitario de compra (actualiza costo promedio)
+    proveedor: Optional[str] = None
+    num_factura: Optional[str] = None
+    lote: Optional[str] = None
+    vencimiento: Optional[datetime] = None
+    fecha: Optional[datetime] = None
+    observacion: Optional[str] = None
+    orden_compra_id: Optional[str] = None  # OC-0001
+
+class GICreate(BaseModel):
+    """Goods Issue — Salida de Mercancía"""
+    producto_id: str
+    cantidad: float
+    motivo: str  # Merma, Vencimiento, Devolucion, Muestra, Uso No Productivo, Consumo OT, Otro
+    referencia: Optional[str] = None
+    fecha: Optional[datetime] = None
+    observacion: Optional[str] = None
+    ot_id: Optional[int] = None  # Orden de trabajo vinculada
+
+class AjusteCreate(BaseModel):
+    """Ajuste de Inventario — Recuento Físico"""
+    producto_id: str
+    cantidad_contada: float            # lo que se contó físicamente
+    observacion: Optional[str] = None
+    fecha: Optional[datetime] = None
+
+# Dashboard
+class DashboardStats(BaseModel):
+    total_campos: int
+    total_trabajadores: int
+    total_productos: int
+    ordenes_abiertas: int
+    ordenes_mes: int
+    costo_mo_mes: float
+    costo_insumos_mes: float
+    costo_total_mes: float
+    productos_bajo_stock: int
+
+# Orden de Compra
+class OCLineaCreate(BaseModel):
+    producto_id: str
+    cantidad: float
+    precio_unitario: float
+
+class OCLineaOut(BaseModel):
+    id: int
+    oc_id: str
+    producto_id: str
+    cantidad: float
+    cantidad_recibida: float
+    precio_unitario: float
+    subtotal: float
+    class Config:
+        from_attributes = True
+
+class OrdenCompraCreate(BaseModel):
+    fecha: Optional[datetime] = None
+    proveedor: Optional[str] = None
+    campo_id: Optional[str] = None
+    observaciones: Optional[str] = None
+    lineas: List[OCLineaCreate] = []
+
+class OrdenCompraOut(BaseModel):
+    id: int
+    oc_id: str
+    fecha: Optional[datetime]
+    proveedor: Optional[str]
+    campo_id: Optional[str] = None
+    estado: str
+    total_estimado: float
+    total_recibido: Optional[float] = 0
+    num_factura: Optional[str] = None
+    fecha_recepcion: Optional[datetime] = None
+    observaciones: Optional[str]
+    creado_en: Optional[datetime]
+    class Config:
+        from_attributes = True

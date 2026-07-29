@@ -1,0 +1,11 @@
+# ERP Finca Aguacates CORVUS — Python dependencies
+fastapi>=0.115
+uvicorn>=0.34
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7
+python-multipart>=0.0.9
+pydantic[email]>=2.0
+openpyxl>=3.1
+requests>=2.31
