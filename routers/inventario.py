@@ -108,7 +108,7 @@ def list_articulos(db: Session = Depends(get_db), _=Depends(auth.get_current_use
 
 
 @router.post("/articulos", response_model=schemas.ProductoOut)
-def create_articulo(data: schemas.ProductoCreate, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+def create_articulo(data: schemas.ProductoCreate, db: Session = Depends(get_db), _=Depends(auth.require_operador)):
     d = data.model_dump()
     if not d.get("id_prod"):
         d["id_prod"] = get_next("PROD", db)
