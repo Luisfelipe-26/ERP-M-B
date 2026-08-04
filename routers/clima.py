@@ -623,6 +623,177 @@ def sync_weather(
     }
 
 
+# ──────────────────── 4b. Sync from client ────────────────────
+
+@router.post("/sync-from-client")
+def sync_from_client(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(auth.require_supervisor),
+):
+    """Receive hourly data already fetched by the frontend and store it."""
+    hourly = payload.get("hourly", {})
+    times = hourly.get("time", [])
+    if not times:
+        raise HTTPException(400, "No hourly data provided")
+
+    first_date = datetime.fromisoformat(times[0]).date()
+    last_date = datetime.fromisoformat(times[-1]).date()
+
+    db.query(models.WeatherReading).filter(
+        models.WeatherReading.recorded_at >= str(first_date),
+        models.WeatherReading.recorded_at <= str(last_date) + "T23:59:59",
+        models.WeatherReading.source == "api",
+    ).delete(synchronize_session=False)
+
+    readings_count = 0
+    for i, t in enumerate(times):
+        temp = hourly.get("temperature_2m", [None])[i]
+        hum = hourly.get("relative_humidity_2m", [None])[i]
+        rain = hourly.get("precipitation", [None])[i]
+        wind = hourly.get("wind_speed_10m", [None])[i]
+        wdir = hourly.get("wind_direction_10m", [None])[i]
+        gust = hourly.get("wind_gusts_10m", [None])[i]
+        uv = hourly.get("uv_index", [None])[i]
+        et0 = hourly.get("et0_fao_evapotranspiration", [None])[i]
+
+        vpd = _calc_vpd(temp or 25, hum or 70) if temp is not None and hum is not None else None
+
+        reading = models.WeatherReading(
+            recorded_at=datetime.fromisoformat(t),
+            source="api",
+            station_code="open_meteo",
+            temperature_c=temp,
+            humidity_pct=hum,
+            rainfall_mm=rain,
+            wind_speed_kmh=wind,
+            wind_direction_deg=int(wdir) if wdir is not None else None,
+            wind_gust_kmh=gust,
+            uv_index=uv,
+            et0_mm=et0,
+            vpd_kpa=vpd,
+        )
+        db.add(reading)
+        readings_count += 1
+
+    db.flush()
+
+    days_processed = 0
+    summaries = []
+    current_day = first_date
+    while current_day <= last_date:
+        day_start = datetime.combine(current_day, datetime.min.time())
+        day_end = datetime.combine(current_day, datetime.max.time())
+
+        day_readings = (
+            db.query(models.WeatherReading)
+            .filter(
+                models.WeatherReading.recorded_at >= day_start,
+                models.WeatherReading.recorded_at <= day_end,
+                models.WeatherReading.source == "api",
+            )
+            .all()
+        )
+
+        if not day_readings:
+            current_day += timedelta(days=1)
+            continue
+
+        temps = [r.temperature_c for r in day_readings if r.temperature_c is not None]
+        hums = [r.humidity_pct for r in day_readings if r.humidity_pct is not None]
+        rains = [r.rainfall_mm or 0 for r in day_readings]
+        winds = [r.wind_speed_kmh for r in day_readings if r.wind_speed_kmh is not None]
+        gusts = [r.wind_gust_kmh for r in day_readings if r.wind_gust_kmh is not None]
+        uvs = [r.uv_index for r in day_readings if r.uv_index is not None]
+        et0s = [r.et0_mm or 0 for r in day_readings]
+
+        temp_min = min(temps) if temps else None
+        temp_max = max(temps) if temps else None
+        temp_avg = round(sum(temps) / len(temps), 1) if temps else None
+        rain_total = round(sum(rains), 1)
+
+        gdd = max(0, (temp_avg or 10) - 10) if temp_avg is not None else 0
+        frost_hrs = sum(1 for t in temps if t < 2)
+        heat_hrs = sum(1 for t in temps if t > 35)
+
+        anthrac_hours = sum(
+            1 for r in day_readings
+            if r.humidity_pct is not None and r.humidity_pct > 85
+            and r.temperature_c is not None and 20 <= r.temperature_c <= 28
+        )
+        anthrac_risk = min(10, round(anthrac_hours / 2.4, 1))
+
+        phyto_temp_hours = sum(
+            1 for r in day_readings
+            if r.temperature_c is not None and 25 <= r.temperature_c <= 30
+        )
+        phyto_risk = 0.0
+        if rain_total > 20 and phyto_temp_hours > 0:
+            phyto_risk = min(10, round((rain_total / 10) * (phyto_temp_hours / 6), 1))
+
+        vpds = [r.vpd_kpa for r in day_readings if r.vpd_kpa is not None]
+        vpd_avg = round(sum(vpds) / len(vpds), 2) if vpds else None
+
+        existing = (
+            db.query(models.WeatherDailySummary)
+            .filter(
+                sqlfunc.date(models.WeatherDailySummary.date) == current_day,
+                models.WeatherDailySummary.station_code == "open_meteo",
+            )
+            .first()
+        )
+
+        if existing:
+            summary = existing
+        else:
+            summary = models.WeatherDailySummary(
+                date=day_start,
+                station_code="open_meteo",
+            )
+            db.add(summary)
+
+        summary.temp_min = temp_min
+        summary.temp_max = temp_max
+        summary.temp_avg = temp_avg
+        summary.humidity_min = min(hums) if hums else None
+        summary.humidity_max = max(hums) if hums else None
+        summary.humidity_avg = round(sum(hums) / len(hums), 1) if hums else None
+        summary.rainfall_total_mm = rain_total
+        summary.wind_avg_kmh = round(sum(winds) / len(winds), 1) if winds else None
+        summary.wind_max_gust_kmh = max(gusts) if gusts else None
+        summary.uv_max = max(uvs) if uvs else None
+        summary.et0_mm = round(sum(et0s), 2)
+        summary.gdd_base10 = round(gdd, 1)
+        summary.frost_hours = frost_hrs
+        summary.heat_stress_hours = heat_hrs
+        summary.vpd_avg = vpd_avg
+        summary.anthracnose_risk = anthrac_risk
+        summary.phytophthora_risk = phyto_risk
+
+        summaries.append((current_day, summary))
+        days_processed += 1
+        current_day += timedelta(days=1)
+
+    sorted_summaries = sorted(summaries, key=lambda x: x[0])
+    running_gdd = 0.0
+    for _, s in sorted_summaries:
+        running_gdd += s.gdd_base10 or 0
+        s.gdd_cumulative = round(running_gdd, 1)
+
+    audit.log(db, current_user, 'CREAR', 'WEATHER_SYNC', str(first_date),
+              f"Sync client {first_date}→{last_date}: {readings_count} lecturas, {days_processed} días")
+
+    db.commit()
+
+    _evaluate_alerts(db)
+
+    return {
+        "message": "Sincronización completada",
+        "readings_stored": readings_count,
+        "days_summarized": days_processed,
+    }
+
+
 # ──────────────────── 5. Alerts ────────────────────
 
 @router.get("/alerts")
