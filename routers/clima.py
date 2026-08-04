@@ -42,7 +42,7 @@ def _cached_fetch(url: str, ttl_seconds: int = 900) -> dict:
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "ERP-Finca/1.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read().decode())
                 _cache[url] = (now, data)
                 return data
@@ -97,9 +97,10 @@ def _calc_vpd(temp_c: float, humidity_pct: float) -> float:
 
 @router.get("/current")
 def get_current_weather(
+    db: Session = Depends(get_db),
     _user=Depends(auth.get_current_user),
 ):
-    """Fetch current weather from Open-Meteo API (cached 15 min)."""
+    """Fetch current weather from Open-Meteo API (cached 15 min), fallback to DB."""
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={LAT}&longitude={LON}"
@@ -108,25 +109,41 @@ def get_current_weather(
         f"&timezone={TZ}"
     )
     try:
-        data = _cached_fetch(url, ttl_seconds=900)  # 15 min cache
-    except Exception as e:
-        raise HTTPException(502, str(e))
-
-    c = data.get("current", {})
-    return {
-        "timestamp": c.get("time"),
-        "temperature_c": c.get("temperature_2m"),
-        "humidity_pct": c.get("relative_humidity_2m"),
-        "precipitation_mm": c.get("precipitation"),
-        "wind_speed_kmh": c.get("wind_speed_10m"),
-        "wind_direction_deg": c.get("wind_direction_10m"),
-        "wind_gust_kmh": c.get("wind_gusts_10m"),
-        "uv_index": c.get("uv_index"),
-        "vpd_kpa": _calc_vpd(
-            c.get("temperature_2m", 25),
-            c.get("relative_humidity_2m", 70),
-        ),
-    }
+        data = _cached_fetch(url, ttl_seconds=900)
+        c = data.get("current", {})
+        return {
+            "timestamp": c.get("time"),
+            "temperature_c": c.get("temperature_2m"),
+            "humidity_pct": c.get("relative_humidity_2m"),
+            "precipitation_mm": c.get("precipitation"),
+            "wind_speed_kmh": c.get("wind_speed_10m"),
+            "wind_direction_deg": c.get("wind_direction_10m"),
+            "wind_gust_kmh": c.get("wind_gusts_10m"),
+            "uv_index": c.get("uv_index"),
+            "vpd_kpa": _calc_vpd(
+                c.get("temperature_2m", 25),
+                c.get("relative_humidity_2m", 70),
+            ),
+            "source": "api",
+        }
+    except Exception:
+        latest = db.query(models.WeatherReading).order_by(
+            desc(models.WeatherReading.recorded_at)
+        ).first()
+        if not latest:
+            raise HTTPException(502, "No se pudo obtener datos del clima y no hay lecturas en la base de datos")
+        return {
+            "timestamp": latest.recorded_at.isoformat() if latest.recorded_at else None,
+            "temperature_c": latest.temperature_c,
+            "humidity_pct": latest.humidity_pct,
+            "precipitation_mm": latest.rainfall_mm,
+            "wind_speed_kmh": latest.wind_speed_kmh,
+            "wind_direction_deg": latest.wind_direction_deg,
+            "wind_gust_kmh": latest.wind_gust_kmh,
+            "uv_index": latest.uv_index,
+            "vpd_kpa": latest.vpd_kpa,
+            "source": "db_fallback",
+        }
 
 
 # ──────────────────── 2. 7-day Forecast ────────────────────
