@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import time
 import urllib.request
 from datetime import datetime, date, timedelta
 from typing import Optional
@@ -23,6 +24,42 @@ router = APIRouter(prefix="/api/clima", tags=["clima"])
 LAT = float(os.environ.get('FARM_LAT', '18.49'))
 LON = float(os.environ.get('FARM_LON', '-69.98'))
 TZ = os.environ.get('FARM_TZ', "America/Santo_Domingo")
+
+# ════════════════════ Cache & Rate Limiting ════════════════════
+
+_cache = {}  # { "url": (timestamp, data) }
+
+def _cached_fetch(url: str, ttl_seconds: int = 900) -> dict:
+    """Fetch JSON with in-memory cache. 429 errors get retry with backoff."""
+    now = time.time()
+    if url in _cache:
+        cached_at, cached_data = _cache[url]
+        if now - cached_at < ttl_seconds:
+            return cached_data
+
+    # Retry with exponential backoff for rate limits
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ERP-Finca/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                _cache[url] = (now, data)
+                return data
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_retries - 1:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                time.sleep(wait)
+                continue
+            raise Exception(f"HTTP Error {e.code}: {e.reason}")
+        except Exception as e:
+            raise Exception(f"Error al consultar Open-Meteo: {e}")
+
+    raise Exception("Error al consultar Open-Meteo: demasiados intentos")
+
+# Sync cooldown — prevent rapid re-syncs
+_last_sync = 0.0
+SYNC_COOLDOWN = 600  # 10 minutes minimum between syncs
 
 
 # ──────────────── date validation helper ────────────────── C1
@@ -49,13 +86,6 @@ class AlertRuleIn(_Base):
 
 # ──────────────────── helpers ────────────────────
 
-def _fetch_json(url: str) -> dict:
-    """Fetch JSON from URL using urllib (no requests needed)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "ERP-Finca/1.0"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode())
-
-
 def _calc_vpd(temp_c: float, humidity_pct: float) -> float:
     """Vapor Pressure Deficit (kPa)."""
     es = 0.6108 * math.exp((17.27 * temp_c) / (temp_c + 237.3))
@@ -69,7 +99,7 @@ def _calc_vpd(temp_c: float, humidity_pct: float) -> float:
 def get_current_weather(
     _user=Depends(auth.get_current_user),
 ):
-    """Fetch current weather from Open-Meteo API."""
+    """Fetch current weather from Open-Meteo API (cached 15 min)."""
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={LAT}&longitude={LON}"
@@ -78,9 +108,9 @@ def get_current_weather(
         f"&timezone={TZ}"
     )
     try:
-        data = _fetch_json(url)
+        data = _cached_fetch(url, ttl_seconds=900)  # 15 min cache
     except Exception as e:
-        raise HTTPException(502, f"Error al consultar Open-Meteo: {e}")
+        raise HTTPException(502, str(e))
 
     c = data.get("current", {})
     return {
@@ -105,7 +135,7 @@ def get_current_weather(
 def get_forecast(
     _user=Depends(auth.get_current_user),
 ):
-    """7-day daily forecast from Open-Meteo."""
+    """7-day daily forecast from Open-Meteo (cached 30 min)."""
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={LAT}&longitude={LON}"
@@ -114,9 +144,9 @@ def get_forecast(
         f"&timezone={TZ}&forecast_days=7"
     )
     try:
-        data = _fetch_json(url)
+        data = _cached_fetch(url, ttl_seconds=1800)  # 30 min cache
     except Exception as e:
-        raise HTTPException(502, f"Error al consultar Open-Meteo: {e}")
+        raise HTTPException(502, str(e))
 
     daily = data.get("daily", {})
     days = []
@@ -184,6 +214,13 @@ def sync_weather(
     db: Session = Depends(get_db),
     current_user=Depends(auth.require_supervisor),
 ):
+    # Check sync cooldown
+    global _last_sync
+    now = time.time()
+    if now - _last_sync < SYNC_COOLDOWN:
+        wait = round(SYNC_COOLDOWN - (now - _last_sync))
+        raise HTTPException(429, f"Sync en cooldown. Espere {wait}s (mínimo {SYNC_COOLDOWN//60} min entre sincronizaciones)")
+
     """Fetch last 7 days hourly data, store in WeatherReading, aggregate into DailySummary."""
     end = date.today()
     start = end - timedelta(days=7)
@@ -198,14 +235,17 @@ def sync_weather(
         f"&start_date={start}&end_date={end}"
     )
     try:
-        data = _fetch_json(url)
+        data = _cached_fetch(url, ttl_seconds=0)  # no cache, retries on 429
     except Exception as e:
-        raise HTTPException(502, f"Error al consultar Open-Meteo: {e}")
+        raise HTTPException(502, str(e))
 
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
     if not times:
         raise HTTPException(404, "No hourly data returned from Open-Meteo")
+
+    # Update last_sync timestamp
+    _last_sync = time.time()
 
     # Delete existing readings in the range to avoid duplicates
     db.query(models.WeatherReading).filter(
