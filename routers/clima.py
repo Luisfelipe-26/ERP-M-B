@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import threading
 import time
 import urllib.request
 from datetime import datetime, date, timedelta
@@ -13,7 +14,7 @@ from pydantic import BaseModel as _Base
 from sqlalchemy.orm import Session
 from sqlalchemy import func as sqlfunc, desc
 
-from database import get_db
+from database import get_db, SessionLocal
 import models
 import auth
 import audit
@@ -24,42 +25,6 @@ router = APIRouter(prefix="/api/clima", tags=["clima"])
 LAT = float(os.environ.get('FARM_LAT', '18.49'))
 LON = float(os.environ.get('FARM_LON', '-69.98'))
 TZ = os.environ.get('FARM_TZ', "America/Santo_Domingo")
-
-# ════════════════════ Cache & Rate Limiting ════════════════════
-
-_cache = {}  # { "url": (timestamp, data) }
-
-def _cached_fetch(url: str, ttl_seconds: int = 900) -> dict:
-    """Fetch JSON with in-memory cache. 429 errors get retry with backoff."""
-    now = time.time()
-    if url in _cache:
-        cached_at, cached_data = _cache[url]
-        if now - cached_at < ttl_seconds:
-            return cached_data
-
-    # Retry with exponential backoff for rate limits
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "ERP-Finca/1.0"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode())
-                _cache[url] = (now, data)
-                return data
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries - 1:
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                time.sleep(wait)
-                continue
-            raise Exception(f"HTTP Error {e.code}: {e.reason}")
-        except Exception as e:
-            raise Exception(f"Error al consultar Open-Meteo: {e}")
-
-    raise Exception("Error al consultar Open-Meteo: demasiados intentos")
-
-# Sync cooldown — prevent rapid re-syncs
-_last_sync = 0.0
-SYNC_COOLDOWN = 600  # 10 minutes minimum between syncs
 
 
 # ──────────────── date validation helper ────────────────── C1
@@ -86,6 +51,13 @@ class AlertRuleIn(_Base):
 
 # ──────────────────── helpers ────────────────────
 
+def _fetch_json(url: str) -> dict:
+    """Fetch JSON from URL using urllib (no requests needed)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "ERP-Finca/1.0"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
+
+
 def _calc_vpd(temp_c: float, humidity_pct: float) -> float:
     """Vapor Pressure Deficit (kPa)."""
     es = 0.6108 * math.exp((17.27 * temp_c) / (temp_c + 237.3))
@@ -93,14 +65,263 @@ def _calc_vpd(temp_c: float, humidity_pct: float) -> float:
     return round(es - ea, 3)
 
 
+# ──────────────────── alert evaluation ────────────────────
+
+def _evaluate_alerts(db_session):
+    rules = db_session.query(models.WeatherAlertRule).filter(
+        models.WeatherAlertRule.is_active == True
+    ).all()
+
+    latest_reading = (
+        db_session.query(models.WeatherReading)
+        .order_by(desc(models.WeatherReading.recorded_at))
+        .first()
+    )
+    if not latest_reading:
+        return 0
+
+    ops = {
+        "gt": lambda v, t: v > t,
+        "gte": lambda v, t: v >= t,
+        "lt": lambda v, t: v < t,
+        "lte": lambda v, t: v <= t,
+    }
+
+    new_alerts = 0
+    now = datetime.now()
+    for rule in rules:
+        actual_value = getattr(latest_reading, rule.variable, None)
+        if actual_value is None:
+            continue
+
+        check = ops.get(rule.condition)
+        if not check:
+            continue
+
+        if not check(actual_value, rule.threshold_value):
+            continue
+
+        last_alert = (
+            db_session.query(models.WeatherAlert)
+            .filter(models.WeatherAlert.rule_id == rule.id)
+            .order_by(desc(models.WeatherAlert.triggered_at))
+            .first()
+        )
+        if last_alert and last_alert.triggered_at:
+            elapsed = (now - last_alert.triggered_at).total_seconds() / 60
+            if elapsed < rule.cooldown_minutes:
+                continue
+
+        alert = models.WeatherAlert(
+            rule_id=rule.id,
+            triggered_at=now,
+            trigger_value=actual_value,
+            severity=rule.severity,
+            message=f"{rule.name}: {rule.variable} = {actual_value} ({rule.condition} {rule.threshold_value})",
+        )
+        db_session.add(alert)
+        new_alerts += 1
+
+    if new_alerts:
+        db_session.commit()
+    print(f"[clima] Alertas generadas: {new_alerts}")
+    return new_alerts
+
+
+# ──────────────────── auto-sync background thread ────────────────────
+
+def _do_sync():
+    db = SessionLocal()
+    try:
+        end = date.today()
+        start = end - timedelta(days=7)
+
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={LAT}&longitude={LON}"
+            f"&hourly=temperature_2m,relative_humidity_2m,precipitation,"
+            f"wind_speed_10m,wind_direction_10m,wind_gusts_10m,"
+            f"uv_index,et0_fao_evapotranspiration"
+            f"&timezone={TZ}"
+            f"&start_date={start}&end_date={end}"
+        )
+        data = _fetch_json(url)
+
+        hourly = data.get("hourly", {})
+        times = hourly.get("time", [])
+        if not times:
+            print("[clima] Auto-sync: no hourly data returned")
+            return
+
+        db.query(models.WeatherReading).filter(
+            models.WeatherReading.recorded_at >= str(start),
+            models.WeatherReading.recorded_at <= str(end) + "T23:59:59",
+            models.WeatherReading.source == "api",
+        ).delete(synchronize_session=False)
+
+        readings_count = 0
+        for i, t in enumerate(times):
+            temp = hourly.get("temperature_2m", [None])[i]
+            hum = hourly.get("relative_humidity_2m", [None])[i]
+            rain = hourly.get("precipitation", [None])[i]
+            wind = hourly.get("wind_speed_10m", [None])[i]
+            wdir = hourly.get("wind_direction_10m", [None])[i]
+            gust = hourly.get("wind_gusts_10m", [None])[i]
+            uv = hourly.get("uv_index", [None])[i]
+            et0 = hourly.get("et0_fao_evapotranspiration", [None])[i]
+
+            vpd = _calc_vpd(temp or 25, hum or 70) if temp is not None and hum is not None else None
+
+            reading = models.WeatherReading(
+                recorded_at=datetime.fromisoformat(t),
+                source="api",
+                station_code="open_meteo",
+                temperature_c=temp,
+                humidity_pct=hum,
+                rainfall_mm=rain,
+                wind_speed_kmh=wind,
+                wind_direction_deg=int(wdir) if wdir is not None else None,
+                wind_gust_kmh=gust,
+                uv_index=uv,
+                et0_mm=et0,
+                vpd_kpa=vpd,
+            )
+            db.add(reading)
+            readings_count += 1
+
+        db.flush()
+
+        days_processed = 0
+        summaries = []
+        current = start
+        while current <= end:
+            day_start = datetime.combine(current, datetime.min.time())
+            day_end = datetime.combine(current, datetime.max.time())
+
+            day_readings = (
+                db.query(models.WeatherReading)
+                .filter(
+                    models.WeatherReading.recorded_at >= day_start,
+                    models.WeatherReading.recorded_at <= day_end,
+                    models.WeatherReading.source == "api",
+                )
+                .all()
+            )
+
+            if not day_readings:
+                current += timedelta(days=1)
+                continue
+
+            temps = [r.temperature_c for r in day_readings if r.temperature_c is not None]
+            hums = [r.humidity_pct for r in day_readings if r.humidity_pct is not None]
+            rains = [r.rainfall_mm or 0 for r in day_readings]
+            winds = [r.wind_speed_kmh for r in day_readings if r.wind_speed_kmh is not None]
+            gusts = [r.wind_gust_kmh for r in day_readings if r.wind_gust_kmh is not None]
+            uvs = [r.uv_index for r in day_readings if r.uv_index is not None]
+            et0s = [r.et0_mm or 0 for r in day_readings]
+
+            temp_min = min(temps) if temps else None
+            temp_max = max(temps) if temps else None
+            temp_avg = round(sum(temps) / len(temps), 1) if temps else None
+            rain_total = round(sum(rains), 1)
+
+            gdd = max(0, (temp_avg or 10) - 10) if temp_avg is not None else 0
+
+            frost_hrs = sum(1 for t in temps if t < 2)
+            heat_hrs = sum(1 for t in temps if t > 35)
+
+            anthrac_hours = sum(
+                1 for r in day_readings
+                if r.humidity_pct is not None and r.humidity_pct > 85
+                and r.temperature_c is not None and 20 <= r.temperature_c <= 28
+            )
+            anthrac_risk = min(10, round(anthrac_hours / 2.4, 1))
+
+            phyto_temp_hours = sum(
+                1 for r in day_readings
+                if r.temperature_c is not None and 25 <= r.temperature_c <= 30
+            )
+            phyto_risk = 0.0
+            if rain_total > 20 and phyto_temp_hours > 0:
+                phyto_risk = min(10, round((rain_total / 10) * (phyto_temp_hours / 6), 1))
+
+            vpds = [r.vpd_kpa for r in day_readings if r.vpd_kpa is not None]
+            vpd_avg = round(sum(vpds) / len(vpds), 2) if vpds else None
+
+            existing = (
+                db.query(models.WeatherDailySummary)
+                .filter(
+                    sqlfunc.date(models.WeatherDailySummary.date) == current,
+                    models.WeatherDailySummary.station_code == "open_meteo",
+                )
+                .first()
+            )
+
+            if existing:
+                summary = existing
+            else:
+                summary = models.WeatherDailySummary(
+                    date=day_start,
+                    station_code="open_meteo",
+                )
+                db.add(summary)
+
+            summary.temp_min = temp_min
+            summary.temp_max = temp_max
+            summary.temp_avg = temp_avg
+            summary.humidity_min = min(hums) if hums else None
+            summary.humidity_max = max(hums) if hums else None
+            summary.humidity_avg = round(sum(hums) / len(hums), 1) if hums else None
+            summary.rainfall_total_mm = rain_total
+            summary.wind_avg_kmh = round(sum(winds) / len(winds), 1) if winds else None
+            summary.wind_max_gust_kmh = max(gusts) if gusts else None
+            summary.uv_max = max(uvs) if uvs else None
+            summary.et0_mm = round(sum(et0s), 2)
+            summary.gdd_base10 = round(gdd, 1)
+            summary.frost_hours = frost_hrs
+            summary.heat_stress_hours = heat_hrs
+            summary.vpd_avg = vpd_avg
+            summary.anthracnose_risk = anthrac_risk
+            summary.phytophthora_risk = phyto_risk
+
+            summaries.append((current, summary))
+            days_processed += 1
+            current += timedelta(days=1)
+
+        sorted_summaries = sorted(summaries, key=lambda x: x[0])
+        running_gdd = 0.0
+        for _, s in sorted_summaries:
+            running_gdd += s.gdd_base10 or 0
+            s.gdd_cumulative = round(running_gdd, 1)
+
+        db.commit()
+        print(f"[clima] Auto-sync OK: {readings_count} lecturas, {days_processed} días")
+
+        _evaluate_alerts(db)
+    except Exception as e:
+        db.rollback()
+        print(f"[clima] Auto-sync error: {e}")
+    finally:
+        db.close()
+
+
+def _sync_loop():
+    while True:
+        _do_sync()
+        time.sleep(6 * 3600)
+
+
+_sync_thread = threading.Thread(target=_sync_loop, daemon=True)
+_sync_thread.start()
+
+
 # ──────────────────── 1. Current weather ────────────────────
 
 @router.get("/current")
 def get_current_weather(
-    db: Session = Depends(get_db),
     _user=Depends(auth.get_current_user),
 ):
-    """Fetch current weather from Open-Meteo API (cached 15 min), fallback to DB."""
+    """Fetch current weather from Open-Meteo API."""
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={LAT}&longitude={LON}"
@@ -109,41 +330,25 @@ def get_current_weather(
         f"&timezone={TZ}"
     )
     try:
-        data = _cached_fetch(url, ttl_seconds=900)
-        c = data.get("current", {})
-        return {
-            "timestamp": c.get("time"),
-            "temperature_c": c.get("temperature_2m"),
-            "humidity_pct": c.get("relative_humidity_2m"),
-            "precipitation_mm": c.get("precipitation"),
-            "wind_speed_kmh": c.get("wind_speed_10m"),
-            "wind_direction_deg": c.get("wind_direction_10m"),
-            "wind_gust_kmh": c.get("wind_gusts_10m"),
-            "uv_index": c.get("uv_index"),
-            "vpd_kpa": _calc_vpd(
-                c.get("temperature_2m", 25),
-                c.get("relative_humidity_2m", 70),
-            ),
-            "source": "api",
-        }
-    except Exception:
-        latest = db.query(models.WeatherReading).order_by(
-            desc(models.WeatherReading.recorded_at)
-        ).first()
-        if not latest:
-            raise HTTPException(502, "No se pudo obtener datos del clima y no hay lecturas en la base de datos")
-        return {
-            "timestamp": latest.recorded_at.isoformat() if latest.recorded_at else None,
-            "temperature_c": latest.temperature_c,
-            "humidity_pct": latest.humidity_pct,
-            "precipitation_mm": latest.rainfall_mm,
-            "wind_speed_kmh": latest.wind_speed_kmh,
-            "wind_direction_deg": latest.wind_direction_deg,
-            "wind_gust_kmh": latest.wind_gust_kmh,
-            "uv_index": latest.uv_index,
-            "vpd_kpa": latest.vpd_kpa,
-            "source": "db_fallback",
-        }
+        data = _fetch_json(url)
+    except Exception as e:
+        raise HTTPException(502, f"Error al consultar Open-Meteo: {e}")
+
+    c = data.get("current", {})
+    return {
+        "timestamp": c.get("time"),
+        "temperature_c": c.get("temperature_2m"),
+        "humidity_pct": c.get("relative_humidity_2m"),
+        "precipitation_mm": c.get("precipitation"),
+        "wind_speed_kmh": c.get("wind_speed_10m"),
+        "wind_direction_deg": c.get("wind_direction_10m"),
+        "wind_gust_kmh": c.get("wind_gusts_10m"),
+        "uv_index": c.get("uv_index"),
+        "vpd_kpa": _calc_vpd(
+            c.get("temperature_2m", 25),
+            c.get("relative_humidity_2m", 70),
+        ),
+    }
 
 
 # ──────────────────── 2. 7-day Forecast ────────────────────
@@ -152,7 +357,7 @@ def get_current_weather(
 def get_forecast(
     _user=Depends(auth.get_current_user),
 ):
-    """7-day daily forecast from Open-Meteo (cached 30 min)."""
+    """7-day daily forecast from Open-Meteo."""
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={LAT}&longitude={LON}"
@@ -161,9 +366,9 @@ def get_forecast(
         f"&timezone={TZ}&forecast_days=7"
     )
     try:
-        data = _cached_fetch(url, ttl_seconds=1800)  # 30 min cache
+        data = _fetch_json(url)
     except Exception as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, f"Error al consultar Open-Meteo: {e}")
 
     daily = data.get("daily", {})
     days = []
@@ -231,13 +436,6 @@ def sync_weather(
     db: Session = Depends(get_db),
     current_user=Depends(auth.require_supervisor),
 ):
-    # Check sync cooldown
-    global _last_sync
-    now = time.time()
-    if now - _last_sync < SYNC_COOLDOWN:
-        wait = round(SYNC_COOLDOWN - (now - _last_sync))
-        raise HTTPException(429, f"Sync en cooldown. Espere {wait}s (mínimo {SYNC_COOLDOWN//60} min entre sincronizaciones)")
-
     """Fetch last 7 days hourly data, store in WeatherReading, aggregate into DailySummary."""
     end = date.today()
     start = end - timedelta(days=7)
@@ -252,17 +450,14 @@ def sync_weather(
         f"&start_date={start}&end_date={end}"
     )
     try:
-        data = _cached_fetch(url, ttl_seconds=0)  # no cache, retries on 429
+        data = _fetch_json(url)
     except Exception as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, f"Error al consultar Open-Meteo: {e}")
 
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
     if not times:
         raise HTTPException(404, "No hourly data returned from Open-Meteo")
-
-    # Update last_sync timestamp
-    _last_sync = time.time()
 
     # Delete existing readings in the range to avoid duplicates
     db.query(models.WeatherReading).filter(
@@ -457,6 +652,20 @@ def list_alerts(
         }
         for a in rows
     ]
+
+
+# ──────────────────── 5b. Evaluate Alerts ────────────────────
+
+@router.post("/evaluate-alerts")
+def evaluate_alerts_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(auth.require_supervisor),
+):
+    count = _evaluate_alerts(db)
+    audit.log(db, current_user, 'CREAR', 'ALERT_EVAL', '',
+              f"Evaluación manual: {count} alertas generadas")
+    db.commit()
+    return {"message": f"{count} alertas generadas", "alerts_generated": count}
 
 
 # ──────────────────── 6. Alert Rules - List ────────────────────
