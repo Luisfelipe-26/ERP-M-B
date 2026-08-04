@@ -63,7 +63,14 @@ def require_admin(current_user: models.Usuario = Depends(get_current_user)):
 
 
 def require_supervisor(current_user: models.Usuario = Depends(get_current_user)):
-    """Supervisor or Admin — for inventory movements (GR, GI, AJ), OC management."""
+    """Supervisor or Admin — for inventory movements (GI, AJ), OC management."""
     if current_user.rol not in ["admin", "supervisor"]:
         raise HTTPException(status_code=403, detail="Permisos insuficientes — se requiere rol Supervisor o Admin")
+    return current_user
+
+
+def require_operador(current_user: models.Usuario = Depends(get_current_user)):
+    """Operador, Supervisor or Admin — for inventory entries (GR)."""
+    if current_user.rol not in ["admin", "supervisor", "operador"]:
+        raise HTTPException(status_code=403, detail="Permisos insuficientes — se requiere rol Operador, Supervisor o Admin")
     return current_user

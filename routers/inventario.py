@@ -155,7 +155,7 @@ def delete_articulo(id_prod: str, db: Session = Depends(get_db), _=Depends(auth.
 
 @router.post("/gr")
 def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
-                  current_user: models.Usuario = Depends(auth.require_supervisor)):
+                  current_user: models.Usuario = Depends(auth.require_operador)):
     if data.cantidad <= 0:
         raise HTTPException(status_code=400, detail="La cantidad debe ser mayor a 0")
     if data.precio_compra < 0:
