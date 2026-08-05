@@ -102,6 +102,23 @@ def next_ot_id_preview(db: Session = Depends(get_db), _=Depends(auth.get_current
     return {"next_ot_id": int(peek_next("OT", db))}
 
 
+@router.put("/sequence/reset")
+def reset_ot_sequence(nuevo_inicio: int = Query(0, description="Último número usado (la próxima OT será este +1)"),
+                      db: Session = Depends(get_db),
+                      current_user=Depends(auth.require_admin)):
+    seq = db.query(models.Sequence).filter(models.Sequence.tipo == "OT").first()
+    if not seq:
+        seq = models.Sequence(tipo="OT", ultimo_numero=nuevo_inicio)
+        db.add(seq)
+    else:
+        seq.ultimo_numero = nuevo_inicio
+    db.commit()
+    next_id = int(peek_next("OT", db))
+    audit.log(db, current_user, "CONFIG", "SEQUENCE", "OT",
+              f"Secuencia OT reseteada a {nuevo_inicio}, próxima OT será #{next_id}")
+    return {"message": f"Secuencia OT reseteada. Próxima OT será #{next_id}", "next_ot_id": next_id}
+
+
 @router.get("", response_model=List[schemas.OrdenTrabajoOut])
 def list_ordenes(
     estado: Optional[str] = None,
