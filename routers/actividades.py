@@ -19,7 +19,7 @@ def list_actividades(db: Session = Depends(get_db), _=Depends(auth.get_current_u
 
 
 @router.post("", response_model=schemas.ActividadOut)
-def create_actividad(data: schemas.ActividadCreate, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+def create_actividad(data: schemas.ActividadCreate, db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
     if db.query(models.Actividad).filter(models.Actividad.id_act == data.id_act).first():
         raise HTTPException(status_code=400, detail="ID de actividad ya existe")
     a = models.Actividad(**data.model_dump())
@@ -30,7 +30,7 @@ def create_actividad(data: schemas.ActividadCreate, db: Session = Depends(get_db
 
 
 @router.put("/{id_act}", response_model=schemas.ActividadOut)
-def update_actividad(id_act: str, data: schemas.ActividadCreate, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+def update_actividad(id_act: str, data: schemas.ActividadCreate, db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
     a = db.query(models.Actividad).filter(models.Actividad.id_act == id_act).first()
     if not a:
         raise HTTPException(status_code=404, detail="Actividad no encontrada")

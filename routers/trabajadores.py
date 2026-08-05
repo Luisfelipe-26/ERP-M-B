@@ -19,7 +19,7 @@ def list_trabajadores(db: Session = Depends(get_db), _=Depends(auth.get_current_
 
 
 @router.post("", response_model=schemas.TrabajadorOut)
-def create_trabajador(data: schemas.TrabajadorCreate, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+def create_trabajador(data: schemas.TrabajadorCreate, db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
     if db.query(models.Trabajador).filter(models.Trabajador.id_trab == data.id_trab).first():
         raise HTTPException(status_code=400, detail="ID de trabajador ya existe")
     t = models.Trabajador(**data.model_dump())
@@ -38,7 +38,7 @@ def get_trabajador(id_trab: str, db: Session = Depends(get_db), _=Depends(auth.g
 
 
 @router.put("/{id_trab}", response_model=schemas.TrabajadorOut)
-def update_trabajador(id_trab: str, data: schemas.TrabajadorCreate, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+def update_trabajador(id_trab: str, data: schemas.TrabajadorCreate, db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
     t = db.query(models.Trabajador).filter(models.Trabajador.id_trab == id_trab).first()
     if not t:
         raise HTTPException(status_code=404, detail="Trabajador no encontrado")
