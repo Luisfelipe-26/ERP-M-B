@@ -8,6 +8,7 @@ from routers import (
     ordenes, dashboard, inventario, reportes, compras,
     audit_log, tipos_producto, proveedores,
     clima, sanidad, riego, analytics,
+    contabilidad, clientes, cuentas_bancarias,
 )
 from sync_odoo import start_sync
 
@@ -49,6 +50,9 @@ app.include_router(clima.router)
 app.include_router(sanidad.router)
 app.include_router(riego.router)
 app.include_router(analytics.router)
+app.include_router(contabilidad.router)
+app.include_router(clientes.router)
+app.include_router(cuentas_bancarias.router)
 
 
 @app.get("/")

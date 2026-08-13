@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Index
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Index, Date, Numeric, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -73,8 +73,14 @@ class Proveedor(Base):
     email = Column(String(200))
     telefono = Column(String(50))
     contacto = Column(String(200))
+    direccion = Column(Text)
     odoo_id = Column(Integer)
+    condicion_pago_dias = Column(Integer, default=30)
+    tipo_ncf_default = Column(String(5), default="B11")
+    cuenta_cxp_id = Column(Integer, ForeignKey("cuentas_contables.id"))
     activo = Column(Boolean, default=True)
+    cuenta_cxp = relationship("CuentaContable", foreign_keys=[cuenta_cxp_id])
+    cuentas_por_pagar = relationship("CuentaPorPagar", back_populates="proveedor")
 
 
 class Producto(Base):
@@ -90,11 +96,19 @@ class Producto(Base):
     stock_minimo = Column(Float, default=0)
     stock_maximo = Column(Float)
     proveedor = Column(String(200))
+    proveedor_id = Column(Integer, ForeignKey("proveedores.id"))
     concentracion = Column(String(100))
     es_inventariable = Column(Boolean, default=True)
+    cuenta_inventario_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    cuenta_costo_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    cuenta_ingreso_id = Column(Integer, ForeignKey("cuentas_contables.id"))
     activo = Column(Boolean, default=True)
     detalles_ot = relationship("OTDetalle", back_populates="producto")
     movimientos = relationship("MovimientoInventario", back_populates="producto")
+    proveedor_rel = relationship("Proveedor", foreign_keys=[proveedor_id])
+    cuenta_inventario = relationship("CuentaContable", foreign_keys=[cuenta_inventario_id])
+    cuenta_costo = relationship("CuentaContable", foreign_keys=[cuenta_costo_id])
+    cuenta_ingreso = relationship("CuentaContable", foreign_keys=[cuenta_ingreso_id])
 
 
 ESTADOS_OT = ["Abierta", "En Proceso", "En Pausa", "Cerrada"]
@@ -564,3 +578,415 @@ class FieldIrrigationConfig(Base):
     # Kc por etapa (JSON)
     kc_by_stage = Column(Text)  # {"floracion":0.65,"cuaje":0.75,"llenado":0.85,"maduracion":0.78}
     notes = Column(Text)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MÓDULO CONTABILIDAD — Núcleo contable, CxP/CxC, activos, nómina, fiscal
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CuentaContable(Base):
+    __tablename__ = "cuentas_contables"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(10), unique=True, index=True, nullable=False)
+    nombre = Column(String(200), nullable=False)
+    tipo = Column(String(20), nullable=False)          # activo, pasivo, patrimonio, ingreso, costo, gasto
+    naturaleza = Column(String(10), nullable=False)    # deudora, acreedora
+    grupo = Column(String(100))
+    nivel = Column(Integer, default=1)
+    cuenta_padre_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    acepta_movimientos = Column(Boolean, default=True)
+    activo = Column(Boolean, default=True)
+    cuenta_padre = relationship("CuentaContable", remote_side=[id])
+    lineas = relationship("LineaAsiento", back_populates="cuenta")
+
+
+class PeriodoContable(Base):
+    __tablename__ = "periodos_contables"
+    id = Column(Integer, primary_key=True, index=True)
+    anio = Column(Integer, nullable=False)
+    mes = Column(Integer, nullable=False)
+    nombre = Column(String(50))
+    fecha_inicio = Column(Date, nullable=False)
+    fecha_fin = Column(Date, nullable=False)
+    estado = Column(String(20), default="abierto")     # abierto, cerrado
+    cerrado_por = Column(String(100))
+    cerrado_en = Column(DateTime)
+    __table_args__ = (UniqueConstraint("anio", "mes", name="uq_periodo_anio_mes"),)
+
+
+class AsientoContable(Base):
+    __tablename__ = "asientos_contables"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    fecha = Column(Date, nullable=False, index=True)
+    periodo_id = Column(Integer, ForeignKey("periodos_contables.id"), index=True)
+    tipo = Column(String(20), default="manual")        # automatico, manual, cierre, apertura
+    origen = Column(String(10))                        # OT, OC, GR, PAG, COB, VTA, AJ, NOM, DEP, LIQ, MAN
+    referencia_id = Column(String(50))
+    descripcion = Column(Text)
+    total_debe = Column(Numeric(14, 2), default=0)
+    total_haber = Column(Numeric(14, 2), default=0)
+    estado = Column(String(20), default="borrador")    # borrador, contabilizado, anulado
+    creado_por = Column(String(100))
+    contabilizado_por = Column(String(100))
+    contabilizado_en = Column(DateTime)
+    anulado_por = Column(String(100))
+    asiento_reverso_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    periodo = relationship("PeriodoContable")
+    lineas = relationship("LineaAsiento", back_populates="asiento", cascade="all, delete-orphan")
+
+
+class LineaAsiento(Base):
+    __tablename__ = "lineas_asiento"
+    id = Column(Integer, primary_key=True, index=True)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"), nullable=False, index=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False, index=True)
+    debe = Column(Numeric(14, 2), default=0)
+    haber = Column(Numeric(14, 2), default=0)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"), index=True)
+    tercero_id = Column(String(50))
+    descripcion_linea = Column(String(300))
+    asiento = relationship("AsientoContable", back_populates="lineas")
+    cuenta = relationship("CuentaContable", back_populates="lineas")
+
+
+class Cliente(Base):
+    __tablename__ = "clientes"
+    id = Column(Integer, primary_key=True, index=True)
+    id_cliente = Column(String(10), unique=True, index=True, nullable=False)
+    nombre = Column(String(200), nullable=False)
+    rnc_cedula = Column(String(20))
+    tipo_rnc = Column(String(20))                      # RNC, Cedula, Pasaporte
+    direccion = Column(Text)
+    telefono = Column(String(50))
+    email = Column(String(200))
+    contacto = Column(String(200))
+    condicion_pago_dias = Column(Integer, default=30)
+    tipo_ncf_default = Column(String(5), default="B01")
+    cuenta_cxc_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    notas = Column(Text)
+    activo = Column(Boolean, default=True)
+    creado_en = Column(DateTime, server_default=func.now())
+    cuenta_cxc = relationship("CuentaContable", foreign_keys=[cuenta_cxc_id])
+    cuentas_por_cobrar = relationship("CuentaPorCobrar", back_populates="cliente")
+
+
+class CuentaBancaria(Base):
+    __tablename__ = "cuentas_bancarias"
+    id = Column(Integer, primary_key=True, index=True)
+    banco = Column(String(100), nullable=False)
+    tipo_cuenta = Column(String(20), default="corriente")  # corriente, ahorro
+    numero_cuenta = Column(String(50), nullable=False)
+    moneda = Column(String(5), default="DOP")              # DOP, USD
+    cuenta_contable_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    saldo_segun_libro = Column(Numeric(14, 2), default=0)
+    nombre_corto = Column(String(50))
+    activo = Column(Boolean, default=True)
+    cuenta_contable = relationship("CuentaContable")
+
+
+class ConfiguracionEmpresa(Base):
+    __tablename__ = "configuracion_empresa"
+    id = Column(Integer, primary_key=True, index=True)
+    razon_social = Column(String(200))
+    nombre_comercial = Column(String(200))
+    rnc = Column(String(20))
+    direccion = Column(Text)
+    telefono = Column(String(50))
+    email = Column(String(200))
+    logo_base64 = Column(Text)
+    moneda_funcional = Column(String(5), default="DOP")
+    regimen_fiscal = Column(String(100))
+
+
+class SecuenciaNcf(Base):
+    __tablename__ = "secuencias_ncf"
+    id = Column(Integer, primary_key=True, index=True)
+    tipo_ncf = Column(String(5), nullable=False)       # B01, B02, B04, B11, B14, B15
+    serie = Column(String(20))
+    desde = Column(Integer, nullable=False)
+    hasta = Column(Integer, nullable=False)
+    siguiente = Column(Integer, nullable=False)
+    fecha_vencimiento = Column(Date)
+    activo = Column(Boolean, default=True)
+
+
+class ReglaContabilizacion(Base):
+    __tablename__ = "reglas_contabilizacion"
+    id = Column(Integer, primary_key=True, index=True)
+    evento = Column(String(30), nullable=False)        # OT_CIERRE, OC_RECEPCION, PAGO, COBRO, VENTA, etc.
+    concepto = Column(String(50), nullable=False)      # mano_obra, insumos, equipo, etc.
+    cuenta_debe_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
+    cuenta_haber_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
+    descripcion = Column(String(300))
+    activo = Column(Boolean, default=True)
+    cuenta_debe = relationship("CuentaContable", foreign_keys=[cuenta_debe_id])
+    cuenta_haber = relationship("CuentaContable", foreign_keys=[cuenta_haber_id])
+
+
+class SaldoMensual(Base):
+    __tablename__ = "saldos_mensuales"
+    id = Column(Integer, primary_key=True, index=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False, index=True)
+    periodo_id = Column(Integer, ForeignKey("periodos_contables.id"), nullable=False, index=True)
+    saldo_deudor = Column(Numeric(14, 2), default=0)
+    saldo_acreedor = Column(Numeric(14, 2), default=0)
+    saldo_neto = Column(Numeric(14, 2), default=0)
+    __table_args__ = (UniqueConstraint("cuenta_id", "periodo_id", name="uq_saldo_cuenta_periodo"),)
+
+
+class CuentaPorPagar(Base):
+    __tablename__ = "cuentas_por_pagar"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    proveedor_id = Column(Integer, ForeignKey("proveedores.id"), nullable=False, index=True)
+    oc_id = Column(String(20), ForeignKey("ordenes_compra.oc_id"))
+    tipo_ncf = Column(String(5))
+    ncf = Column(String(30))
+    num_factura_proveedor = Column(String(100))
+    fecha_factura = Column(Date, nullable=False)
+    fecha_vencimiento = Column(Date)
+    subtotal = Column(Numeric(14, 2), default=0)
+    itbis = Column(Numeric(14, 2), default=0)
+    retencion_isr = Column(Numeric(14, 2), default=0)
+    total = Column(Numeric(14, 2), default=0)
+    saldo_pendiente = Column(Numeric(14, 2), default=0)
+    estado = Column(String(20), default="pendiente")   # pendiente, parcial, pagada, anulada
+    notas = Column(Text)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    proveedor = relationship("Proveedor")
+    pagos = relationship("Pago", back_populates="cxp")
+
+
+class Pago(Base):
+    __tablename__ = "pagos"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    cxp_id = Column(Integer, ForeignKey("cuentas_por_pagar.id"), nullable=False, index=True)
+    fecha = Column(Date, nullable=False)
+    monto = Column(Numeric(14, 2), nullable=False)
+    metodo_pago = Column(String(30))                   # efectivo, transferencia, cheque
+    referencia_bancaria = Column(String(100))
+    cuenta_bancaria_id = Column(Integer, ForeignKey("cuentas_bancarias.id"))
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    cxp = relationship("CuentaPorPagar", back_populates="pagos")
+    cuenta_bancaria = relationship("CuentaBancaria")
+
+
+class CuentaPorCobrar(Base):
+    __tablename__ = "cuentas_por_cobrar"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"), nullable=False, index=True)
+    tipo_ncf = Column(String(5))
+    ncf = Column(String(30))
+    fecha = Column(Date, nullable=False)
+    fecha_vencimiento = Column(Date)
+    moneda = Column(String(5), default="DOP")
+    tasa_cambio = Column(Numeric(10, 4), default=1)
+    subtotal = Column(Numeric(14, 2), default=0)
+    itbis = Column(Numeric(14, 2), default=0)
+    total = Column(Numeric(14, 2), default=0)
+    total_dop = Column(Numeric(14, 2), default=0)
+    saldo_pendiente = Column(Numeric(14, 2), default=0)
+    estado = Column(String(20), default="pendiente")   # pendiente, parcial, cobrada, anulada
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    temporada = Column(String(20))
+    kg_vendidos = Column(Numeric(10, 2))
+    precio_por_kg = Column(Numeric(10, 2))
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    cliente = relationship("Cliente", back_populates="cuentas_por_cobrar")
+    cobros = relationship("Cobro", back_populates="cxc")
+    campo = relationship("Campo")
+
+
+class Cobro(Base):
+    __tablename__ = "cobros"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    cxc_id = Column(Integer, ForeignKey("cuentas_por_cobrar.id"), nullable=False, index=True)
+    fecha = Column(Date, nullable=False)
+    monto = Column(Numeric(14, 2), nullable=False)
+    metodo_pago = Column(String(30))
+    referencia_bancaria = Column(String(100))
+    cuenta_bancaria_id = Column(Integer, ForeignKey("cuentas_bancarias.id"))
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    cxc = relationship("CuentaPorCobrar", back_populates="cobros")
+    cuenta_bancaria = relationship("CuentaBancaria")
+
+
+class NotaCredito(Base):
+    __tablename__ = "notas_credito"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    tipo = Column(String(20), nullable=False)          # proveedor, cliente
+    referencia_id = Column(Integer)
+    ncf = Column(String(30))
+    fecha = Column(Date, nullable=False)
+    motivo = Column(Text)
+    subtotal = Column(Numeric(14, 2), default=0)
+    itbis = Column(Numeric(14, 2), default=0)
+    total = Column(Numeric(14, 2), default=0)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+
+
+class NotaDebito(Base):
+    __tablename__ = "notas_debito"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    tipo = Column(String(20), nullable=False)
+    referencia_id = Column(Integer)
+    ncf = Column(String(30))
+    fecha = Column(Date, nullable=False)
+    motivo = Column(Text)
+    subtotal = Column(Numeric(14, 2), default=0)
+    itbis = Column(Numeric(14, 2), default=0)
+    total = Column(Numeric(14, 2), default=0)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+
+
+class ActivoFijo(Base):
+    __tablename__ = "activos_fijos"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(20), unique=True, index=True, nullable=False)
+    nombre = Column(String(200), nullable=False)
+    categoria = Column(String(30))                     # equipo, vehiculo, planta_portadora, infraestructura
+    fecha_adquisicion = Column(Date)
+    costo_adquisicion = Column(Numeric(14, 2), default=0)
+    vida_util_meses = Column(Integer)
+    valor_residual = Column(Numeric(14, 2), default=0)
+    depreciacion_acumulada = Column(Numeric(14, 2), default=0)
+    metodo_depreciacion = Column(String(20), default="lineal")
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    cuenta_activo_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    cuenta_depreciacion_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    cuenta_gasto_dep_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    activo = Column(Boolean, default=True)
+    creado_en = Column(DateTime, server_default=func.now())
+    campo = relationship("Campo")
+    cuenta_activo = relationship("CuentaContable", foreign_keys=[cuenta_activo_id])
+    cuenta_depreciacion = relationship("CuentaContable", foreign_keys=[cuenta_depreciacion_id])
+    cuenta_gasto_dep = relationship("CuentaContable", foreign_keys=[cuenta_gasto_dep_id])
+
+
+class DepreciacionHistorial(Base):
+    __tablename__ = "depreciacion_historial"
+    id = Column(Integer, primary_key=True, index=True)
+    activo_id = Column(Integer, ForeignKey("activos_fijos.id"), nullable=False, index=True)
+    periodo_id = Column(Integer, ForeignKey("periodos_contables.id"), nullable=False)
+    monto = Column(Numeric(14, 2), nullable=False)
+    depreciacion_acumulada_post = Column(Numeric(14, 2))
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+
+
+class Presupuesto(Base):
+    __tablename__ = "presupuestos"
+    id = Column(Integer, primary_key=True, index=True)
+    anio = Column(Integer, nullable=False)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    monto_ene = Column(Numeric(14, 2), default=0)
+    monto_feb = Column(Numeric(14, 2), default=0)
+    monto_mar = Column(Numeric(14, 2), default=0)
+    monto_abr = Column(Numeric(14, 2), default=0)
+    monto_may = Column(Numeric(14, 2), default=0)
+    monto_jun = Column(Numeric(14, 2), default=0)
+    monto_jul = Column(Numeric(14, 2), default=0)
+    monto_ago = Column(Numeric(14, 2), default=0)
+    monto_sep = Column(Numeric(14, 2), default=0)
+    monto_oct = Column(Numeric(14, 2), default=0)
+    monto_nov = Column(Numeric(14, 2), default=0)
+    monto_dic = Column(Numeric(14, 2), default=0)
+    descripcion = Column(String(300))
+
+
+class CosechaLiquidacion(Base):
+    __tablename__ = "cosecha_liquidaciones"
+    id = Column(Integer, primary_key=True, index=True)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"), nullable=False)
+    temporada = Column(String(20), nullable=False)
+    fecha_liquidacion = Column(Date, nullable=False)
+    costo_mo_acumulado = Column(Numeric(14, 2), default=0)
+    costo_insumos_acumulado = Column(Numeric(14, 2), default=0)
+    costo_equipo_acumulado = Column(Numeric(14, 2), default=0)
+    costo_otros_acumulado = Column(Numeric(14, 2), default=0)
+    costo_total = Column(Numeric(14, 2), default=0)
+    kg_cosechados = Column(Numeric(10, 2), default=0)
+    costo_por_kg = Column(Numeric(10, 4), default=0)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    estado = Column(String(20), default="liquidada")   # liquidada, ajustada
+    creado_en = Column(DateTime, server_default=func.now())
+
+
+class NominaPeriodo(Base):
+    __tablename__ = "nomina_periodos"
+    id = Column(Integer, primary_key=True, index=True)
+    tipo = Column(String(20), default="quincenal")     # quincenal, mensual
+    fecha_inicio = Column(Date, nullable=False)
+    fecha_fin = Column(Date, nullable=False)
+    total_bruto = Column(Numeric(14, 2), default=0)
+    total_deducciones = Column(Numeric(14, 2), default=0)
+    total_neto = Column(Numeric(14, 2), default=0)
+    total_tss_empleador = Column(Numeric(14, 2), default=0)
+    estado = Column(String(20), default="borrador")    # borrador, procesada, pagada
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    procesado_por = Column(String(100))
+    creado_en = Column(DateTime, server_default=func.now())
+    detalles = relationship("NominaDetalle", back_populates="periodo")
+
+
+class NominaDetalle(Base):
+    __tablename__ = "nomina_detalle"
+    id = Column(Integer, primary_key=True, index=True)
+    nomina_periodo_id = Column(Integer, ForeignKey("nomina_periodos.id"), nullable=False, index=True)
+    trabajador_id = Column(String(10), ForeignKey("trabajadores.id_trab"), nullable=False)
+    dias_trabajados = Column(Integer, default=0)
+    salario_bruto = Column(Numeric(14, 2), default=0)
+    horas_extra = Column(Numeric(8, 2), default=0)
+    monto_horas_extra = Column(Numeric(14, 2), default=0)
+    bonificacion = Column(Numeric(14, 2), default=0)
+    total_devengado = Column(Numeric(14, 2), default=0)
+    deduccion_sfs = Column(Numeric(14, 2), default=0)
+    deduccion_afp = Column(Numeric(14, 2), default=0)
+    deduccion_isr = Column(Numeric(14, 2), default=0)
+    otras_deducciones = Column(Numeric(14, 2), default=0)
+    total_deducciones = Column(Numeric(14, 2), default=0)
+    neto_a_pagar = Column(Numeric(14, 2), default=0)
+    campo_id_principal = Column(String(10), ForeignKey("campos.id_campo"))
+    periodo = relationship("NominaPeriodo", back_populates="detalles")
+    trabajador = relationship("Trabajador")
+
+
+class ConciliacionBancaria(Base):
+    __tablename__ = "conciliacion_bancaria"
+    id = Column(Integer, primary_key=True, index=True)
+    cuenta_bancaria_id = Column(Integer, ForeignKey("cuentas_bancarias.id"), nullable=False)
+    periodo_id = Column(Integer, ForeignKey("periodos_contables.id"), nullable=False)
+    saldo_extracto = Column(Numeric(14, 2), default=0)
+    saldo_libro = Column(Numeric(14, 2), default=0)
+    diferencia = Column(Numeric(14, 2), default=0)
+    estado = Column(String(20), default="en_proceso")  # en_proceso, conciliada
+    fecha_conciliacion = Column(Date)
+    conciliado_por = Column(String(100))
+    creado_en = Column(DateTime, server_default=func.now())
+    partidas = relationship("ConciliacionPartida", back_populates="conciliacion")
+
+
+class ConciliacionPartida(Base):
+    __tablename__ = "conciliacion_partidas"
+    id = Column(Integer, primary_key=True, index=True)
+    conciliacion_id = Column(Integer, ForeignKey("conciliacion_bancaria.id"), nullable=False, index=True)
+    tipo = Column(String(30))                          # cheque_transito, deposito_transito, nd_banco, nc_banco, error
+    descripcion = Column(String(300))
+    monto = Column(Numeric(14, 2), nullable=False)
+    fecha = Column(Date)
+    referencia = Column(String(100))
+    conciliada = Column(Boolean, default=False)
+    conciliacion = relationship("ConciliacionBancaria", back_populates="partidas")

@@ -15,6 +15,10 @@ class ProveedorCreate(BaseModel):
     email: Optional[str] = None
     telefono: Optional[str] = None
     contacto: Optional[str] = None
+    direccion: Optional[str] = None
+    condicion_pago_dias: int = 30
+    tipo_ncf_default: str = "B11"
+    cuenta_cxp_id: Optional[int] = None
 
 
 class ProveedorOut(BaseModel):
@@ -24,7 +28,11 @@ class ProveedorOut(BaseModel):
     email: Optional[str] = None
     telefono: Optional[str] = None
     contacto: Optional[str] = None
+    direccion: Optional[str] = None
     odoo_id: Optional[int] = None
+    condicion_pago_dias: int = 30
+    tipo_ncf_default: Optional[str] = "B11"
+    cuenta_cxp_id: Optional[int] = None
     activo: bool
     model_config = {"from_attributes": True}
 
@@ -65,11 +73,8 @@ def update_proveedor(prov_id: int, data: ProveedorCreate, db: Session = Depends(
     prov = db.query(models.Proveedor).filter(models.Proveedor.id == prov_id).first()
     if not prov:
         raise HTTPException(404, "Proveedor no encontrado")
-    prov.nombre = data.nombre
-    prov.rnc = data.rnc
-    prov.email = data.email
-    prov.telefono = data.telefono
-    prov.contacto = data.contacto
+    for k, v in data.model_dump().items():
+        setattr(prov, k, v)
     db.commit()
     db.refresh(prov)
     return prov

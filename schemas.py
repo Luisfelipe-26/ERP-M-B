@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 
 
 # Auth
@@ -90,8 +91,12 @@ class ProductoCreate(BaseModel):
     stock_minimo: float = 0
     stock_maximo: Optional[float] = None
     proveedor: Optional[str] = None
+    proveedor_id: Optional[int] = None
     concentracion: Optional[str] = None
     es_inventariable: bool = True
+    cuenta_inventario_id: Optional[int] = None
+    cuenta_costo_id: Optional[int] = None
+    cuenta_ingreso_id: Optional[int] = None
 
 class ProductoOut(ProductoCreate):
     id: int
@@ -291,5 +296,274 @@ class OrdenCompraOut(BaseModel):
     fecha_recepcion: Optional[datetime] = None
     observaciones: Optional[str]
     creado_en: Optional[datetime]
+    class Config:
+        from_attributes = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTABILIDAD
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Cuenta Contable
+class CuentaContableCreate(BaseModel):
+    codigo: str
+    nombre: str
+    tipo: str
+    naturaleza: str
+    grupo: Optional[str] = None
+    nivel: int = 1
+    cuenta_padre_id: Optional[int] = None
+    acepta_movimientos: bool = True
+
+class CuentaContableOut(CuentaContableCreate):
+    id: int
+    activo: bool
+    class Config:
+        from_attributes = True
+
+# Periodo Contable
+class PeriodoContableOut(BaseModel):
+    id: int
+    anio: int
+    mes: int
+    nombre: Optional[str] = None
+    fecha_inicio: date
+    fecha_fin: date
+    estado: str
+    cerrado_por: Optional[str] = None
+    cerrado_en: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+# Línea Asiento
+class LineaAsientoCreate(BaseModel):
+    cuenta_id: int
+    debe: float = 0
+    haber: float = 0
+    campo_id: Optional[str] = None
+    tercero_id: Optional[str] = None
+    descripcion_linea: Optional[str] = None
+
+class LineaAsientoOut(LineaAsientoCreate):
+    id: int
+    cuenta_codigo: Optional[str] = None
+    cuenta_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+# Asiento Contable
+class AsientoContableCreate(BaseModel):
+    fecha: date
+    tipo: str = "manual"
+    origen: Optional[str] = "MAN"
+    referencia_id: Optional[str] = None
+    descripcion: Optional[str] = None
+    lineas: List[LineaAsientoCreate] = []
+
+class AsientoContableOut(BaseModel):
+    id: int
+    numero: str
+    fecha: date
+    periodo_id: Optional[int] = None
+    tipo: str
+    origen: Optional[str] = None
+    referencia_id: Optional[str] = None
+    descripcion: Optional[str] = None
+    total_debe: float
+    total_haber: float
+    estado: str
+    creado_por: Optional[str] = None
+    contabilizado_por: Optional[str] = None
+    contabilizado_en: Optional[datetime] = None
+    creado_en: Optional[datetime] = None
+    lineas: List[LineaAsientoOut] = []
+    class Config:
+        from_attributes = True
+
+# Cliente
+class ClienteCreate(BaseModel):
+    nombre: str
+    rnc_cedula: Optional[str] = None
+    tipo_rnc: Optional[str] = None
+    direccion: Optional[str] = None
+    telefono: Optional[str] = None
+    email: Optional[str] = None
+    contacto: Optional[str] = None
+    condicion_pago_dias: int = 30
+    tipo_ncf_default: str = "B01"
+    cuenta_cxc_id: Optional[int] = None
+    notas: Optional[str] = None
+
+class ClienteOut(ClienteCreate):
+    id: int
+    id_cliente: str
+    activo: bool
+    class Config:
+        from_attributes = True
+
+# Cuenta Bancaria
+class CuentaBancariaCreate(BaseModel):
+    banco: str
+    tipo_cuenta: str = "corriente"
+    numero_cuenta: str
+    moneda: str = "DOP"
+    cuenta_contable_id: Optional[int] = None
+    nombre_corto: Optional[str] = None
+
+class CuentaBancariaOut(CuentaBancariaCreate):
+    id: int
+    saldo_segun_libro: float = 0
+    activo: bool
+    class Config:
+        from_attributes = True
+
+# Configuracion Empresa
+class ConfiguracionEmpresaUpdate(BaseModel):
+    razon_social: Optional[str] = None
+    nombre_comercial: Optional[str] = None
+    rnc: Optional[str] = None
+    direccion: Optional[str] = None
+    telefono: Optional[str] = None
+    email: Optional[str] = None
+    logo_base64: Optional[str] = None
+    moneda_funcional: str = "DOP"
+    regimen_fiscal: Optional[str] = None
+
+class ConfiguracionEmpresaOut(ConfiguracionEmpresaUpdate):
+    id: int
+    class Config:
+        from_attributes = True
+
+# CxP
+class CuentaPorPagarCreate(BaseModel):
+    proveedor_id: int
+    oc_id: Optional[str] = None
+    tipo_ncf: Optional[str] = None
+    ncf: Optional[str] = None
+    num_factura_proveedor: Optional[str] = None
+    fecha_factura: date
+    fecha_vencimiento: Optional[date] = None
+    subtotal: float = 0
+    itbis: float = 0
+    retencion_isr: float = 0
+    total: float = 0
+    notas: Optional[str] = None
+
+class CuentaPorPagarOut(BaseModel):
+    id: int
+    numero: str
+    proveedor_id: int
+    oc_id: Optional[str] = None
+    tipo_ncf: Optional[str] = None
+    ncf: Optional[str] = None
+    num_factura_proveedor: Optional[str] = None
+    fecha_factura: date
+    fecha_vencimiento: Optional[date] = None
+    subtotal: float
+    itbis: float
+    retencion_isr: float
+    total: float
+    saldo_pendiente: float
+    estado: str
+    notas: Optional[str] = None
+    creado_en: Optional[datetime] = None
+    proveedor_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+# Pago
+class PagoCreate(BaseModel):
+    cxp_id: int
+    fecha: date
+    monto: float
+    metodo_pago: Optional[str] = "transferencia"
+    referencia_bancaria: Optional[str] = None
+    cuenta_bancaria_id: Optional[int] = None
+
+class PagoOut(BaseModel):
+    id: int
+    numero: str
+    cxp_id: int
+    fecha: date
+    monto: float
+    metodo_pago: Optional[str] = None
+    referencia_bancaria: Optional[str] = None
+    asiento_id: Optional[int] = None
+    creado_en: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+# CxC
+class CuentaPorCobrarCreate(BaseModel):
+    cliente_id: int
+    tipo_ncf: Optional[str] = None
+    fecha: date
+    fecha_vencimiento: Optional[date] = None
+    moneda: str = "DOP"
+    tasa_cambio: float = 1.0
+    subtotal: float = 0
+    itbis: float = 0
+    total: float = 0
+    campo_id: Optional[str] = None
+    temporada: Optional[str] = None
+    kg_vendidos: Optional[float] = None
+    precio_por_kg: Optional[float] = None
+
+class CuentaPorCobrarOut(BaseModel):
+    id: int
+    numero: str
+    cliente_id: int
+    tipo_ncf: Optional[str] = None
+    ncf: Optional[str] = None
+    fecha: date
+    fecha_vencimiento: Optional[date] = None
+    moneda: str
+    tasa_cambio: float
+    subtotal: float
+    itbis: float
+    total: float
+    total_dop: float
+    saldo_pendiente: float
+    estado: str
+    campo_id: Optional[str] = None
+    temporada: Optional[str] = None
+    kg_vendidos: Optional[float] = None
+    precio_por_kg: Optional[float] = None
+    creado_en: Optional[datetime] = None
+    cliente_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+# Cobro
+class CobroCreate(BaseModel):
+    cxc_id: int
+    fecha: date
+    monto: float
+    metodo_pago: Optional[str] = "transferencia"
+    referencia_bancaria: Optional[str] = None
+    cuenta_bancaria_id: Optional[int] = None
+
+class CobroOut(BaseModel):
+    id: int
+    numero: str
+    cxc_id: int
+    fecha: date
+    monto: float
+    metodo_pago: Optional[str] = None
+    referencia_bancaria: Optional[str] = None
+    asiento_id: Optional[int] = None
+    creado_en: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+# Regla Contabilización
+class ReglaContabilizacionOut(BaseModel):
+    id: int
+    evento: str
+    concepto: str
+    cuenta_debe_id: int
+    cuenta_haber_id: int
+    descripcion: Optional[str] = None
+    activo: bool
     class Config:
         from_attributes = True
