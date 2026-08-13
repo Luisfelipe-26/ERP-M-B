@@ -210,8 +210,7 @@ def create_orden(data: schemas.OrdenTrabajoCreate, db: Session = Depends(get_db)
 
         costo_hora = mo_data.costo_hora or trabajador.costo_hora or 62.50
         horas = mo_data.horas_netas or 8.0
-        if float(horas) > 16.0:
-            # H-7 FIX: alertar en vez de truncar silenciosamente
+        if float(horas) > 16.0 and (mo_data.modalidad or 'Jornada') != 'Ajuste':
             raise HTTPException(status_code=400,
                 detail=f"Trabajador '{trabajador.nombre}': horas ({horas}) exceden el máximo de 16. Verifique el dato.")
         horas = max(0.0, float(horas))
