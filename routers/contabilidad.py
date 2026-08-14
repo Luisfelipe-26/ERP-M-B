@@ -1,5 +1,6 @@
 """
 Módulo Contabilidad — Núcleo contable: plan de cuentas, periodos, asientos, libro mayor, reportes.
+Contabilización automática integrada (CxP, Pagos, CxC, Cobros).
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -16,10 +17,13 @@ router = APIRouter(prefix="/api/contabilidad", tags=["contabilidad"])
 # ── Helpers ──
 
 def get_next_seq(db: Session, tipo: str, prefix: str) -> str:
-    seq = db.query(models.Sequence).filter(models.Sequence.tipo == tipo).first()
+    seq = db.query(models.Sequence).filter(
+        models.Sequence.tipo == tipo
+    ).with_for_update().first()
     if not seq:
         seq = models.Sequence(tipo=tipo, ultimo_numero=0)
         db.add(seq)
+        db.flush()
     seq.ultimo_numero += 1
     db.flush()
     return f"{prefix}-{seq.ultimo_numero:04d}"
@@ -30,6 +34,59 @@ def find_periodo(db: Session, fecha: date):
         models.PeriodoContable.fecha_inicio <= fecha,
         models.PeriodoContable.fecha_fin >= fecha
     ).first()
+
+
+def _get_regla_cuentas(db: Session, evento: str, concepto: str):
+    regla = db.query(models.ReglaContabilizacion).filter(
+        models.ReglaContabilizacion.evento == evento,
+        models.ReglaContabilizacion.concepto == concepto,
+        models.ReglaContabilizacion.activo == True
+    ).first()
+    if not regla:
+        return None
+    return (regla.cuenta_debe_id, regla.cuenta_haber_id)
+
+
+def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: str,
+                        descripcion: str, lineas_data: list, user_nombre: str):
+    """Create and immediately post an automatic journal entry.
+    lineas_data: list of dicts {cuenta_id, debe, haber, campo_id?, tercero_id?, descripcion_linea?}
+    Returns the AsientoContable or None if periodo missing/closed.
+    """
+    periodo = find_periodo(db, fecha)
+    if not periodo or periodo.estado == "cerrado":
+        return None
+
+    lineas_data = [l for l in lineas_data
+                   if Decimal(str(l.get("debe") or 0)) > 0 or Decimal(str(l.get("haber") or 0)) > 0]
+    if not lineas_data:
+        return None
+
+    total_debe = sum(Decimal(str(l.get("debe") or 0)) for l in lineas_data)
+    total_haber = sum(Decimal(str(l.get("haber") or 0)) for l in lineas_data)
+
+    numero = get_next_seq(db, "AC", "AC")
+    asiento = models.AsientoContable(
+        numero=numero, fecha=fecha, periodo_id=periodo.id,
+        tipo="automatico", origen=origen, referencia_id=referencia_id,
+        descripcion=descripcion, total_debe=total_debe, total_haber=total_haber,
+        estado="contabilizado", creado_por="Sistema",
+        contabilizado_por="Sistema", contabilizado_en=datetime.utcnow()
+    )
+    db.add(asiento)
+    db.flush()
+
+    for l in lineas_data:
+        db.add(models.LineaAsiento(
+            asiento_id=asiento.id, cuenta_id=l["cuenta_id"],
+            debe=Decimal(str(l.get("debe") or 0)),
+            haber=Decimal(str(l.get("haber") or 0)),
+            campo_id=l.get("campo_id"), tercero_id=l.get("tercero_id"),
+            descripcion_linea=l.get("descripcion_linea")
+        ))
+
+    _actualizar_saldos(db, asiento, 1)
+    return asiento
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,6 +270,10 @@ def crear_asiento(data: schemas.AsientoContableCreate, db: Session = Depends(get
     if not data.lineas or len(data.lineas) < 2:
         raise HTTPException(400, "Un asiento requiere al menos 2 líneas")
 
+    for l in data.lineas:
+        if (l.debe or 0) > 0 and (l.haber or 0) > 0:
+            raise HTTPException(400, "Una línea no puede tener debe y haber simultáneamente")
+
     total_debe = sum(l.debe for l in data.lineas)
     total_haber = sum(l.haber for l in data.lineas)
     if round(total_debe, 2) != round(total_haber, 2):
@@ -284,7 +345,6 @@ def anular_asiento(numero: str, motivo: str = "Anulación manual",
         raise HTTPException(400, "El asiento ya está anulado")
 
     if a.estado == "contabilizado":
-        _actualizar_saldos(db, a, -1)
         num_rev = get_next_seq(db, "AC", "AC")
         reverso = models.AsientoContable(
             numero=num_rev, fecha=date.today(),
@@ -327,11 +387,11 @@ def _actualizar_saldos(db: Session, asiento, factor: int):
             )
             db.add(sm)
             db.flush()
-        debe_val = float(l.debe or 0) * factor
-        haber_val = float(l.haber or 0) * factor
-        sm.saldo_deudor = float(sm.saldo_deudor or 0) + debe_val
-        sm.saldo_acreedor = float(sm.saldo_acreedor or 0) + haber_val
-        sm.saldo_neto = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
+        debe_val = Decimal(str(l.debe or 0)) * factor
+        haber_val = Decimal(str(l.haber or 0)) * factor
+        sm.saldo_deudor = Decimal(str(sm.saldo_deudor or 0)) + debe_val
+        sm.saldo_acreedor = Decimal(str(sm.saldo_acreedor or 0)) + haber_val
+        sm.saldo_neto = Decimal(str(sm.saldo_deudor or 0)) - Decimal(str(sm.saldo_acreedor or 0))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -350,24 +410,32 @@ def libro_mayor(
     q = db.query(models.LineaAsiento).join(models.AsientoContable).filter(
         models.AsientoContable.estado == "contabilizado"
     )
-    if cuenta_id:
-        q = q.filter(models.LineaAsiento.cuenta_id == cuenta_id)
-    elif codigo:
+    target_cuenta_id = cuenta_id
+    if not target_cuenta_id and codigo:
         cuenta = db.query(models.CuentaContable).filter(models.CuentaContable.codigo == codigo).first()
         if cuenta:
-            q = q.filter(models.LineaAsiento.cuenta_id == cuenta.id)
+            target_cuenta_id = cuenta.id
+    if target_cuenta_id:
+        q = q.filter(models.LineaAsiento.cuenta_id == target_cuenta_id)
     if desde:
         q = q.filter(models.AsientoContable.fecha >= desde)
     if hasta:
         q = q.filter(models.AsientoContable.fecha <= hasta)
 
     total = q.count()
-    lineas = q.order_by(models.AsientoContable.fecha, models.AsientoContable.id
-                        ).offset(skip).limit(limit).all()
+    order = (models.AsientoContable.fecha, models.AsientoContable.id)
+
+    saldo_previo = Decimal(0)
+    if skip > 0:
+        prev_lines = q.order_by(*order).limit(skip).all()
+        for pl in prev_lines:
+            saldo_previo += Decimal(str(pl.debe or 0)) - Decimal(str(pl.haber or 0))
+
+    lineas = q.order_by(*order).offset(skip).limit(limit).all()
     result = []
-    saldo_acum = Decimal(0)
+    saldo_acum = saldo_previo
     for l in lineas:
-        saldo_acum += (l.debe or 0) - (l.haber or 0)
+        saldo_acum += Decimal(str(l.debe or 0)) - Decimal(str(l.haber or 0))
         result.append({
             "fecha": l.asiento.fecha,
             "asiento_numero": l.asiento.numero,
@@ -410,9 +478,9 @@ def balance_comprobacion(periodo_id: int = None, anio: int = None, mes: int = No
     for s in saldos:
         cid = s.cuenta_id
         if cid not in acum:
-            acum[cid] = {"deudor": 0, "acreedor": 0}
-        acum[cid]["deudor"] += float(s.saldo_deudor or 0)
-        acum[cid]["acreedor"] += float(s.saldo_acreedor or 0)
+            acum[cid] = {"deudor": Decimal(0), "acreedor": Decimal(0)}
+        acum[cid]["deudor"] += Decimal(str(s.saldo_deudor or 0))
+        acum[cid]["acreedor"] += Decimal(str(s.saldo_acreedor or 0))
 
     cuentas = db.query(models.CuentaContable).filter(
         models.CuentaContable.activo == True
@@ -420,17 +488,17 @@ def balance_comprobacion(periodo_id: int = None, anio: int = None, mes: int = No
 
     result = []
     for c in cuentas:
-        d = acum.get(c.id, {"deudor": 0, "acreedor": 0})
+        d = acum.get(c.id, {"deudor": Decimal(0), "acreedor": Decimal(0)})
         saldo = d["deudor"] - d["acreedor"]
         if d["deudor"] == 0 and d["acreedor"] == 0:
             continue
         result.append({
             "codigo": c.codigo, "nombre": c.nombre, "tipo": c.tipo,
             "naturaleza": c.naturaleza,
-            "sumas_debe": round(d["deudor"], 2),
-            "sumas_haber": round(d["acreedor"], 2),
-            "saldo_deudor": round(saldo, 2) if saldo > 0 else 0,
-            "saldo_acreedor": round(abs(saldo), 2) if saldo < 0 else 0,
+            "sumas_debe": float(round(d["deudor"], 2)),
+            "sumas_haber": float(round(d["acreedor"], 2)),
+            "saldo_deudor": float(round(saldo, 2)) if saldo > 0 else 0,
+            "saldo_acreedor": float(round(abs(saldo), 2)) if saldo < 0 else 0,
         })
     return result
 
@@ -457,20 +525,24 @@ def balance_general(anio: int = None, mes: int = None,
     for s in saldos:
         cid = s.cuenta_id
         if cid not in acum:
-            acum[cid] = 0
-        acum[cid] += float(s.saldo_deudor or 0) - float(s.saldo_acreedor or 0)
+            acum[cid] = Decimal(0)
+        acum[cid] += Decimal(str(s.saldo_deudor or 0)) - Decimal(str(s.saldo_acreedor or 0))
 
     cuentas = {c.id: c for c in db.query(models.CuentaContable).filter(
         models.CuentaContable.activo == True).all()}
 
     activos, pasivos, patrimonio = [], [], []
-    total_a, total_p, total_pat = 0, 0, 0
+    total_a, total_p, total_pat = Decimal(0), Decimal(0), Decimal(0)
+    resultado_ejercicio = Decimal(0)
 
     for cid, saldo in acum.items():
         c = cuentas.get(cid)
         if not c:
             continue
-        entry = {"codigo": c.codigo, "nombre": c.nombre, "saldo": round(abs(saldo), 2)}
+        if c.tipo in ("ingreso", "costo", "gasto"):
+            resultado_ejercicio -= saldo
+            continue
+        entry = {"codigo": c.codigo, "nombre": c.nombre, "saldo": float(round(abs(saldo), 2))}
         if c.tipo == "activo":
             activos.append(entry)
             total_a += saldo
@@ -481,15 +553,22 @@ def balance_general(anio: int = None, mes: int = None,
             patrimonio.append(entry)
             total_pat += abs(saldo)
 
+    if resultado_ejercicio != 0:
+        patrimonio.append({
+            "codigo": "3.4", "nombre": "Resultado del Ejercicio (calculado)",
+            "saldo": float(round(abs(resultado_ejercicio), 2))
+        })
+        total_pat += abs(resultado_ejercicio)
+
     return {
         "periodo": f"{mes:02d}/{anio}",
         "activos": sorted(activos, key=lambda x: x["codigo"]),
-        "total_activos": round(total_a, 2),
+        "total_activos": float(round(total_a, 2)),
         "pasivos": sorted(pasivos, key=lambda x: x["codigo"]),
-        "total_pasivos": round(total_p, 2),
+        "total_pasivos": float(round(total_p, 2)),
         "patrimonio": sorted(patrimonio, key=lambda x: x["codigo"]),
-        "total_patrimonio": round(total_pat, 2),
-        "cuadra": round(total_a - total_p - total_pat, 2) == 0
+        "total_patrimonio": float(round(total_pat, 2)),
+        "cuadra": float(round(total_a - total_p - total_pat, 2)) == 0
     }
 
 
@@ -623,6 +702,16 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
               user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
+
+    prov = db.query(models.Proveedor).get(data.proveedor_id)
+    if not prov:
+        raise HTTPException(400, f"Proveedor ID {data.proveedor_id} no existe")
+
+    subtotal = Decimal(str(data.subtotal or 0))
+    itbis = Decimal(str(data.itbis or 0))
+    retencion = Decimal(str(data.retencion_isr or 0))
+    total = subtotal + itbis - retencion
+
     numero = get_next_seq(db, "CXP", "CXP")
     cxp = models.CuentaPorPagar(
         numero=numero,
@@ -633,17 +722,56 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
         num_factura_proveedor=data.num_factura_proveedor,
         fecha_factura=data.fecha_factura,
         fecha_vencimiento=data.fecha_vencimiento,
-        subtotal=data.subtotal,
-        itbis=data.itbis,
-        retencion_isr=data.retencion_isr,
-        total=data.total,
-        saldo_pendiente=data.total,
+        subtotal=subtotal,
+        itbis=itbis,
+        retencion_isr=retencion,
+        total=total,
+        saldo_pendiente=total,
         notas=data.notas,
     )
     db.add(cxp)
+    db.flush()
+
+    lineas = []
+    r_factura = _get_regla_cuentas(db, "compra", "factura_proveedor")
+    if r_factura and subtotal > 0:
+        lineas.append({"cuenta_id": r_factura[0], "debe": subtotal, "haber": 0,
+                        "tercero_id": str(data.proveedor_id),
+                        "descripcion_linea": f"Compra {prov.nombre}"})
+        lineas.append({"cuenta_id": r_factura[1], "debe": 0, "haber": subtotal,
+                        "tercero_id": str(data.proveedor_id),
+                        "descripcion_linea": f"CxP {prov.nombre}"})
+    r_itbis = _get_regla_cuentas(db, "compra", "itbis_compra")
+    if r_itbis and itbis > 0:
+        lineas.append({"cuenta_id": r_itbis[0], "debe": itbis, "haber": 0,
+                        "descripcion_linea": "ITBIS crédito fiscal"})
+        lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis,
+                        "tercero_id": str(data.proveedor_id),
+                        "descripcion_linea": f"CxP ITBIS {prov.nombre}"})
+    if retencion > 0:
+        cta_ret = db.query(models.CuentaContable).filter(
+            models.CuentaContable.codigo == "2.1.02.03").first()
+        if cta_ret and r_factura:
+            lineas.append({"cuenta_id": r_factura[1], "debe": retencion, "haber": 0,
+                            "tercero_id": str(data.proveedor_id),
+                            "descripcion_linea": f"Retención ISR {prov.nombre}"})
+            lineas.append({"cuenta_id": cta_ret.id, "debe": 0, "haber": retencion,
+                            "descripcion_linea": "Retención ISR por pagar"})
+
+    asiento = None
+    if lineas:
+        asiento = _crear_asiento_auto(
+            db, data.fecha_factura, "CXP", numero,
+            f"Factura proveedor {prov.nombre} — {numero}",
+            lineas, user.nombre
+        )
+        if asiento:
+            cxp.asiento_id = asiento.id
+
     db.commit()
     db.refresh(cxp)
-    return {"ok": True, "numero": numero, "id": cxp.id}
+    return {"ok": True, "numero": numero, "id": cxp.id,
+            "asiento": asiento.numero if asiento else None}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -660,28 +788,62 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
         raise HTTPException(404, "CxP no encontrada")
     if cxp.estado == "pagada":
         raise HTTPException(400, "Esta CxP ya está pagada")
-    if data.monto > float(cxp.saldo_pendiente):
-        raise HTTPException(400, f"Monto ({data.monto}) excede saldo pendiente ({cxp.saldo_pendiente})")
+
+    monto = Decimal(str(data.monto))
+    saldo = Decimal(str(cxp.saldo_pendiente or 0))
+    if monto > saldo:
+        raise HTTPException(400, f"Monto ({monto}) excede saldo pendiente ({saldo})")
 
     numero = get_next_seq(db, "PAG", "PAG")
     pago = models.Pago(
         numero=numero, cxp_id=data.cxp_id, fecha=data.fecha,
-        monto=data.monto, metodo_pago=data.metodo_pago,
+        monto=monto, metodo_pago=data.metodo_pago,
         referencia_bancaria=data.referencia_bancaria,
         cuenta_bancaria_id=data.cuenta_bancaria_id,
     )
     db.add(pago)
 
-    cxp.saldo_pendiente = float(cxp.saldo_pendiente) - data.monto
-    if cxp.saldo_pendiente <= 0.005:
+    nuevo_saldo = saldo - monto
+    if nuevo_saldo <= Decimal("0.005"):
         cxp.saldo_pendiente = 0
         cxp.estado = "pagada"
     else:
+        cxp.saldo_pendiente = nuevo_saldo
         cxp.estado = "parcial"
+
+    r_pago = _get_regla_cuentas(db, "pago", "pago_proveedor")
+    cuenta_banco_contable_id = None
+    if data.cuenta_bancaria_id:
+        cb = db.query(models.CuentaBancaria).get(data.cuenta_bancaria_id)
+        if cb:
+            cb.saldo_segun_libro = Decimal(str(cb.saldo_segun_libro or 0)) - monto
+            cuenta_banco_contable_id = cb.cuenta_contable_id
+
+    asiento = None
+    if r_pago and monto > 0:
+        cta_haber = cuenta_banco_contable_id or r_pago[1]
+        prov = db.query(models.Proveedor).get(cxp.proveedor_id) if cxp.proveedor_id else None
+        prov_nombre = prov.nombre if prov else "Proveedor"
+        asiento = _crear_asiento_auto(
+            db, data.fecha, "PAG", numero,
+            f"Pago a {prov_nombre} — {numero}",
+            [
+                {"cuenta_id": r_pago[0], "debe": monto, "haber": 0,
+                 "tercero_id": str(cxp.proveedor_id),
+                 "descripcion_linea": f"Pago CxP {cxp.numero}"},
+                {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
+                 "descripcion_linea": f"Salida banco — {data.metodo_pago or 'transferencia'}"},
+            ],
+            user.nombre
+        )
+        if asiento:
+            pago.asiento_id = asiento.id
 
     db.commit()
     db.refresh(pago)
-    return {"ok": True, "numero": numero, "id": pago.id, "saldo_restante": float(cxp.saldo_pendiente)}
+    return {"ok": True, "numero": numero, "id": pago.id,
+            "saldo_restante": float(cxp.saldo_pendiente),
+            "asiento": asiento.numero if asiento else None}
 
 
 @router.get("/pagos")
@@ -724,9 +886,18 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
               user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
+
+    cli = db.query(models.Cliente).get(data.cliente_id)
+    if not cli:
+        raise HTTPException(400, f"Cliente ID {data.cliente_id} no existe")
+
+    subtotal = Decimal(str(data.subtotal or 0))
+    itbis = Decimal(str(data.itbis or 0))
+    total = subtotal + itbis
+
     numero = get_next_seq(db, "CXC", "CXC")
     tasa = data.tasa_cambio or 1
-    total_dop = data.total * tasa if data.moneda == "USD" else data.total
+    total_dop = total * Decimal(str(tasa)) if data.moneda == "USD" else total
     cxc = models.CuentaPorCobrar(
         numero=numero,
         cliente_id=data.cliente_id,
@@ -735,20 +906,50 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
         fecha_vencimiento=data.fecha_vencimiento,
         moneda=data.moneda,
         tasa_cambio=tasa,
-        subtotal=data.subtotal,
-        itbis=data.itbis,
-        total=data.total,
+        subtotal=subtotal,
+        itbis=itbis,
+        total=total,
         total_dop=total_dop,
-        saldo_pendiente=data.total,
+        saldo_pendiente=total,
         campo_id=data.campo_id,
         temporada=data.temporada,
         kg_vendidos=data.kg_vendidos,
         precio_por_kg=data.precio_por_kg,
     )
     db.add(cxc)
+    db.flush()
+
+    lineas = []
+    r_venta = _get_regla_cuentas(db, "venta", "factura_cliente")
+    if r_venta and subtotal > 0:
+        lineas.append({"cuenta_id": r_venta[0], "debe": subtotal, "haber": 0,
+                        "tercero_id": str(data.cliente_id), "campo_id": data.campo_id,
+                        "descripcion_linea": f"CxC {cli.nombre}"})
+        lineas.append({"cuenta_id": r_venta[1], "debe": 0, "haber": subtotal,
+                        "campo_id": data.campo_id,
+                        "descripcion_linea": f"Venta {cli.nombre}"})
+    r_itbis = _get_regla_cuentas(db, "venta", "itbis_venta")
+    if r_itbis and itbis > 0:
+        lineas.append({"cuenta_id": r_itbis[0], "debe": itbis, "haber": 0,
+                        "tercero_id": str(data.cliente_id),
+                        "descripcion_linea": f"CxC ITBIS {cli.nombre}"})
+        lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis,
+                        "descripcion_linea": "ITBIS por pagar"})
+
+    asiento = None
+    if lineas:
+        asiento = _crear_asiento_auto(
+            db, data.fecha, "VTA", numero,
+            f"Venta a {cli.nombre} — {numero}",
+            lineas, user.nombre
+        )
+        if asiento:
+            cxc.asiento_id = asiento.id
+
     db.commit()
     db.refresh(cxc)
-    return {"ok": True, "numero": numero, "id": cxc.id}
+    return {"ok": True, "numero": numero, "id": cxc.id,
+            "asiento": asiento.numero if asiento else None}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -765,28 +966,62 @@ def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
         raise HTTPException(404, "CxC no encontrada")
     if cxc.estado == "cobrada":
         raise HTTPException(400, "Esta CxC ya está cobrada")
-    if data.monto > float(cxc.saldo_pendiente):
-        raise HTTPException(400, f"Monto ({data.monto}) excede saldo pendiente ({cxc.saldo_pendiente})")
+
+    monto = Decimal(str(data.monto))
+    saldo = Decimal(str(cxc.saldo_pendiente or 0))
+    if monto > saldo:
+        raise HTTPException(400, f"Monto ({monto}) excede saldo pendiente ({saldo})")
 
     numero = get_next_seq(db, "COB", "COB")
     cobro = models.Cobro(
         numero=numero, cxc_id=data.cxc_id, fecha=data.fecha,
-        monto=data.monto, metodo_pago=data.metodo_pago,
+        monto=monto, metodo_pago=data.metodo_pago,
         referencia_bancaria=data.referencia_bancaria,
         cuenta_bancaria_id=data.cuenta_bancaria_id,
     )
     db.add(cobro)
 
-    cxc.saldo_pendiente = float(cxc.saldo_pendiente) - data.monto
-    if cxc.saldo_pendiente <= 0.005:
+    nuevo_saldo = saldo - monto
+    if nuevo_saldo <= Decimal("0.005"):
         cxc.saldo_pendiente = 0
         cxc.estado = "cobrada"
     else:
+        cxc.saldo_pendiente = nuevo_saldo
         cxc.estado = "parcial"
+
+    r_cobro = _get_regla_cuentas(db, "cobro", "cobro_cliente")
+    cuenta_banco_contable_id = None
+    if data.cuenta_bancaria_id:
+        cb = db.query(models.CuentaBancaria).get(data.cuenta_bancaria_id)
+        if cb:
+            cb.saldo_segun_libro = Decimal(str(cb.saldo_segun_libro or 0)) + monto
+            cuenta_banco_contable_id = cb.cuenta_contable_id
+
+    asiento = None
+    if r_cobro and monto > 0:
+        cta_debe = cuenta_banco_contable_id or r_cobro[0]
+        cli = db.query(models.Cliente).get(cxc.cliente_id) if cxc.cliente_id else None
+        cli_nombre = cli.nombre if cli else "Cliente"
+        asiento = _crear_asiento_auto(
+            db, data.fecha, "COB", numero,
+            f"Cobro de {cli_nombre} — {numero}",
+            [
+                {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
+                 "descripcion_linea": f"Entrada banco — {data.metodo_pago or 'transferencia'}"},
+                {"cuenta_id": r_cobro[1], "debe": 0, "haber": monto,
+                 "tercero_id": str(cxc.cliente_id),
+                 "descripcion_linea": f"Cobro CxC {cxc.numero}"},
+            ],
+            user.nombre
+        )
+        if asiento:
+            cobro.asiento_id = asiento.id
 
     db.commit()
     db.refresh(cobro)
-    return {"ok": True, "numero": numero, "id": cobro.id, "saldo_restante": float(cxc.saldo_pendiente)}
+    return {"ok": True, "numero": numero, "id": cobro.id,
+            "saldo_restante": float(cxc.saldo_pendiente),
+            "asiento": asiento.numero if asiento else None}
 
 
 @router.get("/cobros")

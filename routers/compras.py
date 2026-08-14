@@ -7,8 +7,10 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models, schemas, auth
 from routers.sequences import get_next, peek_next
+from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
 from typing import List, Optional
 from datetime import datetime
+from decimal import Decimal
 import audit
 
 router = APIRouter(prefix="/api/ordenes-compra", tags=["ordenes-compra"])
@@ -219,9 +221,29 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
     elif any_received:
         oc.estado = "Parcial"
 
+    asiento_num = None
+    if total_recibido_now > 0:
+        monto = Decimal(str(round(total_recibido_now, 2)))
+        r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
+        if r_compra:
+            asiento = _crear_asiento_auto(
+                db, datetime.now().date(), "GR", oc_id,
+                f"Recepción OC {oc_id} — {oc.proveedor or 'Proveedor'}",
+                [
+                    {"cuenta_id": r_compra[0], "debe": monto, "haber": 0,
+                     "descripcion_linea": f"Entrada inventario OC {oc_id}"},
+                    {"cuenta_id": r_compra[1], "debe": 0, "haber": monto,
+                     "descripcion_linea": f"CxP recepción OC {oc_id}"},
+                ],
+                current_user.nombre
+            )
+            if asiento:
+                asiento_num = asiento.numero
+
     db.commit()
     db.refresh(oc)
-    return {"ok": True, "estado": oc.estado, "total_recibido": oc.total_recibido, "num_factura": oc.num_factura}
+    return {"ok": True, "estado": oc.estado, "total_recibido": oc.total_recibido,
+            "num_factura": oc.num_factura, "asiento": asiento_num}
 
 
 @router.put("/{oc_id}")

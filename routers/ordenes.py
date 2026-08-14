@@ -6,8 +6,10 @@ from database import get_db
 import models, schemas, auth
 from models import ESTADOS_OT
 from routers.sequences import get_next, peek_next
+from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
 from typing import List, Optional
 from datetime import datetime
+from decimal import Decimal
 import audit
 
 router = APIRouter(prefix="/api/ordenes", tags=["ordenes"])
@@ -458,16 +460,62 @@ def update_estado(ot_id: int, estado: str = Query(...), hora_cierre: Optional[st
         raise HTTPException(status_code=404, detail="Orden no encontrada")
     estado_anterior = orden.estado
     orden.estado = estado
+    asiento_num = None
     if estado == "Cerrada":
         orden.fecha_cierre = datetime.now()
         orden.hora_cierre = hora_cierre or datetime.now().strftime("%H:%M")
         _recalc_orden(orden, db)
 
+        fecha_ot = (orden.fecha_ejecucion.date() if isinstance(orden.fecha_ejecucion, datetime)
+                    else orden.fecha_ejecucion) if orden.fecha_ejecucion else datetime.now().date()
+        lineas = []
+        costo_mo = Decimal(str(orden.costo_mano_obra or 0))
+        costo_ins = Decimal(str(orden.costo_insumos or 0))
+        costo_eq = Decimal(str(orden.costo_equipo or 0))
+
+        r_mo = _get_regla_cuentas(db, "nomina", "salario_jornada")
+        if r_mo and costo_mo > 0:
+            lineas.append({"cuenta_id": r_mo[0], "debe": costo_mo, "haber": 0,
+                           "campo_id": orden.campo_id,
+                           "descripcion_linea": f"MO directa OT #{ot_id}"})
+            lineas.append({"cuenta_id": r_mo[1], "debe": 0, "haber": costo_mo,
+                           "descripcion_linea": f"Nóminas por pagar OT #{ot_id}"})
+
+        r_ins = _get_regla_cuentas(db, "consumo_ot", "salida_insumo")
+        if r_ins and costo_ins > 0:
+            lineas.append({"cuenta_id": r_ins[0], "debe": costo_ins, "haber": 0,
+                           "campo_id": orden.campo_id,
+                           "descripcion_linea": f"Insumos OT #{ot_id}"})
+            lineas.append({"cuenta_id": r_ins[1], "debe": 0, "haber": costo_ins,
+                           "descripcion_linea": f"Salida inventario OT #{ot_id}"})
+
+        if costo_eq > 0:
+            cta_eq = db.query(models.CuentaContable).filter(
+                models.CuentaContable.codigo == "5.2.02").first()
+            cta_cxp = db.query(models.CuentaContable).filter(
+                models.CuentaContable.codigo == "2.1.01.01").first()
+            if cta_eq and cta_cxp:
+                lineas.append({"cuenta_id": cta_eq.id, "debe": costo_eq, "haber": 0,
+                               "campo_id": orden.campo_id,
+                               "descripcion_linea": f"Equipo OT #{ot_id}"})
+                lineas.append({"cuenta_id": cta_cxp.id, "debe": 0, "haber": costo_eq,
+                               "descripcion_linea": f"CxP equipo OT #{ot_id}"})
+
+        if lineas:
+            asiento = _crear_asiento_auto(
+                db, fecha_ot, "OT", str(ot_id),
+                f"Cierre OT #{ot_id} — {orden.actividad_id} / {orden.campo_id or 'General'}",
+                lineas, current_user.nombre
+            )
+            if asiento:
+                asiento_num = asiento.numero
+
     audit.log(db, current_user, "ESTADO", "OT", str(ot_id),
               f"OT #{ot_id}: {estado_anterior} → {estado}",
               {"estado_anterior": estado_anterior, "estado_nuevo": estado})
     db.commit()
-    return {"ok": True, "estado": estado, "hora_cierre": orden.hora_cierre}
+    return {"ok": True, "estado": estado, "hora_cierre": orden.hora_cierre,
+            "asiento": asiento_num}
 
 
 @router.delete("/{ot_id}")

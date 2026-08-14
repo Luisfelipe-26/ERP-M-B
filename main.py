@@ -6,10 +6,11 @@ from database import engine
 import models
 from routers import (
     auth, campos, trabajadores, actividades, productos,
+    contabilidad,
     ordenes, dashboard, inventario, reportes, compras,
     audit_log, tipos_producto, proveedores,
     clima, sanidad, riego, analytics,
-    contabilidad, clientes, cuentas_bancarias,
+    clientes, cuentas_bancarias,
 )
 from sync_odoo import start_sync
 
