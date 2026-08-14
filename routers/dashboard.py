@@ -189,6 +189,7 @@ def nomina_detalle_trabajador(
             "mo_id": r[0].id,
             "ot_id": r[0].ot_id, "fecha": r[0].fecha.isoformat() if r[0].fecha else None,
             "hora_inicio": r[0].hora_inicio, "hora_fin": r[0].hora_fin,
+            "pausa_min": r[0].pausa_min or 0,
             "horas_netas": r[0].horas_netas, "modalidad": r[0].modalidad,
             "costo_hora": float(r[0].costo_hora or 0), "costo_mo": float(r[0].costo_mo or 0),
             "campo_id": r[1], "actividad_id": r[2], "supervisor": r[3],

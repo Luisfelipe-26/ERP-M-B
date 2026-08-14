@@ -463,7 +463,7 @@ def update_mano_obra(ot_id: int, mo_id: int, data: dict,
     ).first()
     if not mo:
         raise HTTPException(status_code=404, detail="Registro de mano de obra no encontrado")
-    allowed = {"hora_inicio", "hora_fin", "horas_netas", "costo_hora", "costo_mo", "modalidad", "fecha"}
+    allowed = {"hora_inicio", "hora_fin", "pausa_min", "horas_netas", "costo_hora", "costo_mo", "modalidad", "fecha"}
     for k, v in data.items():
         if k in allowed:
             setattr(mo, k, v)
