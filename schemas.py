@@ -563,6 +563,10 @@ class ReglaContabilizacionOut(BaseModel):
     concepto: str
     cuenta_debe_id: int
     cuenta_haber_id: int
+    cuenta_debe_codigo: Optional[str] = None
+    cuenta_debe_nombre: Optional[str] = None
+    cuenta_haber_codigo: Optional[str] = None
+    cuenta_haber_nombre: Optional[str] = None
     descripcion: Optional[str] = None
     activo: bool
     class Config:

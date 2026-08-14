@@ -199,6 +199,7 @@ cuentas_data = [
     ("1.1.03.01","Insumos Agrícolas",                "activo",     "deudora", "Balance",     4, True),
     ("1.1.03.02","Cosecha en Proceso (WIP)",         "activo",     "deudora", "Balance",     4, True),
     ("1.1.03.03","Cosecha Terminada",                "activo",     "deudora", "Balance",     4, True),
+    ("1.1.02.05","Anticipo ISR",                      "activo",     "deudora", "Balance",     4, True),
     ("1.2",     "ACTIVOS NO CORRIENTES",             "activo",     "deudora", "Balance",     2, False),
     ("1.2.01",  "Propiedad, Planta y Equipo",        "activo",     "deudora", "Balance",     3, False),
     ("1.2.01.01","Terrenos",                         "activo",     "deudora", "Balance",     4, True),
@@ -228,6 +229,9 @@ cuentas_data = [
     ("2.1.03.02","TSS Empleado Retenido",            "pasivo",     "acreedora","Balance",     4, True),
     ("2.1.03.03","Vacaciones por Pagar",             "pasivo",     "acreedora","Balance",     4, True),
     ("2.1.03.04","Prestaciones por Pagar",           "pasivo",     "acreedora","Balance",     4, True),
+    ("2.1.03.05","INFOTEP por Pagar",               "pasivo",     "acreedora","Balance",     4, True),
+    ("2.1.04",  "Provisiones",                       "pasivo",     "acreedora","Balance",     3, False),
+    ("2.1.04.01","Provisión Prestaciones Laborales", "pasivo",     "acreedora","Balance",     4, True),
     # ── PATRIMONIO ──
     ("3",       "PATRIMONIO",                        "patrimonio", "acreedora","Balance",     1, False),
     ("3.1",     "Capital Social",                    "patrimonio", "acreedora","Balance",     2, True),
@@ -239,9 +243,12 @@ cuentas_data = [
     ("4.1",     "Ingresos Operacionales",            "ingreso",    "acreedora","Resultado",   2, False),
     ("4.1.01",  "Venta de Aguacate Hass",            "ingreso",    "acreedora","Resultado",   3, True),
     ("4.1.02",  "Venta de Subproductos",             "ingreso",    "acreedora","Resultado",   3, True),
+    ("4.1.03",  "Descuentos sobre Ventas",           "ingreso",    "deudora", "Resultado",   3, True),
+    ("4.1.04",  "Devoluciones sobre Ventas",         "ingreso",    "deudora", "Resultado",   3, True),
     ("4.2",     "Otros Ingresos",                    "ingreso",    "acreedora","Resultado",   2, False),
     ("4.2.01",  "Ingreso por Diferencia Cambiaria",  "ingreso",    "acreedora","Resultado",   3, True),
     ("4.2.02",  "Otros Ingresos No Operacionales",   "ingreso",    "acreedora","Resultado",   3, True),
+    ("4.2.03",  "Ingresos por Intereses",            "ingreso",    "acreedora","Resultado",   3, True),
     # ── COSTOS ──
     ("5",       "COSTOS",                            "costo",      "deudora", "Resultado",   1, False),
     ("5.1",     "Costo de Producción Agrícola",      "costo",      "deudora", "Resultado",   2, False),
@@ -253,6 +260,9 @@ cuentas_data = [
     ("5.2",     "Costos Indirectos de Producción",   "costo",      "deudora", "Resultado",   2, False),
     ("5.2.01",  "Supervisión de Campo",              "costo",      "deudora", "Resultado",   3, True),
     ("5.2.02",  "Mantenimiento de Equipos",          "costo",      "deudora", "Resultado",   3, True),
+    ("5.3",     "Ajustes al Costo",                  "costo",      "acreedora","Resultado",   2, False),
+    ("5.3.01",  "Descuentos sobre Compras",          "costo",      "acreedora","Resultado",   3, True),
+    ("5.3.02",  "Devoluciones sobre Compras",        "costo",      "acreedora","Resultado",   3, True),
     # ── GASTOS ──
     ("6",       "GASTOS",                            "gasto",      "deudora", "Resultado",   1, False),
     ("6.1",     "Gastos Administrativos",            "gasto",      "deudora", "Resultado",   2, False),
@@ -262,10 +272,16 @@ cuentas_data = [
     ("6.1.04",  "Seguros",                           "gasto",      "deudora", "Resultado",   3, True),
     ("6.1.05",  "Depreciación Administrativa",       "gasto",      "deudora", "Resultado",   3, True),
     ("6.1.06",  "Gastos Legales y Permisos",         "gasto",      "deudora", "Resultado",   3, True),
+    ("6.1.07",  "Contribución INFOTEP (1%)",         "gasto",      "deudora", "Resultado",   3, True),
+    ("6.1.08",  "Gastos de Representación",          "gasto",      "deudora", "Resultado",   3, True),
     ("6.2",     "Gastos Financieros",                "gasto",      "deudora", "Resultado",   2, False),
     ("6.2.01",  "Intereses Bancarios",               "gasto",      "deudora", "Resultado",   3, True),
     ("6.2.02",  "Comisiones Bancarias",              "gasto",      "deudora", "Resultado",   3, True),
     ("6.2.03",  "Pérdida por Diferencia Cambiaria",  "gasto",      "deudora", "Resultado",   3, True),
+    # ── IMPUESTOS SOBRE LA RENTA ──
+    ("6.3",     "Gastos de Impuestos",               "gasto",      "deudora", "Resultado",   2, False),
+    ("6.3.01",  "Gasto ISR Corriente",               "gasto",      "deudora", "Resultado",   3, True),
+    ("6.3.02",  "Gasto ISR Diferido",                "gasto",      "deudora", "Resultado",   3, True),
 ]
 for c in cuentas_data:
     if not db.query(models.CuentaContable).filter_by(codigo=c[0]).first():

@@ -192,11 +192,68 @@ def cerrar_periodo(id: int, db: Session = Depends(get_db), user=Depends(require_
     ).count()
     if borradores > 0:
         raise HTTPException(400, f"Hay {borradores} asiento(s) en borrador. Contabilícelos o anúlelos primero.")
+    periodo_ids = [p.id]
+    lq = db.query(
+        models.LineaAsiento.cuenta_id,
+        sqlfunc.sum(models.LineaAsiento.debe).label("td"),
+        sqlfunc.sum(models.LineaAsiento.haber).label("th"),
+    ).join(models.AsientoContable).filter(
+        models.AsientoContable.estado == "contabilizado",
+        models.AsientoContable.periodo_id.in_(periodo_ids)
+    ).group_by(models.LineaAsiento.cuenta_id)
+
+    cuentas_map = {c.id: c for c in db.query(models.CuentaContable).all()}
+    resultado = Decimal(0)
+    for row in lq.all():
+        c = cuentas_map.get(row.cuenta_id)
+        if c and c.tipo in ("ingreso", "costo", "gasto"):
+            neto = Decimal(str(row.td or 0)) - Decimal(str(row.th or 0))
+            resultado -= neto
+
+    asiento_cierre = None
+    if resultado != 0:
+        cta_resultado = db.query(models.CuentaContable).filter(
+            models.CuentaContable.codigo == "3.4").first()
+        if cta_resultado:
+            lineas_cierre = []
+            for row in lq.all():
+                c = cuentas_map.get(row.cuenta_id)
+                if not c or c.tipo not in ("ingreso", "costo", "gasto"):
+                    continue
+                debe = Decimal(str(row.td or 0))
+                haber = Decimal(str(row.th or 0))
+                if debe == 0 and haber == 0:
+                    continue
+                lineas_cierre.append({
+                    "cuenta_id": row.cuenta_id,
+                    "debe": haber, "haber": debe,
+                    "descripcion_linea": f"Cierre {c.codigo} {c.nombre}"
+                })
+            total_d = sum(Decimal(str(l["debe"])) for l in lineas_cierre)
+            total_h = sum(Decimal(str(l["haber"])) for l in lineas_cierre)
+            diff = total_d - total_h
+            if diff > 0:
+                lineas_cierre.append({"cuenta_id": cta_resultado.id,
+                    "debe": 0, "haber": diff,
+                    "descripcion_linea": "Resultado del ejercicio (utilidad)"})
+            elif diff < 0:
+                lineas_cierre.append({"cuenta_id": cta_resultado.id,
+                    "debe": abs(diff), "haber": 0,
+                    "descripcion_linea": "Resultado del ejercicio (pérdida)"})
+
+            if lineas_cierre:
+                asiento_cierre = _crear_asiento_auto(
+                    db, p.fecha_fin, "CIE", str(p.id),
+                    f"Cierre contable — {p.nombre}",
+                    lineas_cierre, user.nombre
+                )
+
     p.estado = "cerrado"
     p.cerrado_por = user.nombre
     p.cerrado_en = datetime.utcnow()
     db.commit()
-    return {"ok": True, "msg": f"Periodo {p.nombre} cerrado"}
+    return {"ok": True, "msg": f"Periodo {p.nombre} cerrado",
+            "asiento_cierre": asiento_cierre.numero if asiento_cierre else None}
 
 
 @router.post("/periodos/{id}/reabrir")
@@ -645,7 +702,19 @@ def listar_reglas(db: Session = Depends(get_db), user=Depends(get_current_user))
     reglas = db.query(models.ReglaContabilizacion).filter(
         models.ReglaContabilizacion.activo == True
     ).order_by(models.ReglaContabilizacion.evento).all()
-    return [schemas.ReglaContabilizacionOut.model_validate(r) for r in reglas]
+    result = []
+    for r in reglas:
+        data = schemas.ReglaContabilizacionOut.model_validate(r)
+        cd = db.query(models.CuentaContable).filter(models.CuentaContable.id == r.cuenta_debe_id).first()
+        ch = db.query(models.CuentaContable).filter(models.CuentaContable.id == r.cuenta_haber_id).first()
+        if cd:
+            data.cuenta_debe_codigo = cd.codigo
+            data.cuenta_debe_nombre = cd.nombre
+        if ch:
+            data.cuenta_haber_codigo = ch.codigo
+            data.cuenta_haber_nombre = ch.nombre
+        result.append(data)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
