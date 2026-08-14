@@ -162,6 +162,41 @@ def nomina_mensual(
     ]
 
 
+@router.get("/nomina-detalle/{id_trab}")
+def nomina_detalle_trabajador(
+    id_trab: str, mes: int = Query(...), ano: int = Query(...),
+    db: Session = Depends(get_db), _=Depends(auth.get_current_user)
+):
+    rows = db.query(
+        models.OTManoObra,
+        models.OrdenTrabajo.campo_id,
+        models.OrdenTrabajo.actividad_id,
+        models.OrdenTrabajo.supervisor,
+        models.OrdenTrabajo.estado,
+        models.OrdenTrabajo.fecha_ejecucion,
+    ).join(
+        models.OrdenTrabajo,
+        models.OTManoObra.ot_id == models.OrdenTrabajo.ot_id
+    ).filter(
+        models.OTManoObra.trabajador_id == id_trab,
+        models.OTManoObra.fecha.isnot(None),
+        extract('month', models.OTManoObra.fecha) == mes,
+        extract('year', models.OTManoObra.fecha) == ano,
+    ).order_by(models.OTManoObra.fecha.desc()).all()
+
+    return [
+        {
+            "ot_id": r[0].ot_id, "fecha": r[0].fecha.isoformat() if r[0].fecha else None,
+            "hora_inicio": r[0].hora_inicio, "hora_fin": r[0].hora_fin,
+            "horas_netas": r[0].horas_netas, "modalidad": r[0].modalidad,
+            "costo_hora": float(r[0].costo_hora or 0), "costo_mo": float(r[0].costo_mo or 0),
+            "campo_id": r[1], "actividad_id": r[2], "supervisor": r[3],
+            "estado_ot": r[4], "fecha_ot": r[5].isoformat() if r[5] else None,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/export/nomina-csv")
 def export_nomina_csv(
     mes: int = Query(...), ano: int = Query(...),

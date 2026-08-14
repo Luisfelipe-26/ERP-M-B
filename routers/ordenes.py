@@ -317,8 +317,8 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
     orden = db.query(models.OrdenTrabajo).filter(models.OrdenTrabajo.ot_id == ot_id).first()
     if not orden:
         raise HTTPException(status_code=404, detail="Orden no encontrada")
-    if orden.estado == "Cerrada":
-        raise HTTPException(status_code=400, detail="No se puede editar una orden cerrada")
+    if orden.estado == "Cerrada" and current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede editar una orden cerrada")
 
     campo = None
     if data.campo_id:
