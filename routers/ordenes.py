@@ -449,6 +449,33 @@ def get_orden_detalle(ot_id: int, db: Session = Depends(get_db), _=Depends(auth.
     }
 
 
+@router.patch("/{ot_id}/mano-obra/{mo_id}")
+def update_mano_obra(ot_id: int, mo_id: int, data: dict,
+                     db: Session = Depends(get_db),
+                     current_user: models.Usuario = Depends(auth.get_current_user)):
+    orden = db.query(models.OrdenTrabajo).filter(models.OrdenTrabajo.ot_id == ot_id).first()
+    if not orden:
+        raise HTTPException(status_code=404, detail="Orden no encontrada")
+    if orden.estado == "Cerrada" and current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo un administrador puede editar una orden cerrada")
+    mo = db.query(models.OTManoObra).filter(
+        models.OTManoObra.id == mo_id, models.OTManoObra.ot_id == ot_id
+    ).first()
+    if not mo:
+        raise HTTPException(status_code=404, detail="Registro de mano de obra no encontrado")
+    allowed = {"hora_inicio", "hora_fin", "horas_netas", "costo_hora", "costo_mo", "modalidad", "fecha"}
+    for k, v in data.items():
+        if k in allowed:
+            setattr(mo, k, v)
+    if "horas_netas" in data and "costo_hora" in data and "costo_mo" not in data:
+        mo.costo_mo = round(float(data["horas_netas"]) * float(data["costo_hora"]), 2)
+    _recalc_orden(orden, db)
+    audit.log(db, current_user, "EDITAR_MO", "OT", str(ot_id),
+              f"MO #{mo_id} editada en OT #{ot_id} — Costo: RD$ {mo.costo_mo:,.2f}")
+    db.commit()
+    return {"ok": True, "costo_mo": float(mo.costo_mo), "costo_total_ot": float(orden.costo_total)}
+
+
 @router.put("/{ot_id}/estado")
 def update_estado(ot_id: int, estado: str = Query(...), hora_cierre: Optional[str] = Query(None),
                    db: Session = Depends(get_db),

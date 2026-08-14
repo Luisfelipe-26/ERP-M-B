@@ -186,6 +186,7 @@ def nomina_detalle_trabajador(
 
     return [
         {
+            "mo_id": r[0].id,
             "ot_id": r[0].ot_id, "fecha": r[0].fecha.isoformat() if r[0].fecha else None,
             "hora_inicio": r[0].hora_inicio, "hora_fin": r[0].hora_fin,
             "horas_netas": r[0].horas_netas, "modalidad": r[0].modalidad,
