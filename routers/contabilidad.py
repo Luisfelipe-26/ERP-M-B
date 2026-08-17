@@ -195,6 +195,101 @@ def desactivar_partida(id: int, db: Session = Depends(get_db), user=Depends(requ
     return {"ok": True, "msg": "Partida eliminada"}
 
 
+# Estructura estándar de estados financieros (plantilla FSV tipo SAP).
+# Cada nodo hoja lista prefijos de código de cuenta; las cuentas de
+# movimiento cuyo código empiece por esos prefijos se asignan automáticamente.
+ESTRUCTURA_BG = [
+    {"nombre": "Activos Corrientes", "clasificacion": "activo_corriente", "es_grupo": True, "hijos": [
+        {"nombre": "Efectivo y Equivalentes", "clasificacion": "activo_corriente", "prefijos": ["1.1.01"]},
+        {"nombre": "Cuentas por Cobrar", "clasificacion": "activo_corriente", "prefijos": ["1.1.02"]},
+        {"nombre": "Inventarios", "clasificacion": "activo_corriente", "prefijos": ["1.1.03"]},
+    ]},
+    {"nombre": "Activos No Corrientes", "clasificacion": "activo_no_corriente", "es_grupo": True, "hijos": [
+        {"nombre": "Propiedad, Planta y Equipo", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.01"]},
+        {"nombre": "Depreciación Acumulada", "clasificacion": "activo_no_corriente", "invertir_signo": True, "prefijos": ["1.2.02"]},
+    ]},
+    {"nombre": "Pasivos Corrientes", "clasificacion": "pasivo_corriente", "es_grupo": True, "hijos": [
+        {"nombre": "Cuentas por Pagar", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.01"]},
+        {"nombre": "Impuestos por Pagar", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.02"]},
+        {"nombre": "Obligaciones Laborales", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.03"]},
+        {"nombre": "Provisiones", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.04"]},
+    ]},
+    {"nombre": "Patrimonio", "clasificacion": "patrimonio", "es_grupo": True, "hijos": [
+        {"nombre": "Capital y Reservas", "clasificacion": "patrimonio", "prefijos": ["3.1", "3.2"]},
+        {"nombre": "Resultados Acumulados", "clasificacion": "patrimonio", "prefijos": ["3.3", "3.4"]},
+    ]},
+]
+ESTRUCTURA_ER = [
+    {"nombre": "Ingresos Operacionales", "clasificacion": "ingresos", "prefijos": ["4.1"]},
+    {"nombre": "Otros Ingresos", "clasificacion": "ingresos", "prefijos": ["4.2"]},
+    {"nombre": "Costo de Producción Agrícola", "clasificacion": "costos", "prefijos": ["5.1", "5.2", "5.3"]},
+    {"nombre": "Gastos Administrativos", "clasificacion": "gastos", "prefijos": ["6.1"]},
+    {"nombre": "Gastos Financieros", "clasificacion": "gastos", "prefijos": ["6.2"]},
+    {"nombre": "Gastos de Impuestos", "clasificacion": "gastos", "prefijos": ["6.3"]},
+]
+
+
+@router.post("/partidas/seed-estructura")
+def seed_estructura(estado: str, reemplazar: bool = False,
+                    db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Genera la estructura estándar de estados financieros y asigna
+    las cuentas del catálogo por prefijo de código."""
+    if estado not in ("balance_general", "estado_resultados"):
+        raise HTTPException(400, "estado inválido")
+
+    existentes = db.query(models.PartidaEstadoFinanciero).filter(
+        models.PartidaEstadoFinanciero.estado == estado,
+        models.PartidaEstadoFinanciero.activo == True).all()
+    if existentes:
+        if not reemplazar:
+            raise HTTPException(400, "Ya existe una estructura. Use reemplazar=true para regenerarla.")
+        ids = [p.id for p in existentes]
+        db.query(models.CuentaContable).filter(
+            models.CuentaContable.partida_id.in_(ids)).update(
+            {models.CuentaContable.partida_id: None}, synchronize_session=False)
+        db.query(models.PartidaEstadoFinanciero).filter(
+            models.PartidaEstadoFinanciero.id.in_(ids)).delete(synchronize_session=False)
+        db.flush()
+
+    cuentas_mov = db.query(models.CuentaContable).filter(
+        models.CuentaContable.activo == True,
+        models.CuentaContable.acepta_movimientos == True).all()
+
+    nodos_creados = 0
+    cuentas_asignadas = 0
+
+    def asignar(prefijos, partida_id):
+        nonlocal cuentas_asignadas
+        for c in cuentas_mov:
+            if any(c.codigo == p or c.codigo.startswith(p + ".") for p in prefijos):
+                c.partida_id = partida_id
+                cuentas_asignadas += 1
+
+    def crear_nodo(spec, padre_id, orden):
+        nonlocal nodos_creados
+        p = models.PartidaEstadoFinanciero(
+            nombre=spec["nombre"], estado=estado, clasificacion=spec["clasificacion"],
+            padre_id=padre_id, orden=orden,
+            invertir_signo=spec.get("invertir_signo", False),
+            es_grupo=spec.get("es_grupo", False),
+        )
+        db.add(p)
+        db.flush()
+        nodos_creados += 1
+        if spec.get("prefijos"):
+            asignar(spec["prefijos"], p.id)
+        for i, hijo in enumerate(spec.get("hijos", [])):
+            crear_nodo(hijo, p.id, i)
+        return p
+
+    estructura = ESTRUCTURA_BG if estado == "balance_general" else ESTRUCTURA_ER
+    for i, spec in enumerate(estructura):
+        crear_nodo(spec, None, i)
+
+    db.commit()
+    return {"ok": True, "nodos_creados": nodos_creados, "cuentas_asignadas": cuentas_asignadas}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PLAN DE CUENTAS
 # ══════════════════════════════════════════════════════════════════════════════
