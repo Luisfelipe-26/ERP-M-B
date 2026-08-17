@@ -1,8 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text, inspect
-from database import engine
+from sqlalchemy import text, inspect, func
+from database import engine, SessionLocal
 import models
 from routers import (
     auth, campos, trabajadores, actividades, productos,
@@ -37,10 +37,27 @@ def run_migrations():
                 pass
 
 
+def recalc_all_ot_costs():
+    """One-time sync of denormalized costo_mano_obra on every OT."""
+    db = SessionLocal()
+    try:
+        for ot in db.query(models.OrdenTrabajo).all():
+            mo = db.query(func.coalesce(func.sum(models.OTManoObra.costo_mo), 0)).filter(
+                models.OTManoObra.ot_id == ot.ot_id).scalar() or 0
+            new_mo = round(float(mo), 2)
+            if round(float(ot.costo_mano_obra or 0), 2) != new_mo:
+                ot.costo_mano_obra = new_mo
+                ot.costo_total = round(new_mo + float(ot.costo_insumos or 0) + float(ot.costo_equipo or 0), 2)
+        db.commit()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     models.Base.metadata.create_all(bind=engine)
     run_migrations()
+    recalc_all_ot_costs()
     start_sync()
     yield
 

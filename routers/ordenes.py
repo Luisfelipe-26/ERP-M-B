@@ -121,6 +121,21 @@ def reset_ot_sequence(nuevo_inicio: int = Query(0, description="Último número 
     return {"message": f"Secuencia OT reseteada. Próxima OT será #{next_id}", "next_ot_id": next_id}
 
 
+@router.post("/recalcular-costos")
+def recalcular_costos_ot(db: Session = Depends(get_db),
+                          current_user=Depends(auth.require_admin)):
+    """Recalculate costo_mano_obra for all OTs from actual OTManoObra records."""
+    ordenes = db.query(models.OrdenTrabajo).all()
+    fixed = 0
+    for orden in ordenes:
+        old_mo = float(orden.costo_mano_obra or 0)
+        _recalc_orden(orden, db)
+        if round(old_mo, 2) != round(float(orden.costo_mano_obra or 0), 2):
+            fixed += 1
+    db.commit()
+    return {"message": f"Recalculadas {len(ordenes)} OTs, {fixed} tenían costos desactualizados"}
+
+
 @router.get("", response_model=List[schemas.OrdenTrabajoOut])
 def list_ordenes(
     estado: Optional[str] = None,
