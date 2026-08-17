@@ -571,3 +571,88 @@ class ReglaContabilizacionOut(BaseModel):
     activo: bool
     class Config:
         from_attributes = True
+
+# Regla Contabilización Create/Update
+class ReglaContabilizacionCreate(BaseModel):
+    evento: str
+    concepto: str
+    cuenta_debe_id: int
+    cuenta_haber_id: int
+    descripcion: Optional[str] = None
+
+# Activo Fijo
+class ActivoFijoCreate(BaseModel):
+    codigo: str
+    nombre: str
+    categoria: Optional[str] = None
+    fecha_adquisicion: date
+    costo_adquisicion: float = 0
+    vida_util_meses: int = 60
+    valor_residual: float = 0
+    metodo_depreciacion: str = "lineal"
+    campo_id: Optional[str] = None
+    cuenta_activo_id: Optional[int] = None
+    cuenta_depreciacion_id: Optional[int] = None
+    cuenta_gasto_dep_id: Optional[int] = None
+
+class ActivoFijoOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+    categoria: Optional[str] = None
+    fecha_adquisicion: Optional[date] = None
+    costo_adquisicion: float
+    vida_util_meses: Optional[int] = None
+    valor_residual: float
+    depreciacion_acumulada: float
+    metodo_depreciacion: str
+    campo_id: Optional[str] = None
+    cuenta_activo_id: Optional[int] = None
+    cuenta_depreciacion_id: Optional[int] = None
+    cuenta_gasto_dep_id: Optional[int] = None
+    activo: bool
+    creado_en: Optional[datetime] = None
+    valor_en_libros: Optional[float] = None
+    dep_mensual_estimada: Optional[float] = None
+    campo_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class DepreciacionHistorialOut(BaseModel):
+    id: int
+    activo_id: int
+    periodo_id: int
+    monto: float
+    depreciacion_acumulada_post: Optional[float] = None
+    asiento_id: Optional[int] = None
+    periodo_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+# Presupuesto
+class PresupuestoCreate(BaseModel):
+    anio: int
+    cuenta_id: int
+    campo_id: Optional[str] = None
+    monto_ene: float = 0
+    monto_feb: float = 0
+    monto_mar: float = 0
+    monto_abr: float = 0
+    monto_may: float = 0
+    monto_jun: float = 0
+    monto_jul: float = 0
+    monto_ago: float = 0
+    monto_sep: float = 0
+    monto_oct: float = 0
+    monto_nov: float = 0
+    monto_dic: float = 0
+    descripcion: Optional[str] = None
+
+class PresupuestoOut(PresupuestoCreate):
+    id: int
+    cuenta_codigo: Optional[str] = None
+    cuenta_nombre: Optional[str] = None
+    campo_nombre: Optional[str] = None
+    total_anual: Optional[float] = None
+    class Config:
+        from_attributes = True

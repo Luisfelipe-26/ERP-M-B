@@ -1103,3 +1103,408 @@ def listar_cobros(cxc_id: int = None, skip: int = 0, limit: int = 50,
         q = q.filter(models.Cobro.cxc_id == cxc_id)
     items = q.order_by(models.Cobro.fecha.desc()).offset(skip).limit(limit).all()
     return [schemas.CobroOut.model_validate(c) for c in items]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REGLAS CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/reglas")
+def crear_regla(data: schemas.ReglaContabilizacionCreate,
+                db: Session = Depends(get_db), user=Depends(require_admin)):
+    existing = db.query(models.ReglaContabilizacion).filter(
+        models.ReglaContabilizacion.evento == data.evento,
+        models.ReglaContabilizacion.concepto == data.concepto,
+        models.ReglaContabilizacion.activo == True
+    ).first()
+    if existing:
+        raise HTTPException(400, f"Ya existe regla activa para {data.evento}/{data.concepto}")
+    for cid in [data.cuenta_debe_id, data.cuenta_haber_id]:
+        if not db.query(models.CuentaContable).get(cid):
+            raise HTTPException(400, f"Cuenta {cid} no existe")
+    regla = models.ReglaContabilizacion(**data.model_dump(), activo=True)
+    db.add(regla)
+    db.commit()
+    db.refresh(regla)
+    return {"ok": True, "id": regla.id}
+
+
+@router.put("/reglas/{id}")
+def actualizar_regla(id: int, data: schemas.ReglaContabilizacionCreate,
+                     db: Session = Depends(get_db), user=Depends(require_admin)):
+    regla = db.query(models.ReglaContabilizacion).get(id)
+    if not regla:
+        raise HTTPException(404, "Regla no encontrada")
+    for cid in [data.cuenta_debe_id, data.cuenta_haber_id]:
+        if not db.query(models.CuentaContable).get(cid):
+            raise HTTPException(400, f"Cuenta {cid} no existe")
+    for k, v in data.model_dump().items():
+        setattr(regla, k, v)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/reglas/{id}")
+def eliminar_regla(id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    regla = db.query(models.ReglaContabilizacion).get(id)
+    if not regla:
+        raise HTTPException(404, "Regla no encontrada")
+    regla.activo = False
+    db.commit()
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACTIVOS FIJOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _enrich_activo(a: models.ActivoFijo, db: Session) -> dict:
+    d = schemas.ActivoFijoOut.model_validate(a).model_dump()
+    costo = float(a.costo_adquisicion or 0)
+    residual = float(a.valor_residual or 0)
+    dep_acum = float(a.depreciacion_acumulada or 0)
+    d["valor_en_libros"] = round(costo - dep_acum, 2)
+    vida = a.vida_util_meses or 1
+    d["dep_mensual_estimada"] = round((costo - residual) / vida, 2)
+    if a.campo_id:
+        campo = db.query(models.Campo).filter(models.Campo.id_campo == a.campo_id).first()
+        d["campo_nombre"] = campo.nombre if campo else None
+    return d
+
+
+@router.get("/activos-fijos")
+def listar_activos(categoria: str = None, campo_id: str = None,
+                   db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.ActivoFijo).filter(models.ActivoFijo.activo == True)
+    if categoria:
+        q = q.filter(models.ActivoFijo.categoria == categoria)
+    if campo_id:
+        q = q.filter(models.ActivoFijo.campo_id == campo_id)
+    return [_enrich_activo(a, db) for a in q.order_by(models.ActivoFijo.codigo).all()]
+
+
+@router.get("/activos-fijos/{id}")
+def ver_activo(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    a = db.query(models.ActivoFijo).get(id)
+    if not a:
+        raise HTTPException(404, "Activo no encontrado")
+    d = _enrich_activo(a, db)
+    hist = db.query(models.DepreciacionHistorial).filter(
+        models.DepreciacionHistorial.activo_id == id
+    ).order_by(models.DepreciacionHistorial.id.desc()).all()
+    d["historial"] = []
+    for h in hist:
+        hd = schemas.DepreciacionHistorialOut.model_validate(h).model_dump()
+        p = db.query(models.PeriodoContable).get(h.periodo_id)
+        hd["periodo_nombre"] = p.nombre if p else None
+        d["historial"].append(hd)
+    return d
+
+
+@router.post("/activos-fijos")
+def crear_activo(data: schemas.ActivoFijoCreate,
+                 db: Session = Depends(get_db), user=Depends(require_admin)):
+    if db.query(models.ActivoFijo).filter(models.ActivoFijo.codigo == data.codigo).first():
+        raise HTTPException(400, f"Ya existe un activo con código {data.codigo}")
+    activo = models.ActivoFijo(**data.model_dump(), depreciacion_acumulada=0, activo=True)
+    db.add(activo)
+    db.commit()
+    db.refresh(activo)
+    return _enrich_activo(activo, db)
+
+
+@router.put("/activos-fijos/{id}")
+def actualizar_activo(id: int, data: schemas.ActivoFijoCreate,
+                      db: Session = Depends(get_db), user=Depends(require_admin)):
+    activo = db.query(models.ActivoFijo).get(id)
+    if not activo:
+        raise HTTPException(404, "Activo no encontrado")
+    dup = db.query(models.ActivoFijo).filter(
+        models.ActivoFijo.codigo == data.codigo, models.ActivoFijo.id != id
+    ).first()
+    if dup:
+        raise HTTPException(400, f"Ya existe otro activo con código {data.codigo}")
+    for k, v in data.model_dump().items():
+        setattr(activo, k, v)
+    db.commit()
+    db.refresh(activo)
+    return _enrich_activo(activo, db)
+
+
+@router.delete("/activos-fijos/{id}")
+def eliminar_activo(id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    activo = db.query(models.ActivoFijo).get(id)
+    if not activo:
+        raise HTTPException(404, "Activo no encontrado")
+    activo.activo = False
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/activos-fijos/depreciar")
+def correr_depreciacion(mes: int = Query(...), ano: int = Query(...),
+                        db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Run monthly depreciation for all active fixed assets."""
+    periodo = db.query(models.PeriodoContable).filter(
+        models.PeriodoContable.mes == mes, models.PeriodoContable.anio == ano
+    ).first()
+    if not periodo:
+        raise HTTPException(400, f"No existe periodo contable para {mes}/{ano}")
+    if periodo.estado == "cerrado":
+        raise HTTPException(400, "El periodo está cerrado")
+
+    activos = db.query(models.ActivoFijo).filter(models.ActivoFijo.activo == True).all()
+    depreciados = 0
+    total_dep = Decimal("0")
+
+    for a in activos:
+        already = db.query(models.DepreciacionHistorial).filter(
+            models.DepreciacionHistorial.activo_id == a.id,
+            models.DepreciacionHistorial.periodo_id == periodo.id
+        ).first()
+        if already:
+            continue
+
+        costo = Decimal(str(a.costo_adquisicion or 0))
+        residual = Decimal(str(a.valor_residual or 0))
+        dep_acum = Decimal(str(a.depreciacion_acumulada or 0))
+        base_dep = costo - residual
+        if base_dep <= 0 or dep_acum >= base_dep:
+            continue
+        vida = a.vida_util_meses or 1
+        dep_mensual = round(base_dep / vida, 2)
+        remaining = base_dep - dep_acum
+        if dep_mensual > remaining:
+            dep_mensual = remaining
+
+        a.depreciacion_acumulada = dep_acum + dep_mensual
+        hist = models.DepreciacionHistorial(
+            activo_id=a.id, periodo_id=periodo.id,
+            monto=dep_mensual, depreciacion_acumulada_post=a.depreciacion_acumulada
+        )
+        db.add(hist)
+
+        if a.cuenta_gasto_dep_id and a.cuenta_depreciacion_id:
+            asiento = _crear_asiento_auto(
+                db, periodo.fecha_fin, "DEP", f"AF-{a.codigo}",
+                f"Depreciación {a.nombre} — {periodo.nombre or f'{mes}/{ano}'}",
+                [
+                    {"cuenta_id": a.cuenta_gasto_dep_id, "debe": float(dep_mensual), "haber": 0,
+                     "campo_id": a.campo_id,
+                     "descripcion_linea": f"Gasto depreciación {a.codigo}"},
+                    {"cuenta_id": a.cuenta_depreciacion_id, "debe": 0, "haber": float(dep_mensual),
+                     "descripcion_linea": f"Dep. acumulada {a.codigo}"},
+                ],
+                user.nombre
+            )
+            if asiento:
+                hist.asiento_id = asiento.id
+
+        depreciados += 1
+        total_dep += dep_mensual
+
+    db.commit()
+    return {"ok": True, "depreciados": depreciados, "total": float(total_dep),
+            "periodo": periodo.nombre or f"{mes}/{ano}"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ANTIGÜEDAD CxP / CxC
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/antiguedad-cxp")
+def antiguedad_cxp(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    hoy = date.today()
+    items = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.estado != "pagada"
+    ).all()
+    result = []
+    for cxp in items:
+        prov = db.query(models.Proveedor).get(cxp.proveedor_id)
+        dias = (hoy - cxp.fecha_factura).days if cxp.fecha_factura else 0
+        bucket = "corriente"
+        if dias > 120:
+            bucket = "120+"
+        elif dias > 90:
+            bucket = "91-120"
+        elif dias > 60:
+            bucket = "61-90"
+        elif dias > 30:
+            bucket = "31-60"
+        result.append({
+            "id": cxp.id, "numero": cxp.numero,
+            "proveedor": prov.nombre if prov else "—",
+            "fecha_factura": str(cxp.fecha_factura) if cxp.fecha_factura else None,
+            "fecha_vencimiento": str(cxp.fecha_vencimiento) if cxp.fecha_vencimiento else None,
+            "total": float(cxp.total or 0),
+            "saldo": float(cxp.saldo_pendiente or 0),
+            "dias": dias, "bucket": bucket,
+        })
+    buckets = {"corriente": 0, "31-60": 0, "61-90": 0, "91-120": 0, "120+": 0}
+    for r in result:
+        buckets[r["bucket"]] += r["saldo"]
+    return {"detalle": result, "resumen": {k: round(v, 2) for k, v in buckets.items()},
+            "total": round(sum(buckets.values()), 2)}
+
+
+@router.get("/antiguedad-cxc")
+def antiguedad_cxc(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    hoy = date.today()
+    items = db.query(models.CuentaPorCobrar).filter(
+        models.CuentaPorCobrar.estado != "cobrada"
+    ).all()
+    result = []
+    for cxc in items:
+        cli = db.query(models.Cliente).get(cxc.cliente_id) if cxc.cliente_id else None
+        dias = (hoy - cxc.fecha).days if cxc.fecha else 0
+        bucket = "corriente"
+        if dias > 120:
+            bucket = "120+"
+        elif dias > 90:
+            bucket = "91-120"
+        elif dias > 60:
+            bucket = "61-90"
+        elif dias > 30:
+            bucket = "31-60"
+        result.append({
+            "id": cxc.id, "numero": cxc.numero,
+            "cliente": cli.nombre if cli else "—",
+            "fecha": str(cxc.fecha) if cxc.fecha else None,
+            "fecha_vencimiento": str(cxc.fecha_vencimiento) if cxc.fecha_vencimiento else None,
+            "total": float(cxc.total or 0),
+            "saldo": float(cxc.saldo_pendiente or 0),
+            "dias": dias, "bucket": bucket,
+        })
+    buckets = {"corriente": 0, "31-60": 0, "61-90": 0, "91-120": 0, "120+": 0}
+    for r in result:
+        buckets[r["bucket"]] += r["saldo"]
+    return {"detalle": result, "resumen": {k: round(v, 2) for k, v in buckets.items()},
+            "total": round(sum(buckets.values()), 2)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PRESUPUESTO
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/presupuestos")
+def listar_presupuestos(anio: int = None, db: Session = Depends(get_db),
+                        user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.Presupuesto)
+    if anio:
+        q = q.filter(models.Presupuesto.anio == anio)
+    items = q.all()
+    result = []
+    for p in items:
+        d = schemas.PresupuestoOut.model_validate(p).model_dump()
+        cta = db.query(models.CuentaContable).get(p.cuenta_id)
+        d["cuenta_codigo"] = cta.codigo if cta else None
+        d["cuenta_nombre"] = cta.nombre if cta else None
+        if p.campo_id:
+            campo = db.query(models.Campo).filter(models.Campo.id_campo == p.campo_id).first()
+            d["campo_nombre"] = campo.nombre if campo else None
+        meses = [p.monto_ene, p.monto_feb, p.monto_mar, p.monto_abr, p.monto_may, p.monto_jun,
+                 p.monto_jul, p.monto_ago, p.monto_sep, p.monto_oct, p.monto_nov, p.monto_dic]
+        d["total_anual"] = round(sum(float(m or 0) for m in meses), 2)
+        result.append(d)
+    return result
+
+
+@router.post("/presupuestos")
+def crear_presupuesto(data: schemas.PresupuestoCreate,
+                      db: Session = Depends(get_db), user=Depends(require_admin)):
+    if not db.query(models.CuentaContable).get(data.cuenta_id):
+        raise HTTPException(400, "Cuenta contable no existe")
+    dup = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == data.anio,
+        models.Presupuesto.cuenta_id == data.cuenta_id,
+        models.Presupuesto.campo_id == data.campo_id
+    ).first()
+    if dup:
+        raise HTTPException(400, "Ya existe presupuesto para esa cuenta/campo/año")
+    p = models.Presupuesto(**data.model_dump())
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    return {"ok": True, "id": p.id}
+
+
+@router.put("/presupuestos/{id}")
+def actualizar_presupuesto(id: int, data: schemas.PresupuestoCreate,
+                           db: Session = Depends(get_db), user=Depends(require_admin)):
+    p = db.query(models.Presupuesto).get(id)
+    if not p:
+        raise HTTPException(404, "Presupuesto no encontrado")
+    for k, v in data.model_dump().items():
+        setattr(p, k, v)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/presupuestos/{id}")
+def eliminar_presupuesto(id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    p = db.query(models.Presupuesto).get(id)
+    if not p:
+        raise HTTPException(404, "Presupuesto no encontrado")
+    db.delete(p)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/presupuesto-vs-real")
+def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
+                        db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.Presupuesto).filter(models.Presupuesto.anio == anio)
+    if campo_id:
+        q = q.filter(models.Presupuesto.campo_id == campo_id)
+    presupuestos = q.all()
+
+    meses_keys = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+                  "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    result = []
+    for p in presupuestos:
+        cta = db.query(models.CuentaContable).get(p.cuenta_id)
+        row = {
+            "cuenta_id": p.cuenta_id,
+            "cuenta_codigo": cta.codigo if cta else None,
+            "cuenta_nombre": cta.nombre if cta else None,
+            "campo_id": p.campo_id,
+            "meses": [],
+            "total_presupuesto": 0, "total_real": 0,
+        }
+        for i, mk in enumerate(meses_keys, 1):
+            pres = float(getattr(p, mk) or 0)
+            periodo = db.query(models.PeriodoContable).filter(
+                models.PeriodoContable.anio == anio, models.PeriodoContable.mes == i
+            ).first()
+            real = 0.0
+            if periodo:
+                sm = db.query(models.SaldoMensual).filter(
+                    models.SaldoMensual.cuenta_id == p.cuenta_id,
+                    models.SaldoMensual.periodo_id == periodo.id
+                ).first()
+                if sm:
+                    nat = cta.naturaleza if cta else "deudora"
+                    real = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
+                    if nat == "acreedora":
+                        real = -real
+            desv = round(real - pres, 2) if pres else 0
+            row["meses"].append({"mes": i, "presupuesto": pres, "real": round(real, 2), "desviacion": desv})
+            row["total_presupuesto"] += pres
+            row["total_real"] += real
+        row["total_presupuesto"] = round(row["total_presupuesto"], 2)
+        row["total_real"] = round(row["total_real"], 2)
+        row["total_desviacion"] = round(row["total_real"] - row["total_presupuesto"], 2)
+        result.append(row)
+    return result
