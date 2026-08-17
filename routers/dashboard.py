@@ -36,14 +36,25 @@ def get_stats(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
         models.OrdenTrabajo.fecha_ejecucion, mes, ano
     ).count()
 
-    costos_mes = _filter_mes_ano(
+    costo_mo_mes = db.query(
+        func.coalesce(func.sum(models.OTManoObra.costo_mo), 0)
+    ).filter(
+        models.OTManoObra.fecha.isnot(None),
+        extract('month', models.OTManoObra.fecha) == mes,
+        extract('year', models.OTManoObra.fecha) == ano,
+    ).scalar()
+
+    costos_ot_mes = _filter_mes_ano(
         db.query(
-            func.coalesce(func.sum(models.OrdenTrabajo.costo_mano_obra), 0),
             func.coalesce(func.sum(models.OrdenTrabajo.costo_insumos), 0),
-            func.coalesce(func.sum(models.OrdenTrabajo.costo_total), 0),
+            func.coalesce(func.sum(models.OrdenTrabajo.costo_equipo), 0),
         ),
         models.OrdenTrabajo.fecha_ejecucion, mes, ano
     ).first()
+
+    costo_insumos = float(costos_ot_mes[0] or 0)
+    costo_equipo = float(costos_ot_mes[1] or 0)
+    costo_mo = float(costo_mo_mes or 0)
 
     productos_bajo_stock = db.query(models.Producto).filter(
         models.Producto.activo == True,
@@ -57,9 +68,9 @@ def get_stats(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
         total_productos=total_productos,
         ordenes_abiertas=ordenes_abiertas,
         ordenes_mes=ordenes_mes,
-        costo_mo_mes=float(costos_mes[0] or 0),
-        costo_insumos_mes=float(costos_mes[1] or 0),
-        costo_total_mes=float(costos_mes[2] or 0),
+        costo_mo_mes=costo_mo,
+        costo_insumos_mes=costo_insumos,
+        costo_total_mes=costo_mo + costo_insumos + costo_equipo,
         productos_bajo_stock=productos_bajo_stock,
     )
 
@@ -389,26 +400,39 @@ def morning_briefing(db: Session = Depends(get_db), _=Depends(auth.get_current_u
     ).scalar()
 
     # --- Financial summary (current month) ---
-    costos_mes = db.query(
-        func.coalesce(func.sum(models.OrdenTrabajo.costo_total), 0),
-        func.coalesce(func.sum(models.OrdenTrabajo.costo_mano_obra), 0),
+    # MO from OTManoObra.fecha to match Nómina
+    costo_mo_mes = db.query(
+        func.coalesce(func.sum(models.OTManoObra.costo_mo), 0)
+    ).filter(
+        models.OTManoObra.fecha.isnot(None),
+        extract('month', models.OTManoObra.fecha) == mes,
+        extract('year', models.OTManoObra.fecha) == ano,
+    ).scalar()
+
+    costos_ot_mes = db.query(
         func.coalesce(func.sum(models.OrdenTrabajo.costo_insumos), 0),
+        func.coalesce(func.sum(models.OrdenTrabajo.costo_equipo), 0),
     ).filter(
         models.OrdenTrabajo.fecha_ejecucion.isnot(None),
         extract('month', models.OrdenTrabajo.fecha_ejecucion) == mes,
         extract('year', models.OrdenTrabajo.fecha_ejecucion) == ano,
     ).first()
 
+    f_mo = float(costo_mo_mes or 0)
+    f_insumos = float(costos_ot_mes[0] or 0)
+    f_equipo = float(costos_ot_mes[1] or 0)
+    f_total = f_mo + f_insumos + f_equipo
+
     total_ha = db.query(func.coalesce(func.sum(models.Campo.area_ha), 0)).filter(
         models.Campo.activo == True
     ).scalar()
 
     financial = {
-        "costo_total_mes": float(costos_mes[0] or 0),
-        "costo_mo_mes": float(costos_mes[1] or 0),
-        "costo_insumos_mes": float(costos_mes[2] or 0),
+        "costo_total_mes": f_total,
+        "costo_mo_mes": f_mo,
+        "costo_insumos_mes": f_insumos,
         "total_ha": float(total_ha or 0),
-        "costo_por_ha": round(float(costos_mes[0] or 0) / float(total_ha), 2) if total_ha else 0,
+        "costo_por_ha": round(f_total / float(total_ha), 2) if total_ha else 0,
     }
 
     # --- Low stock alert ---
