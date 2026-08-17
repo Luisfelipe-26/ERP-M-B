@@ -1316,78 +1316,180 @@ def correr_depreciacion(mes: int = Query(...), ano: int = Query(...),
 # ANTIGÜEDAD CxP / CxC
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _bucket(dias):
+    if dias > 120: return "120+"
+    if dias > 90: return "91-120"
+    if dias > 60: return "61-90"
+    if dias > 30: return "31-60"
+    return "corriente"
+
+BUCKET_ORDER = ["corriente", "31-60", "61-90", "91-120", "120+"]
+
 @router.get("/antiguedad-cxp")
-def antiguedad_cxp(db: Session = Depends(get_db), user=Depends(get_current_user)):
+def antiguedad_cxp(
+    proveedor_id: int = None,
+    bucket_filter: str = None,
+    search: str = None,
+    agrupar: bool = False,
+    db: Session = Depends(get_db), user=Depends(get_current_user),
+):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
     hoy = date.today()
-    items = db.query(models.CuentaPorPagar).filter(
-        models.CuentaPorPagar.estado != "pagada"
-    ).all()
+    q = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.estado.notin_(["pagada", "anulada"])
+    )
+    if proveedor_id:
+        q = q.filter(models.CuentaPorPagar.proveedor_id == proveedor_id)
+    items = q.all()
+    prov_ids = {cxp.proveedor_id for cxp in items}
+    provs = {p.id: p for p in db.query(models.Proveedor).filter(models.Proveedor.id.in_(prov_ids)).all()} if prov_ids else {}
+
     result = []
     for cxp in items:
-        prov = db.query(models.Proveedor).get(cxp.proveedor_id)
+        prov = provs.get(cxp.proveedor_id)
+        nombre_prov = prov.nombre if prov else "—"
+        if search and search.lower() not in nombre_prov.lower() and search.lower() not in (cxp.numero or "").lower():
+            continue
         dias = (hoy - cxp.fecha_factura).days if cxp.fecha_factura else 0
-        bucket = "corriente"
-        if dias > 120:
-            bucket = "120+"
-        elif dias > 90:
-            bucket = "91-120"
-        elif dias > 60:
-            bucket = "61-90"
-        elif dias > 30:
-            bucket = "31-60"
+        b = _bucket(dias)
+        if bucket_filter and b != bucket_filter:
+            continue
+        pagos_list = []
+        for p in (cxp.pagos or []):
+            pagos_list.append({"numero": p.numero, "fecha": str(p.fecha), "monto": float(p.monto or 0), "metodo": p.metodo_pago or "—", "referencia": p.referencia_bancaria or ""})
         result.append({
             "id": cxp.id, "numero": cxp.numero,
-            "proveedor": prov.nombre if prov else "—",
+            "proveedor_id": cxp.proveedor_id,
+            "proveedor": nombre_prov,
             "fecha_factura": str(cxp.fecha_factura) if cxp.fecha_factura else None,
             "fecha_vencimiento": str(cxp.fecha_vencimiento) if cxp.fecha_vencimiento else None,
             "total": float(cxp.total or 0),
             "saldo": float(cxp.saldo_pendiente or 0),
-            "dias": dias, "bucket": bucket,
+            "dias": dias, "bucket": b,
+            "estado": cxp.estado,
+            "pagos": pagos_list,
         })
-    buckets = {"corriente": 0, "31-60": 0, "61-90": 0, "91-120": 0, "120+": 0}
+
+    buckets = {k: 0.0 for k in BUCKET_ORDER}
+    bucket_counts = {k: 0 for k in BUCKET_ORDER}
     for r in result:
         buckets[r["bucket"]] += r["saldo"]
-    return {"detalle": result, "resumen": {k: round(v, 2) for k, v in buckets.items()},
-            "total": round(sum(buckets.values()), 2)}
+        bucket_counts[r["bucket"]] += 1
+    total = sum(buckets.values())
+    total_vencido = total - buckets["corriente"]
+    avg_dias = round(sum(r["dias"] for r in result) / len(result), 1) if result else 0
+
+    grouped = {}
+    if agrupar:
+        for r in result:
+            key = r["proveedor_id"]
+            if key not in grouped:
+                grouped[key] = {"nombre": r["proveedor"], "documentos": 0, "saldo_total": 0, "dias_max": 0, "bucket_peor": "corriente", "items": []}
+            g = grouped[key]
+            g["documentos"] += 1
+            g["saldo_total"] += r["saldo"]
+            if r["dias"] > g["dias_max"]:
+                g["dias_max"] = r["dias"]
+                g["bucket_peor"] = r["bucket"]
+            g["items"].append(r)
+        for g in grouped.values():
+            g["saldo_total"] = round(g["saldo_total"], 2)
+
+    return {
+        "detalle": sorted(result, key=lambda x: -x["dias"]),
+        "resumen": {k: round(v, 2) for k, v in buckets.items()},
+        "resumen_count": bucket_counts,
+        "total": round(total, 2),
+        "total_vencido": round(total_vencido, 2),
+        "promedio_dias": avg_dias,
+        "num_documentos": len(result),
+        "agrupado": list(sorted(grouped.values(), key=lambda x: -x["saldo_total"])) if agrupar else None,
+    }
 
 
 @router.get("/antiguedad-cxc")
-def antiguedad_cxc(db: Session = Depends(get_db), user=Depends(get_current_user)):
+def antiguedad_cxc(
+    cliente_id: int = None,
+    bucket_filter: str = None,
+    search: str = None,
+    agrupar: bool = False,
+    db: Session = Depends(get_db), user=Depends(get_current_user),
+):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
     hoy = date.today()
-    items = db.query(models.CuentaPorCobrar).filter(
-        models.CuentaPorCobrar.estado != "cobrada"
-    ).all()
+    q = db.query(models.CuentaPorCobrar).filter(
+        models.CuentaPorCobrar.estado.notin_(["cobrada", "anulada"])
+    )
+    if cliente_id:
+        q = q.filter(models.CuentaPorCobrar.cliente_id == cliente_id)
+    items = q.all()
+    cli_ids = {cxc.cliente_id for cxc in items if cxc.cliente_id}
+    clis = {c.id: c for c in db.query(models.Cliente).filter(models.Cliente.id.in_(cli_ids)).all()} if cli_ids else {}
+
     result = []
     for cxc in items:
-        cli = db.query(models.Cliente).get(cxc.cliente_id) if cxc.cliente_id else None
+        cli = clis.get(cxc.cliente_id)
+        nombre_cli = cli.nombre if cli else "—"
+        if search and search.lower() not in nombre_cli.lower() and search.lower() not in (cxc.numero or "").lower():
+            continue
         dias = (hoy - cxc.fecha).days if cxc.fecha else 0
-        bucket = "corriente"
-        if dias > 120:
-            bucket = "120+"
-        elif dias > 90:
-            bucket = "91-120"
-        elif dias > 60:
-            bucket = "61-90"
-        elif dias > 30:
-            bucket = "31-60"
+        b = _bucket(dias)
+        if bucket_filter and b != bucket_filter:
+            continue
+        cobros_list = []
+        for c in (cxc.cobros or []):
+            cobros_list.append({"numero": c.numero, "fecha": str(c.fecha), "monto": float(c.monto or 0), "metodo": c.metodo_pago or "—", "referencia": c.referencia_bancaria or ""})
         result.append({
             "id": cxc.id, "numero": cxc.numero,
-            "cliente": cli.nombre if cli else "—",
+            "cliente_id": cxc.cliente_id,
+            "cliente": nombre_cli,
             "fecha": str(cxc.fecha) if cxc.fecha else None,
             "fecha_vencimiento": str(cxc.fecha_vencimiento) if cxc.fecha_vencimiento else None,
             "total": float(cxc.total or 0),
             "saldo": float(cxc.saldo_pendiente or 0),
-            "dias": dias, "bucket": bucket,
+            "dias": dias, "bucket": b,
+            "estado": cxc.estado,
+            "campo_id": cxc.campo_id,
+            "cobros": cobros_list,
         })
-    buckets = {"corriente": 0, "31-60": 0, "61-90": 0, "91-120": 0, "120+": 0}
+
+    buckets = {k: 0.0 for k in BUCKET_ORDER}
+    bucket_counts = {k: 0 for k in BUCKET_ORDER}
     for r in result:
         buckets[r["bucket"]] += r["saldo"]
-    return {"detalle": result, "resumen": {k: round(v, 2) for k, v in buckets.items()},
-            "total": round(sum(buckets.values()), 2)}
+        bucket_counts[r["bucket"]] += 1
+    total = sum(buckets.values())
+    total_vencido = total - buckets["corriente"]
+    avg_dias = round(sum(r["dias"] for r in result) / len(result), 1) if result else 0
+
+    grouped = {}
+    if agrupar:
+        for r in result:
+            key = r["cliente_id"]
+            if key not in grouped:
+                grouped[key] = {"nombre": r["cliente"], "documentos": 0, "saldo_total": 0, "dias_max": 0, "bucket_peor": "corriente", "items": []}
+            g = grouped[key]
+            g["documentos"] += 1
+            g["saldo_total"] += r["saldo"]
+            if r["dias"] > g["dias_max"]:
+                g["dias_max"] = r["dias"]
+                g["bucket_peor"] = r["bucket"]
+            g["items"].append(r)
+        for g in grouped.values():
+            g["saldo_total"] = round(g["saldo_total"], 2)
+
+    return {
+        "detalle": sorted(result, key=lambda x: -x["dias"]),
+        "resumen": {k: round(v, 2) for k, v in buckets.items()},
+        "resumen_count": bucket_counts,
+        "total": round(total, 2),
+        "total_vencido": round(total_vencido, 2),
+        "promedio_dias": avg_dias,
+        "num_documentos": len(result),
+        "agrupado": list(sorted(grouped.values(), key=lambda x: -x["saldo_total"])) if agrupar else None,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
