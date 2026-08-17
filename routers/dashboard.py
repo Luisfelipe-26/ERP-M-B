@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, extract, desc, case, and_
 from database import get_db
 import models, schemas, auth
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import csv, io
 from fastapi.responses import StreamingResponse
 
@@ -570,3 +570,61 @@ def campo_status(db: Session = Depends(get_db), _=Depends(auth.get_current_user)
         })
 
     return result
+
+
+@router.get("/produccion")
+def reporte_produccion(temporada: str = None, db: Session = Depends(get_db), user=Depends(auth.get_current_user)):
+    """Reportes de producción: rendimiento por campo, costo por kg."""
+    campos = db.query(models.Campo).all()
+    hoy = date.today()
+    temp = temporada or f"{hoy.year}"
+
+    result = []
+    for campo in campos:
+        ots = db.query(models.OrdenTrabajo).filter(
+            models.OrdenTrabajo.campo_id == campo.id_campo,
+            models.OrdenTrabajo.estado == "cerrada",
+        ).all()
+
+        costo_mo = sum(float(ot.costo_mano_obra or 0) for ot in ots)
+        costo_insumos = sum(float(ot.costo_insumos or 0) for ot in ots)
+        costo_total = costo_mo + costo_insumos
+
+        liq = db.query(models.CosechaLiquidacion).filter(
+            models.CosechaLiquidacion.campo_id == campo.id_campo,
+            models.CosechaLiquidacion.temporada.like(f"%{temp}%"),
+        ).all()
+        kg_total = sum(float(l.kg_cosechados or 0) for l in liq)
+
+        cxc = db.query(models.CuentaPorCobrar).filter(
+            models.CuentaPorCobrar.campo_id == campo.id_campo,
+        ).all()
+        ingresos = sum(float(c.total or 0) for c in cxc)
+        kg_vendidos = sum(float(c.kg_vendidos or 0) for c in cxc if c.kg_vendidos)
+
+        result.append({
+            "campo_id": campo.id_campo,
+            "nombre": campo.nombre or campo.id_campo,
+            "area_ha": campo.area_ha,
+            "n_plantas": campo.n_plantas,
+            "costo_mo": round(costo_mo, 2),
+            "costo_insumos": round(costo_insumos, 2),
+            "costo_total": round(costo_total, 2),
+            "kg_cosechados": round(kg_total, 2),
+            "kg_vendidos": round(kg_vendidos, 2),
+            "costo_por_kg": round(costo_total / kg_total, 2) if kg_total > 0 else 0,
+            "costo_por_ha": round(costo_total / campo.area_ha, 2) if campo.area_ha and campo.area_ha > 0 else 0,
+            "kg_por_ha": round(kg_total / campo.area_ha, 2) if campo.area_ha and campo.area_ha > 0 else 0,
+            "ingresos": round(ingresos, 2),
+            "utilidad": round(ingresos - costo_total, 2),
+            "margen": round(((ingresos - costo_total) / ingresos) * 100, 1) if ingresos > 0 else 0,
+        })
+    totales = {
+        "costo_total": round(sum(r["costo_total"] for r in result), 2),
+        "kg_cosechados": round(sum(r["kg_cosechados"] for r in result), 2),
+        "ingresos": round(sum(r["ingresos"] for r in result), 2),
+        "utilidad": round(sum(r["utilidad"] for r in result), 2),
+    }
+    totales["costo_por_kg"] = round(totales["costo_total"] / totales["kg_cosechados"], 2) if totales["kg_cosechados"] > 0 else 0
+    totales["margen"] = round((totales["utilidad"] / totales["ingresos"]) * 100, 1) if totales["ingresos"] > 0 else 0
+    return {"campos": result, "totales": totales, "temporada": temp}

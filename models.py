@@ -964,6 +964,33 @@ class NominaDetalle(Base):
     trabajador = relationship("Trabajador")
 
 
+class AsientoRecurrente(Base):
+    __tablename__ = "asientos_recurrentes"
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(100), nullable=False)
+    descripcion_asiento = Column(String(300))
+    frecuencia = Column(String(20), default="mensual")    # mensual, quincenal, semanal
+    dia_ejecucion = Column(Integer, default=1)
+    activo = Column(Boolean, default=True)
+    ultima_ejecucion = Column(Date)
+    proxima_ejecucion = Column(Date)
+    veces_ejecutado = Column(Integer, default=0)
+    creado_en = Column(DateTime, server_default=func.now())
+    lineas = relationship("AsientoRecurrenteLinea", back_populates="recurrente", cascade="all, delete-orphan")
+
+
+class AsientoRecurrenteLinea(Base):
+    __tablename__ = "asientos_recurrentes_lineas"
+    id = Column(Integer, primary_key=True, index=True)
+    recurrente_id = Column(Integer, ForeignKey("asientos_recurrentes.id"), nullable=False, index=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
+    descripcion = Column(String(300))
+    debe = Column(Numeric(14, 2), default=0)
+    haber = Column(Numeric(14, 2), default=0)
+    cuenta = relationship("CuentaContable")
+    recurrente = relationship("AsientoRecurrente", back_populates="lineas")
+
+
 class ConciliacionBancaria(Base):
     __tablename__ = "conciliacion_bancaria"
     id = Column(Integer, primary_key=True, index=True)

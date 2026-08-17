@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func as sqlfunc, cast, Date as SqlDate, and_, extract
 from database import get_db
 from auth import get_current_user, require_admin
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from calendar import monthrange
 from decimal import Decimal
 import models, schemas
@@ -1610,3 +1610,501 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
         row["total_desviacion"] = round(row["total_real"] - row["total_presupuesto"], 2)
         result.append(row)
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ESTADO DE FLUJO DE EFECTIVO
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/flujo-efectivo")
+def flujo_efectivo(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    periodo = db.query(models.PeriodoContable).filter(
+        models.PeriodoContable.anio == anio, models.PeriodoContable.mes == mes
+    ).first()
+    if not periodo:
+        raise HTTPException(404, "Período no encontrado")
+
+    cuentas = db.query(models.CuentaContable).filter(models.CuentaContable.acepta_movimientos == True).all()
+    cta_map = {c.id: c for c in cuentas}
+
+    saldos = db.query(models.SaldoMensual).filter(models.SaldoMensual.periodo_id == periodo.id).all()
+
+    operaciones = []
+    inversion = []
+    financiamiento = []
+
+    for sm in saldos:
+        cta = cta_map.get(sm.cuenta_id)
+        if not cta:
+            continue
+        code = cta.codigo or ""
+        neto = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
+        if abs(neto) < 0.01:
+            continue
+        item = {"codigo": code, "nombre": cta.nombre, "monto": round(neto, 2)}
+
+        if code.startswith("4") or code.startswith("5") or code.startswith("6"):
+            operaciones.append(item)
+        elif code.startswith("1.2") or code.startswith("12"):
+            inversion.append(item)
+        elif code.startswith("2.2") or code.startswith("22") or code.startswith("3"):
+            financiamiento.append(item)
+        else:
+            operaciones.append(item)
+
+    total_op = round(sum(i["monto"] for i in operaciones), 2)
+    total_inv = round(sum(i["monto"] for i in inversion), 2)
+    total_fin = round(sum(i["monto"] for i in financiamiento), 2)
+
+    bancos = db.query(models.CuentaBancaria).filter(models.CuentaBancaria.activo == True).all()
+    saldo_bancos = round(sum(float(b.saldo_segun_libro or 0) for b in bancos), 2)
+
+    return {
+        "periodo": f"{mes:02d}/{anio}",
+        "operaciones": {"items": operaciones, "total": total_op},
+        "inversion": {"items": inversion, "total": total_inv},
+        "financiamiento": {"items": financiamiento, "total": total_fin},
+        "variacion_neta": round(total_op + total_inv + total_fin, 2),
+        "saldo_efectivo_actual": saldo_bancos,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ASIENTOS RECURRENTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/asientos-recurrentes")
+def listar_recurrentes(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    items = db.query(models.AsientoRecurrente).order_by(models.AsientoRecurrente.id.desc()).all()
+    result = []
+    for ar in items:
+        lineas = []
+        for l in ar.lineas:
+            cta = db.query(models.CuentaContable).get(l.cuenta_id)
+            lineas.append({
+                "id": l.id, "cuenta_id": l.cuenta_id,
+                "cuenta_codigo": cta.codigo if cta else "", "cuenta_nombre": cta.nombre if cta else "",
+                "descripcion": l.descripcion, "debe": float(l.debe or 0), "haber": float(l.haber or 0),
+            })
+        result.append({
+            "id": ar.id, "nombre": ar.nombre, "descripcion_asiento": ar.descripcion_asiento,
+            "frecuencia": ar.frecuencia, "dia_ejecucion": ar.dia_ejecucion,
+            "activo": ar.activo, "ultima_ejecucion": str(ar.ultima_ejecucion) if ar.ultima_ejecucion else None,
+            "proxima_ejecucion": str(ar.proxima_ejecucion) if ar.proxima_ejecucion else None,
+            "veces_ejecutado": ar.veces_ejecutado, "lineas": lineas,
+            "total": round(sum(float(l.debe or 0) for l in ar.lineas), 2),
+        })
+    return result
+
+
+@router.post("/asientos-recurrentes")
+def crear_recurrente(data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    ar = models.AsientoRecurrente(
+        nombre=data["nombre"], descripcion_asiento=data.get("descripcion_asiento", ""),
+        frecuencia=data.get("frecuencia", "mensual"), dia_ejecucion=data.get("dia_ejecucion", 1),
+        activo=True,
+    )
+    db.add(ar)
+    db.flush()
+    for l in data.get("lineas", []):
+        db.add(models.AsientoRecurrenteLinea(
+            recurrente_id=ar.id, cuenta_id=l["cuenta_id"],
+            descripcion=l.get("descripcion", ""), debe=l.get("debe", 0), haber=l.get("haber", 0),
+        ))
+    db.commit()
+    return {"id": ar.id, "msg": "Asiento recurrente creado"}
+
+
+@router.put("/asientos-recurrentes/{id}")
+def editar_recurrente(id: int, data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    ar = db.query(models.AsientoRecurrente).get(id)
+    if not ar:
+        raise HTTPException(404, "No encontrado")
+    ar.nombre = data.get("nombre", ar.nombre)
+    ar.descripcion_asiento = data.get("descripcion_asiento", ar.descripcion_asiento)
+    ar.frecuencia = data.get("frecuencia", ar.frecuencia)
+    ar.dia_ejecucion = data.get("dia_ejecucion", ar.dia_ejecucion)
+    ar.activo = data.get("activo", ar.activo)
+    if "lineas" in data:
+        db.query(models.AsientoRecurrenteLinea).filter(models.AsientoRecurrenteLinea.recurrente_id == id).delete()
+        for l in data["lineas"]:
+            db.add(models.AsientoRecurrenteLinea(
+                recurrente_id=id, cuenta_id=l["cuenta_id"],
+                descripcion=l.get("descripcion", ""), debe=l.get("debe", 0), haber=l.get("haber", 0),
+            ))
+    db.commit()
+    return {"msg": "Actualizado"}
+
+
+@router.delete("/asientos-recurrentes/{id}")
+def eliminar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    ar = db.query(models.AsientoRecurrente).get(id)
+    if not ar:
+        raise HTTPException(404, "No encontrado")
+    db.delete(ar)
+    db.commit()
+    return {"msg": "Eliminado"}
+
+
+@router.post("/asientos-recurrentes/{id}/ejecutar")
+def ejecutar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    ar = db.query(models.AsientoRecurrente).get(id)
+    if not ar:
+        raise HTTPException(404, "No encontrado")
+    if not ar.lineas:
+        raise HTTPException(400, "Sin líneas definidas")
+    hoy = date.today()
+    periodo = db.query(models.PeriodoContable).filter(
+        models.PeriodoContable.anio == hoy.year, models.PeriodoContable.mes == hoy.month
+    ).first()
+    if not periodo or periodo.estado == "cerrado":
+        raise HTTPException(400, "Período actual no disponible o cerrado")
+    numero = get_next_seq(db, "asiento", "AST")
+    asiento = models.AsientoContable(
+        numero=numero, fecha=hoy, periodo_id=periodo.id,
+        descripcion=ar.descripcion_asiento or ar.nombre, estado="borrador",
+    )
+    db.add(asiento)
+    db.flush()
+    for l in ar.lineas:
+        db.add(models.LineaAsiento(
+            asiento_id=asiento.id, cuenta_id=l.cuenta_id,
+            descripcion=l.descripcion or "", debe=l.debe or 0, haber=l.haber or 0,
+        ))
+    ar.ultima_ejecucion = hoy
+    ar.veces_ejecutado = (ar.veces_ejecutado or 0) + 1
+    db.commit()
+    return {"msg": f"Asiento {numero} creado", "asiento_numero": numero}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FORMATOS DGII (606 / 607)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/dgii-606")
+def dgii_606(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Formato 606 — Compras de bienes y servicios (CxP del período)."""
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    inicio = date(anio, mes, 1)
+    _, ultimo = monthrange(anio, mes)
+    fin = date(anio, mes, ultimo)
+    empresa = db.query(models.ConfiguracionEmpresa).first()
+    rnc_empresa = empresa.rnc if empresa else ""
+
+    items = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.fecha_factura >= inicio,
+        models.CuentaPorPagar.fecha_factura <= fin,
+        models.CuentaPorPagar.estado != "anulada",
+    ).all()
+    provs = {}
+    for cxp in items:
+        if cxp.proveedor_id not in provs:
+            provs[cxp.proveedor_id] = db.query(models.Proveedor).get(cxp.proveedor_id)
+
+    rows = []
+    for cxp in items:
+        prov = provs.get(cxp.proveedor_id)
+        rows.append({
+            "rnc_cedula": prov.rnc if prov else "",
+            "tipo_id": "1" if prov and prov.rnc and len(prov.rnc) == 9 else "2",
+            "tipo_bienes_servicios": "02",
+            "ncf": cxp.ncf or "",
+            "ncf_modificado": "",
+            "fecha_comprobante": str(cxp.fecha_factura) if cxp.fecha_factura else "",
+            "fecha_pago": "",
+            "monto_facturado": float(cxp.subtotal or 0),
+            "itbis_facturado": float(cxp.itbis or 0),
+            "itbis_retenido": 0,
+            "isr_retenido": float(cxp.retencion_isr or 0),
+            "total": float(cxp.total or 0),
+            "proveedor": prov.nombre if prov else "—",
+        })
+    return {
+        "rnc_empresa": rnc_empresa,
+        "periodo": f"{anio}{mes:02d}",
+        "cantidad_registros": len(rows),
+        "total_monto": round(sum(r["monto_facturado"] for r in rows), 2),
+        "total_itbis": round(sum(r["itbis_facturado"] for r in rows), 2),
+        "total_retencion_isr": round(sum(r["isr_retenido"] for r in rows), 2),
+        "registros": rows,
+    }
+
+
+@router.get("/dgii-607")
+def dgii_607(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Formato 607 — Ventas de bienes y servicios (CxC del período)."""
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    inicio = date(anio, mes, 1)
+    _, ultimo = monthrange(anio, mes)
+    fin = date(anio, mes, ultimo)
+    empresa = db.query(models.ConfiguracionEmpresa).first()
+    rnc_empresa = empresa.rnc if empresa else ""
+
+    items = db.query(models.CuentaPorCobrar).filter(
+        models.CuentaPorCobrar.fecha >= inicio,
+        models.CuentaPorCobrar.fecha <= fin,
+        models.CuentaPorCobrar.estado != "anulada",
+    ).all()
+    clis = {}
+    for cxc in items:
+        if cxc.cliente_id and cxc.cliente_id not in clis:
+            clis[cxc.cliente_id] = db.query(models.Cliente).get(cxc.cliente_id)
+
+    rows = []
+    for cxc in items:
+        cli = clis.get(cxc.cliente_id)
+        rows.append({
+            "rnc_cedula": cli.rnc if cli and hasattr(cli, 'rnc') else "",
+            "tipo_id": "1" if cli and hasattr(cli, 'rnc') and cli.rnc and len(cli.rnc) == 9 else "2",
+            "ncf": cxc.ncf or "",
+            "ncf_modificado": "",
+            "tipo_ingreso": "01",
+            "fecha_comprobante": str(cxc.fecha) if cxc.fecha else "",
+            "fecha_retencion": "",
+            "monto_facturado": float(cxc.subtotal or 0),
+            "itbis_facturado": float(cxc.itbis or 0),
+            "itbis_retenido_terceros": 0,
+            "isr_retenido_terceros": 0,
+            "total": float(cxc.total or 0),
+            "cliente": cli.nombre if cli else "—",
+        })
+    return {
+        "rnc_empresa": rnc_empresa,
+        "periodo": f"{anio}{mes:02d}",
+        "cantidad_registros": len(rows),
+        "total_monto": round(sum(r["monto_facturado"] for r in rows), 2),
+        "total_itbis": round(sum(r["itbis_facturado"] for r in rows), 2),
+        "registros": rows,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONCILIACIÓN BANCARIA
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/conciliaciones")
+def listar_conciliaciones(cuenta_bancaria_id: int = None, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.ConciliacionBancaria)
+    if cuenta_bancaria_id:
+        q = q.filter(models.ConciliacionBancaria.cuenta_bancaria_id == cuenta_bancaria_id)
+    items = q.order_by(models.ConciliacionBancaria.id.desc()).all()
+    result = []
+    for c in items:
+        banco = db.query(models.CuentaBancaria).get(c.cuenta_bancaria_id)
+        per = db.query(models.PeriodoContable).get(c.periodo_id)
+        result.append({
+            "id": c.id, "cuenta_bancaria_id": c.cuenta_bancaria_id,
+            "banco": f"{banco.banco} — {banco.numero_cuenta}" if banco else "—",
+            "periodo": f"{per.mes:02d}/{per.anio}" if per else "—",
+            "saldo_extracto": float(c.saldo_extracto or 0),
+            "saldo_libro": float(c.saldo_libro or 0),
+            "diferencia": float(c.diferencia or 0),
+            "estado": c.estado,
+            "fecha_conciliacion": str(c.fecha_conciliacion) if c.fecha_conciliacion else None,
+            "partidas": len(c.partidas),
+        })
+    return result
+
+
+@router.post("/conciliaciones")
+def crear_conciliacion(data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    c = models.ConciliacionBancaria(
+        cuenta_bancaria_id=data["cuenta_bancaria_id"],
+        periodo_id=data["periodo_id"],
+        saldo_extracto=data.get("saldo_extracto", 0),
+        saldo_libro=data.get("saldo_libro", 0),
+        diferencia=round(float(data.get("saldo_extracto", 0)) - float(data.get("saldo_libro", 0)), 2),
+    )
+    db.add(c)
+    db.flush()
+    for p in data.get("partidas", []):
+        db.add(models.ConciliacionPartida(
+            conciliacion_id=c.id, tipo=p["tipo"], descripcion=p.get("descripcion", ""),
+            monto=p["monto"], fecha=p.get("fecha"), referencia=p.get("referencia", ""),
+        ))
+    db.commit()
+    return {"id": c.id, "msg": "Conciliación creada"}
+
+
+@router.get("/conciliaciones/{id}")
+def detalle_conciliacion(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    c = db.query(models.ConciliacionBancaria).get(id)
+    if not c:
+        raise HTTPException(404, "No encontrada")
+    banco = db.query(models.CuentaBancaria).get(c.cuenta_bancaria_id)
+    per = db.query(models.PeriodoContable).get(c.periodo_id)
+    partidas = []
+    for p in c.partidas:
+        partidas.append({
+            "id": p.id, "tipo": p.tipo, "descripcion": p.descripcion,
+            "monto": float(p.monto or 0), "fecha": str(p.fecha) if p.fecha else None,
+            "referencia": p.referencia, "conciliada": p.conciliada,
+        })
+    total_partidas = round(sum(p["monto"] for p in partidas), 2)
+    return {
+        "id": c.id,
+        "banco": f"{banco.banco} — {banco.numero_cuenta}" if banco else "—",
+        "periodo": f"{per.mes:02d}/{per.anio}" if per else "—",
+        "saldo_extracto": float(c.saldo_extracto or 0),
+        "saldo_libro": float(c.saldo_libro or 0),
+        "diferencia": float(c.diferencia or 0),
+        "estado": c.estado,
+        "partidas": partidas,
+        "total_partidas": total_partidas,
+        "saldo_conciliado": round(float(c.saldo_libro or 0) + total_partidas, 2),
+    }
+
+
+@router.put("/conciliaciones/{id}")
+def actualizar_conciliacion(id: int, data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    c = db.query(models.ConciliacionBancaria).get(id)
+    if not c:
+        raise HTTPException(404, "No encontrada")
+    if "saldo_extracto" in data:
+        c.saldo_extracto = data["saldo_extracto"]
+    if "saldo_libro" in data:
+        c.saldo_libro = data["saldo_libro"]
+    c.diferencia = round(float(c.saldo_extracto or 0) - float(c.saldo_libro or 0), 2)
+    if "estado" in data:
+        c.estado = data["estado"]
+        if data["estado"] == "conciliada":
+            c.fecha_conciliacion = date.today()
+            c.conciliado_por = user.nombre
+    if "partidas" in data:
+        db.query(models.ConciliacionPartida).filter(models.ConciliacionPartida.conciliacion_id == id).delete()
+        for p in data["partidas"]:
+            db.add(models.ConciliacionPartida(
+                conciliacion_id=id, tipo=p["tipo"], descripcion=p.get("descripcion", ""),
+                monto=p["monto"], fecha=p.get("fecha"), referencia=p.get("referencia", ""),
+                conciliada=p.get("conciliada", False),
+            ))
+    db.commit()
+    return {"msg": "Conciliación actualizada"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD FINANCIERO + NOTIFICACIONES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/dashboard-financiero")
+def dashboard_financiero(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    hoy = date.today()
+
+    cxp_pend = db.query(models.CuentaPorPagar).filter(models.CuentaPorPagar.estado.notin_(["pagada", "anulada"])).all()
+    cxc_pend = db.query(models.CuentaPorCobrar).filter(models.CuentaPorCobrar.estado.notin_(["cobrada", "anulada"])).all()
+    total_cxp = round(sum(float(c.saldo_pendiente or 0) for c in cxp_pend), 2)
+    total_cxc = round(sum(float(c.saldo_pendiente or 0) for c in cxc_pend), 2)
+    cxp_vencidas = round(sum(float(c.saldo_pendiente or 0) for c in cxp_pend if c.fecha_vencimiento and c.fecha_vencimiento < hoy), 2)
+    cxc_vencidas = round(sum(float(c.saldo_pendiente or 0) for c in cxc_pend if c.fecha_vencimiento and c.fecha_vencimiento < hoy), 2)
+
+    bancos = db.query(models.CuentaBancaria).filter(models.CuentaBancaria.activo == True).all()
+    saldo_bancos = round(sum(float(b.saldo_segun_libro or 0) for b in bancos), 2)
+
+    anio = hoy.year
+    ingresos_mes = []
+    gastos_mes = []
+    for m in range(1, 13):
+        per = db.query(models.PeriodoContable).filter(
+            models.PeriodoContable.anio == anio, models.PeriodoContable.mes == m
+        ).first()
+        ing = 0.0
+        gas = 0.0
+        if per:
+            saldos = db.query(models.SaldoMensual).filter(models.SaldoMensual.periodo_id == per.id).all()
+            for sm in saldos:
+                cta = db.query(models.CuentaContable).get(sm.cuenta_id)
+                if cta and cta.codigo:
+                    if cta.codigo.startswith("4"):
+                        ing += float(sm.saldo_acreedor or 0) - float(sm.saldo_deudor or 0)
+                    elif cta.codigo.startswith("5") or cta.codigo.startswith("6"):
+                        gas += float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
+        ingresos_mes.append(round(ing, 2))
+        gastos_mes.append(round(gas, 2))
+
+    meses_label = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    tendencia = [{"mes": meses_label[i], "ingresos": ingresos_mes[i], "gastos": gastos_mes[i], "utilidad": round(ingresos_mes[i] - gastos_mes[i], 2)} for i in range(12)]
+
+    return {
+        "saldo_bancos": saldo_bancos,
+        "total_cxc": total_cxc, "cxc_vencidas": cxc_vencidas, "num_cxc": len(cxc_pend),
+        "total_cxp": total_cxp, "cxp_vencidas": cxp_vencidas, "num_cxp": len(cxp_pend),
+        "ingresos_anio": round(sum(ingresos_mes), 2),
+        "gastos_anio": round(sum(gastos_mes), 2),
+        "utilidad_anio": round(sum(ingresos_mes) - sum(gastos_mes), 2),
+        "tendencia": tendencia,
+    }
+
+
+@router.get("/notificaciones")
+def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    hoy = date.today()
+    alertas = []
+
+    cxp_venc = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.estado.notin_(["pagada", "anulada"]),
+        models.CuentaPorPagar.fecha_vencimiento != None,
+        models.CuentaPorPagar.fecha_vencimiento <= hoy,
+    ).all()
+    if cxp_venc:
+        total = round(sum(float(c.saldo_pendiente or 0) for c in cxp_venc), 2)
+        alertas.append({"tipo": "cxp_vencida", "nivel": "danger", "titulo": f"{len(cxp_venc)} facturas por pagar vencidas", "detalle": f"Total: RD$ {total:,.2f}", "accion": "/contabilidad"})
+
+    cxp_prox = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.estado.notin_(["pagada", "anulada"]),
+        models.CuentaPorPagar.fecha_vencimiento != None,
+        models.CuentaPorPagar.fecha_vencimiento > hoy,
+        models.CuentaPorPagar.fecha_vencimiento <= hoy + timedelta(days=7),
+    ).all()
+    if cxp_prox:
+        total = round(sum(float(c.saldo_pendiente or 0) for c in cxp_prox), 2)
+        alertas.append({"tipo": "cxp_proxima", "nivel": "warning", "titulo": f"{len(cxp_prox)} facturas vencen en 7 días", "detalle": f"Total: RD$ {total:,.2f}", "accion": "/contabilidad"})
+
+    cxc_venc = db.query(models.CuentaPorCobrar).filter(
+        models.CuentaPorCobrar.estado.notin_(["cobrada", "anulada"]),
+        models.CuentaPorCobrar.fecha_vencimiento != None,
+        models.CuentaPorCobrar.fecha_vencimiento <= hoy,
+    ).all()
+    if cxc_venc:
+        total = round(sum(float(c.saldo_pendiente or 0) for c in cxc_venc), 2)
+        alertas.append({"tipo": "cxc_vencida", "nivel": "warning", "titulo": f"{len(cxc_venc)} facturas por cobrar vencidas", "detalle": f"Total: RD$ {total:,.2f}", "accion": "/contabilidad"})
+
+    inv_bajo = db.query(models.Inventario).filter(
+        models.Inventario.cantidad <= models.Inventario.stock_minimo,
+        models.Inventario.stock_minimo > 0,
+    ).all()
+    if inv_bajo:
+        alertas.append({"tipo": "inventario_bajo", "nivel": "warning", "titulo": f"{len(inv_bajo)} productos con stock bajo", "detalle": ", ".join(i.producto_id for i in inv_bajo[:5]), "accion": "/inventario"})
+
+    per_abiertos = db.query(models.PeriodoContable).filter(
+        models.PeriodoContable.estado == "abierto",
+        models.PeriodoContable.anio < hoy.year if hoy.month > 1 else models.PeriodoContable.anio < hoy.year,
+    ).all()
+    old_periods = [p for p in per_abiertos if p.anio < hoy.year or (p.anio == hoy.year and p.mes < hoy.month - 1)]
+    if old_periods:
+        alertas.append({"tipo": "periodo_abierto", "nivel": "info", "titulo": f"{len(old_periods)} período(s) contable(s) sin cerrar", "detalle": ", ".join(f"{p.mes:02d}/{p.anio}" for p in old_periods[:3]), "accion": "/contabilidad"})
+
+    return {"alertas": alertas, "total": len(alertas)}
