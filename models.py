@@ -584,6 +584,17 @@ class FieldIrrigationConfig(Base):
 # MÓDULO CONTABILIDAD — Núcleo contable, CxP/CxC, activos, nómina, fiscal
 # ══════════════════════════════════════════════════════════════════════════════
 
+class PartidaEstadoFinanciero(Base):
+    __tablename__ = "partidas_estado_financiero"
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(150), nullable=False)
+    estado = Column(String(30), nullable=False)        # balance_general, estado_resultados
+    clasificacion = Column(String(40), nullable=False) # activo_corriente, activo_no_corriente, pasivo_corriente, pasivo_no_corriente, patrimonio, ingresos, costos, gastos
+    orden = Column(Integer, default=0)
+    activo = Column(Boolean, default=True)
+    cuentas = relationship("CuentaContable", back_populates="partida")
+
+
 class CuentaContable(Base):
     __tablename__ = "cuentas_contables"
     id = Column(Integer, primary_key=True, index=True)
@@ -594,9 +605,11 @@ class CuentaContable(Base):
     grupo = Column(String(100))
     nivel = Column(Integer, default=1)
     cuenta_padre_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    partida_id = Column(Integer, ForeignKey("partidas_estado_financiero.id"), nullable=True)
     acepta_movimientos = Column(Boolean, default=True)
     activo = Column(Boolean, default=True)
     cuenta_padre = relationship("CuentaContable", remote_side=[id])
+    partida = relationship("PartidaEstadoFinanciero", back_populates="cuentas")
     lineas = relationship("LineaAsiento", back_populates="cuenta")
 
 

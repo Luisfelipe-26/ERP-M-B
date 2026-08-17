@@ -305,6 +305,18 @@ class OrdenCompraOut(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Cuenta Contable
+class PartidaEstadoFinancieroCreate(BaseModel):
+    nombre: str
+    estado: str
+    clasificacion: str
+    orden: int = 0
+
+class PartidaEstadoFinancieroOut(PartidaEstadoFinancieroCreate):
+    id: int
+    activo: bool
+    class Config:
+        from_attributes = True
+
 class CuentaContableCreate(BaseModel):
     codigo: str
     nombre: str
@@ -313,11 +325,14 @@ class CuentaContableCreate(BaseModel):
     grupo: Optional[str] = None
     nivel: int = 1
     cuenta_padre_id: Optional[int] = None
+    partida_id: Optional[int] = None
     acepta_movimientos: bool = True
 
 class CuentaContableOut(CuentaContableCreate):
     id: int
     activo: bool
+    partida_nombre: Optional[str] = None
+    partida_clasificacion: Optional[str] = None
     class Config:
         from_attributes = True
 

@@ -90,8 +90,69 @@ def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: st
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PARTIDAS DE ESTADOS FINANCIEROS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/partidas")
+def listar_partidas(estado: str = None, db: Session = Depends(get_db),
+                    user=Depends(get_current_user)):
+    q = db.query(models.PartidaEstadoFinanciero).filter(models.PartidaEstadoFinanciero.activo == True)
+    if estado:
+        q = q.filter(models.PartidaEstadoFinanciero.estado == estado)
+    return [schemas.PartidaEstadoFinancieroOut.model_validate(p)
+            for p in q.order_by(models.PartidaEstadoFinanciero.orden, models.PartidaEstadoFinanciero.id).all()]
+
+
+@router.post("/partidas")
+def crear_partida(data: schemas.PartidaEstadoFinancieroCreate, db: Session = Depends(get_db),
+                  user=Depends(require_admin)):
+    p = models.PartidaEstadoFinanciero(**data.model_dump())
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    return schemas.PartidaEstadoFinancieroOut.model_validate(p)
+
+
+@router.put("/partidas/{id}")
+def actualizar_partida(id: int, data: schemas.PartidaEstadoFinancieroCreate,
+                       db: Session = Depends(get_db), user=Depends(require_admin)):
+    p = db.query(models.PartidaEstadoFinanciero).get(id)
+    if not p:
+        raise HTTPException(404, "Partida no encontrada")
+    for k, v in data.model_dump().items():
+        setattr(p, k, v)
+    db.commit()
+    db.refresh(p)
+    return schemas.PartidaEstadoFinancieroOut.model_validate(p)
+
+
+@router.delete("/partidas/{id}")
+def desactivar_partida(id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    p = db.query(models.PartidaEstadoFinanciero).get(id)
+    if not p:
+        raise HTTPException(404, "Partida no encontrada")
+    tiene_cuentas = db.query(models.CuentaContable).filter(
+        models.CuentaContable.partida_id == id, models.CuentaContable.activo == True).first()
+    if tiene_cuentas:
+        p.activo = False
+        db.commit()
+        return {"ok": True, "msg": "Partida desactivada (tiene cuentas asignadas)"}
+    db.delete(p)
+    db.commit()
+    return {"ok": True, "msg": "Partida eliminada"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PLAN DE CUENTAS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _cuenta_to_out(c):
+    d = schemas.CuentaContableOut.model_validate(c)
+    if c.partida:
+        d.partida_nombre = c.partida.nombre
+        d.partida_clasificacion = c.partida.clasificacion
+    return d
+
 
 @router.get("/cuentas")
 def listar_cuentas(activo: bool = True, db: Session = Depends(get_db),
@@ -100,7 +161,7 @@ def listar_cuentas(activo: bool = True, db: Session = Depends(get_db),
     if activo:
         q = q.filter(models.CuentaContable.activo == True)
     cuentas = q.order_by(models.CuentaContable.codigo).all()
-    return [schemas.CuentaContableOut.model_validate(c) for c in cuentas]
+    return [_cuenta_to_out(c) for c in cuentas]
 
 
 @router.post("/cuentas")
@@ -112,7 +173,7 @@ def crear_cuenta(data: schemas.CuentaContableCreate, db: Session = Depends(get_d
     db.add(cuenta)
     db.commit()
     db.refresh(cuenta)
-    return schemas.CuentaContableOut.model_validate(cuenta)
+    return _cuenta_to_out(cuenta)
 
 
 @router.put("/cuentas/{codigo}")
@@ -125,7 +186,7 @@ def actualizar_cuenta(codigo: str, data: schemas.CuentaContableCreate,
         setattr(cuenta, k, v)
     db.commit()
     db.refresh(cuenta)
-    return schemas.CuentaContableOut.model_validate(cuenta)
+    return _cuenta_to_out(cuenta)
 
 
 @router.delete("/cuentas/{codigo}")
@@ -588,7 +649,12 @@ def balance_general(anio: int = None, mes: int = None,
     cuentas = {c.id: c for c in db.query(models.CuentaContable).filter(
         models.CuentaContable.activo == True).all()}
 
-    activos, pasivos, patrimonio = [], [], []
+    partidas_map = {p.id: p for p in db.query(models.PartidaEstadoFinanciero).filter(
+        models.PartidaEstadoFinanciero.activo == True,
+        models.PartidaEstadoFinanciero.estado == "balance_general").all()}
+
+    secciones = {}  # clasificacion -> {partida_nombre -> [cuentas]}
+    sin_partida = {"activos": [], "pasivos": [], "patrimonio": []}
     total_a, total_p, total_pat = Decimal(0), Decimal(0), Decimal(0)
     resultado_ejercicio = Decimal(0)
 
@@ -601,29 +667,73 @@ def balance_general(anio: int = None, mes: int = None,
             continue
         entry = {"codigo": c.codigo, "nombre": c.nombre, "saldo": float(round(abs(saldo), 2))}
         if c.tipo == "activo":
-            activos.append(entry)
             total_a += saldo
         elif c.tipo == "pasivo":
-            pasivos.append(entry)
             total_p += abs(saldo)
         elif c.tipo == "patrimonio":
-            patrimonio.append(entry)
             total_pat += abs(saldo)
 
+        if c.partida_id and c.partida_id in partidas_map:
+            p = partidas_map[c.partida_id]
+            key = p.clasificacion
+            if key not in secciones:
+                secciones[key] = {}
+            pname = p.nombre
+            if pname not in secciones[key]:
+                secciones[key][pname] = {"orden": p.orden, "cuentas": []}
+            secciones[key][pname]["cuentas"].append(entry)
+        else:
+            if c.tipo == "activo":
+                sin_partida["activos"].append(entry)
+            elif c.tipo == "pasivo":
+                sin_partida["pasivos"].append(entry)
+            elif c.tipo == "patrimonio":
+                sin_partida["patrimonio"].append(entry)
+
     if resultado_ejercicio != 0:
-        patrimonio.append({
-            "codigo": "3.4", "nombre": "Resultado del Ejercicio (calculado)",
-            "saldo": float(round(abs(resultado_ejercicio), 2))
-        })
+        re_entry = {"codigo": "3.4", "nombre": "Resultado del Ejercicio (calculado)",
+                     "saldo": float(round(abs(resultado_ejercicio), 2))}
         total_pat += abs(resultado_ejercicio)
+        if "patrimonio" not in secciones:
+            secciones["patrimonio"] = {}
+        secciones.setdefault("patrimonio", {}).setdefault("Resultado del Ejercicio", {"orden": 999, "cuentas": []})
+        secciones["patrimonio"]["Resultado del Ejercicio"]["cuentas"].append(re_entry)
+
+    def build_section(clasificaciones, fallback_key):
+        groups = []
+        for clsf in clasificaciones:
+            if clsf in secciones:
+                for pname, pdata in sorted(secciones[clsf].items(), key=lambda x: x[1]["orden"]):
+                    groups.append({
+                        "partida": pname,
+                        "clasificacion": clsf,
+                        "cuentas": sorted(pdata["cuentas"], key=lambda x: x["codigo"]),
+                        "subtotal": sum(x["saldo"] for x in pdata["cuentas"])
+                    })
+        if sin_partida[fallback_key]:
+            groups.append({
+                "partida": "Sin Clasificar",
+                "clasificacion": "sin_clasificar",
+                "cuentas": sorted(sin_partida[fallback_key], key=lambda x: x["codigo"]),
+                "subtotal": sum(x["saldo"] for x in sin_partida[fallback_key])
+            })
+        return groups
+
+    activos = build_section(["activo_corriente", "activo_no_corriente"], "activos")
+    pasivos = build_section(["pasivo_corriente", "pasivo_no_corriente"], "pasivos")
+    patrimonio = build_section(["patrimonio"], "patrimonio")
+
+    all_act = [c for g in activos for c in g["cuentas"]]
+    all_pas = [c for g in pasivos for c in g["cuentas"]]
+    all_pat = [c for g in patrimonio for c in g["cuentas"]]
 
     return {
         "periodo": f"{mes:02d}/{anio}",
-        "activos": sorted(activos, key=lambda x: x["codigo"]),
+        "activos": activos if activos else [{"partida": "Activos", "clasificacion": "activo", "cuentas": [], "subtotal": 0}],
         "total_activos": float(round(total_a, 2)),
-        "pasivos": sorted(pasivos, key=lambda x: x["codigo"]),
+        "pasivos": pasivos if pasivos else [{"partida": "Pasivos", "clasificacion": "pasivo", "cuentas": [], "subtotal": 0}],
         "total_pasivos": float(round(total_p, 2)),
-        "patrimonio": sorted(patrimonio, key=lambda x: x["codigo"]),
+        "patrimonio": patrimonio if patrimonio else [{"partida": "Patrimonio", "clasificacion": "patrimonio", "cuentas": [], "subtotal": 0}],
         "total_patrimonio": float(round(total_pat, 2)),
         "cuadra": float(round(total_a - total_p - total_pat, 2)) == 0
     }
@@ -661,33 +771,73 @@ def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
         acum[row.cuenta_id] = float(row.total_debe or 0) - float(row.total_haber or 0)
 
     cuentas = {c.id: c for c in db.query(models.CuentaContable).all()}
-    ingresos, costos, gastos = [], [], []
+
+    partidas_er = {p.id: p for p in db.query(models.PartidaEstadoFinanciero).filter(
+        models.PartidaEstadoFinanciero.activo == True,
+        models.PartidaEstadoFinanciero.estado == "estado_resultados").all()}
+
+    secciones = {}
+    sin_partida = {"ingresos": [], "costos": [], "gastos": []}
     total_ing, total_cos, total_gas = 0, 0, 0
 
     for cid, neto in acum.items():
         c = cuentas.get(cid)
-        if not c:
+        if not c or c.tipo not in ("ingreso", "costo", "gasto"):
             continue
         entry = {"codigo": c.codigo, "nombre": c.nombre, "monto": round(abs(neto), 2)}
         if c.tipo == "ingreso":
-            ingresos.append(entry)
             total_ing += abs(neto)
         elif c.tipo == "costo":
-            costos.append(entry)
             total_cos += abs(neto)
         elif c.tipo == "gasto":
-            gastos.append(entry)
             total_gas += abs(neto)
+
+        if c.partida_id and c.partida_id in partidas_er:
+            p = partidas_er[c.partida_id]
+            if p.clasificacion not in secciones:
+                secciones[p.clasificacion] = {}
+            if p.nombre not in secciones[p.clasificacion]:
+                secciones[p.clasificacion][p.nombre] = {"orden": p.orden, "cuentas": []}
+            secciones[p.clasificacion][p.nombre]["cuentas"].append(entry)
+        else:
+            if c.tipo == "ingreso":
+                sin_partida["ingresos"].append(entry)
+            elif c.tipo == "costo":
+                sin_partida["costos"].append(entry)
+            elif c.tipo == "gasto":
+                sin_partida["gastos"].append(entry)
+
+    def build_er_section(clasificaciones, fallback_key):
+        groups = []
+        for clsf in clasificaciones:
+            if clsf in secciones:
+                for pname, pdata in sorted(secciones[clsf].items(), key=lambda x: x[1]["orden"]):
+                    groups.append({
+                        "partida": pname, "clasificacion": clsf,
+                        "cuentas": sorted(pdata["cuentas"], key=lambda x: x["codigo"]),
+                        "subtotal": sum(x["monto"] for x in pdata["cuentas"])
+                    })
+        if sin_partida[fallback_key]:
+            groups.append({
+                "partida": "Sin Clasificar", "clasificacion": "sin_clasificar",
+                "cuentas": sorted(sin_partida[fallback_key], key=lambda x: x["codigo"]),
+                "subtotal": sum(x["monto"] for x in sin_partida[fallback_key])
+            })
+        return groups
+
+    ingresos = build_er_section(["ingresos"], "ingresos")
+    costos = build_er_section(["costos"], "costos")
+    gastos = build_er_section(["gastos"], "gastos")
 
     return {
         "periodo": f"{mes or 'Anual'}/{anio}",
         "campo_id": campo_id,
-        "ingresos": sorted(ingresos, key=lambda x: x["codigo"]),
+        "ingresos": ingresos,
         "total_ingresos": round(total_ing, 2),
-        "costos": sorted(costos, key=lambda x: x["codigo"]),
+        "costos": costos,
         "total_costos": round(total_cos, 2),
         "utilidad_bruta": round(total_ing - total_cos, 2),
-        "gastos": sorted(gastos, key=lambda x: x["codigo"]),
+        "gastos": gastos,
         "total_gastos": round(total_gas, 2),
         "utilidad_neta": round(total_ing - total_cos - total_gas, 2),
     }
