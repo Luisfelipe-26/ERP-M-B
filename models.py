@@ -590,8 +590,12 @@ class PartidaEstadoFinanciero(Base):
     nombre = Column(String(150), nullable=False)
     estado = Column(String(30), nullable=False)        # balance_general, estado_resultados
     clasificacion = Column(String(40), nullable=False) # activo_corriente, activo_no_corriente, pasivo_corriente, pasivo_no_corriente, patrimonio, ingresos, costos, gastos
+    padre_id = Column(Integer, ForeignKey("partidas_estado_financiero.id"), nullable=True)
     orden = Column(Integer, default=0)
+    invertir_signo = Column(Boolean, default=False)
+    es_grupo = Column(Boolean, default=False)
     activo = Column(Boolean, default=True)
+    padre = relationship("PartidaEstadoFinanciero", remote_side=[id], backref="hijos")
     cuentas = relationship("CuentaContable", back_populates="partida")
 
 

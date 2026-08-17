@@ -103,6 +103,56 @@ def listar_partidas(estado: str = None, db: Session = Depends(get_db),
             for p in q.order_by(models.PartidaEstadoFinanciero.orden, models.PartidaEstadoFinanciero.id).all()]
 
 
+@router.get("/partidas/arbol")
+def arbol_partidas(estado: str, db: Session = Depends(get_db),
+                   user=Depends(get_current_user)):
+    """Returns hierarchical tree of partidas for a given estado (balance_general / estado_resultados)."""
+    all_p = db.query(models.PartidaEstadoFinanciero).filter(
+        models.PartidaEstadoFinanciero.activo == True,
+        models.PartidaEstadoFinanciero.estado == estado
+    ).order_by(models.PartidaEstadoFinanciero.orden).all()
+
+    cuentas_por_partida = {}
+    for c in db.query(models.CuentaContable).filter(
+        models.CuentaContable.activo == True,
+        models.CuentaContable.partida_id.isnot(None)).all():
+        cuentas_por_partida.setdefault(c.partida_id, []).append({
+            "id": c.id, "codigo": c.codigo, "nombre": c.nombre, "tipo": c.tipo
+        })
+
+    by_id = {p.id: p for p in all_p}
+
+    def build(parent_id):
+        children = [p for p in all_p if p.padre_id == parent_id]
+        result = []
+        for p in children:
+            node = {
+                "id": p.id, "nombre": p.nombre, "clasificacion": p.clasificacion,
+                "orden": p.orden, "invertir_signo": p.invertir_signo, "es_grupo": p.es_grupo,
+                "cuentas": sorted(cuentas_por_partida.get(p.id, []), key=lambda x: x["codigo"]),
+                "hijos": build(p.id),
+            }
+            result.append(node)
+        return result
+
+    roots = build(None)
+
+    todas_cuentas_ids = set()
+    for clist in cuentas_por_partida.values():
+        for c in clist:
+            todas_cuentas_ids.add(c["id"])
+    tipo_filter = ["activo", "pasivo", "patrimonio"] if estado == "balance_general" else ["ingreso", "costo", "gasto"]
+    no_asignadas = [{"id": c.id, "codigo": c.codigo, "nombre": c.nombre, "tipo": c.tipo}
+                    for c in db.query(models.CuentaContable).filter(
+                        models.CuentaContable.activo == True,
+                        models.CuentaContable.acepta_movimientos == True,
+                        models.CuentaContable.tipo.in_(tipo_filter),
+                        ~models.CuentaContable.id.in_(todas_cuentas_ids) if todas_cuentas_ids else True
+                    ).order_by(models.CuentaContable.codigo).all()]
+
+    return {"arbol": roots, "no_asignadas": no_asignadas}
+
+
 @router.post("/partidas")
 def crear_partida(data: schemas.PartidaEstadoFinancieroCreate, db: Session = Depends(get_db),
                   user=Depends(require_admin)):
@@ -131,12 +181,15 @@ def desactivar_partida(id: int, db: Session = Depends(get_db), user=Depends(requ
     p = db.query(models.PartidaEstadoFinanciero).get(id)
     if not p:
         raise HTTPException(404, "Partida no encontrada")
+    tiene_hijos = db.query(models.PartidaEstadoFinanciero).filter(
+        models.PartidaEstadoFinanciero.padre_id == id,
+        models.PartidaEstadoFinanciero.activo == True).first()
     tiene_cuentas = db.query(models.CuentaContable).filter(
         models.CuentaContable.partida_id == id, models.CuentaContable.activo == True).first()
-    if tiene_cuentas:
+    if tiene_hijos or tiene_cuentas:
         p.activo = False
         db.commit()
-        return {"ok": True, "msg": "Partida desactivada (tiene cuentas asignadas)"}
+        return {"ok": True, "msg": "Partida desactivada (tiene hijos o cuentas)"}
     db.delete(p)
     db.commit()
     return {"ok": True, "msg": "Partida eliminada"}
@@ -649,14 +702,19 @@ def balance_general(anio: int = None, mes: int = None,
     cuentas = {c.id: c for c in db.query(models.CuentaContable).filter(
         models.CuentaContable.activo == True).all()}
 
-    partidas_map = {p.id: p for p in db.query(models.PartidaEstadoFinanciero).filter(
+    all_partidas = db.query(models.PartidaEstadoFinanciero).filter(
         models.PartidaEstadoFinanciero.activo == True,
-        models.PartidaEstadoFinanciero.estado == "balance_general").all()}
+        models.PartidaEstadoFinanciero.estado == "balance_general"
+    ).order_by(models.PartidaEstadoFinanciero.orden).all()
 
-    secciones = {}  # clasificacion -> {partida_nombre -> [cuentas]}
-    sin_partida = {"activos": [], "pasivos": [], "patrimonio": []}
+    cuentas_por_partida = {}
+    for c in cuentas.values():
+        if c.partida_id:
+            cuentas_por_partida.setdefault(c.partida_id, []).append(c)
+
     total_a, total_p, total_pat = Decimal(0), Decimal(0), Decimal(0)
     resultado_ejercicio = Decimal(0)
+    asignadas_ids = set()
 
     for cid, saldo in acum.items():
         c = cuentas.get(cid)
@@ -664,78 +722,89 @@ def balance_general(anio: int = None, mes: int = None,
             continue
         if c.tipo in ("ingreso", "costo", "gasto"):
             resultado_ejercicio -= saldo
-            continue
-        entry = {"codigo": c.codigo, "nombre": c.nombre, "saldo": float(round(abs(saldo), 2))}
-        if c.tipo == "activo":
+        elif c.tipo == "activo":
             total_a += saldo
         elif c.tipo == "pasivo":
             total_p += abs(saldo)
         elif c.tipo == "patrimonio":
             total_pat += abs(saldo)
 
-        if c.partida_id and c.partida_id in partidas_map:
-            p = partidas_map[c.partida_id]
-            key = p.clasificacion
-            if key not in secciones:
-                secciones[key] = {}
-            pname = p.nombre
-            if pname not in secciones[key]:
-                secciones[key][pname] = {"orden": p.orden, "cuentas": []}
-            secciones[key][pname]["cuentas"].append(entry)
-        else:
-            if c.tipo == "activo":
-                sin_partida["activos"].append(entry)
-            elif c.tipo == "pasivo":
-                sin_partida["pasivos"].append(entry)
-            elif c.tipo == "patrimonio":
-                sin_partida["patrimonio"].append(entry)
+    def walk_tree(parent_id, depth=0):
+        children = [p for p in all_partidas if p.padre_id == parent_id]
+        nodes = []
+        for p in children:
+            ctas_items = []
+            for c in cuentas_por_partida.get(p.id, []):
+                saldo_raw = acum.get(c.id, Decimal(0))
+                if saldo_raw == 0:
+                    continue
+                display = float(round(-saldo_raw if p.invertir_signo else saldo_raw, 2))
+                ctas_items.append({"codigo": c.codigo, "nombre": c.nombre, "saldo": abs(display)})
+                asignadas_ids.add(c.id)
+            sub_nodes = walk_tree(p.id, depth + 1)
+            sub_total = sum(n["subtotal"] for n in sub_nodes) + sum(x["saldo"] for x in ctas_items)
+            if sub_total != 0 or ctas_items or sub_nodes:
+                nodes.append({
+                    "partida": p.nombre, "clasificacion": p.clasificacion,
+                    "es_grupo": p.es_grupo, "profundidad": depth,
+                    "cuentas": sorted(ctas_items, key=lambda x: x["codigo"]),
+                    "hijos": sub_nodes, "subtotal": round(sub_total, 2)
+                })
+        return nodes
+
+    activos_tree = walk_tree(None)
+    activos_tree_filtered = {"activos": [], "pasivos": [], "patrimonio": []}
+    for node in activos_tree:
+        cls = node["clasificacion"]
+        if cls in ("activo_corriente", "activo_no_corriente"):
+            activos_tree_filtered["activos"].append(node)
+        elif cls in ("pasivo_corriente", "pasivo_no_corriente"):
+            activos_tree_filtered["pasivos"].append(node)
+        elif cls == "patrimonio":
+            activos_tree_filtered["patrimonio"].append(node)
+
+    no_asignadas = {"activos": [], "pasivos": [], "patrimonio": []}
+    for cid, saldo in acum.items():
+        c = cuentas.get(cid)
+        if not c or cid in asignadas_ids or c.tipo in ("ingreso", "costo", "gasto"):
+            continue
+        entry = {"codigo": c.codigo, "nombre": c.nombre, "saldo": float(round(abs(saldo), 2))}
+        if c.tipo == "activo":
+            no_asignadas["activos"].append(entry)
+        elif c.tipo == "pasivo":
+            no_asignadas["pasivos"].append(entry)
+        elif c.tipo == "patrimonio":
+            no_asignadas["patrimonio"].append(entry)
+
+    for key in no_asignadas:
+        if no_asignadas[key]:
+            activos_tree_filtered[key].append({
+                "partida": "Cuentas Sin Asignar", "clasificacion": "sin_asignar",
+                "es_grupo": False, "profundidad": 0,
+                "cuentas": sorted(no_asignadas[key], key=lambda x: x["codigo"]),
+                "hijos": [], "subtotal": sum(x["saldo"] for x in no_asignadas[key])
+            })
 
     if resultado_ejercicio != 0:
-        re_entry = {"codigo": "3.4", "nombre": "Resultado del Ejercicio (calculado)",
-                     "saldo": float(round(abs(resultado_ejercicio), 2))}
         total_pat += abs(resultado_ejercicio)
-        if "patrimonio" not in secciones:
-            secciones["patrimonio"] = {}
-        secciones.setdefault("patrimonio", {}).setdefault("Resultado del Ejercicio", {"orden": 999, "cuentas": []})
-        secciones["patrimonio"]["Resultado del Ejercicio"]["cuentas"].append(re_entry)
-
-    def build_section(clasificaciones, fallback_key):
-        groups = []
-        for clsf in clasificaciones:
-            if clsf in secciones:
-                for pname, pdata in sorted(secciones[clsf].items(), key=lambda x: x[1]["orden"]):
-                    groups.append({
-                        "partida": pname,
-                        "clasificacion": clsf,
-                        "cuentas": sorted(pdata["cuentas"], key=lambda x: x["codigo"]),
-                        "subtotal": sum(x["saldo"] for x in pdata["cuentas"])
-                    })
-        if sin_partida[fallback_key]:
-            groups.append({
-                "partida": "Sin Clasificar",
-                "clasificacion": "sin_clasificar",
-                "cuentas": sorted(sin_partida[fallback_key], key=lambda x: x["codigo"]),
-                "subtotal": sum(x["saldo"] for x in sin_partida[fallback_key])
-            })
-        return groups
-
-    activos = build_section(["activo_corriente", "activo_no_corriente"], "activos")
-    pasivos = build_section(["pasivo_corriente", "pasivo_no_corriente"], "pasivos")
-    patrimonio = build_section(["patrimonio"], "patrimonio")
-
-    all_act = [c for g in activos for c in g["cuentas"]]
-    all_pas = [c for g in pasivos for c in g["cuentas"]]
-    all_pat = [c for g in patrimonio for c in g["cuentas"]]
+        activos_tree_filtered["patrimonio"].append({
+            "partida": "Resultado del Ejercicio", "clasificacion": "patrimonio",
+            "es_grupo": False, "profundidad": 0,
+            "cuentas": [{"codigo": "—", "nombre": "Resultado del Ejercicio (calculado)",
+                         "saldo": float(round(abs(resultado_ejercicio), 2))}],
+            "hijos": [], "subtotal": float(round(abs(resultado_ejercicio), 2))
+        })
 
     return {
         "periodo": f"{mes:02d}/{anio}",
-        "activos": activos if activos else [{"partida": "Activos", "clasificacion": "activo", "cuentas": [], "subtotal": 0}],
+        "activos": activos_tree_filtered["activos"],
         "total_activos": float(round(total_a, 2)),
-        "pasivos": pasivos if pasivos else [{"partida": "Pasivos", "clasificacion": "pasivo", "cuentas": [], "subtotal": 0}],
+        "pasivos": activos_tree_filtered["pasivos"],
         "total_pasivos": float(round(total_p, 2)),
-        "patrimonio": patrimonio if patrimonio else [{"partida": "Patrimonio", "clasificacion": "patrimonio", "cuentas": [], "subtotal": 0}],
+        "patrimonio": activos_tree_filtered["patrimonio"],
         "total_patrimonio": float(round(total_pat, 2)),
-        "cuadra": float(round(total_a - total_p - total_pat, 2)) == 0
+        "cuadra": float(round(total_a - total_p - total_pat, 2)) == 0,
+        "no_asignadas_count": sum(len(v) for v in no_asignadas.values())
     }
 
 
@@ -772,19 +841,23 @@ def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
 
     cuentas = {c.id: c for c in db.query(models.CuentaContable).all()}
 
-    partidas_er = {p.id: p for p in db.query(models.PartidaEstadoFinanciero).filter(
+    all_partidas = db.query(models.PartidaEstadoFinanciero).filter(
         models.PartidaEstadoFinanciero.activo == True,
-        models.PartidaEstadoFinanciero.estado == "estado_resultados").all()}
+        models.PartidaEstadoFinanciero.estado == "estado_resultados"
+    ).order_by(models.PartidaEstadoFinanciero.orden).all()
 
-    secciones = {}
-    sin_partida = {"ingresos": [], "costos": [], "gastos": []}
-    total_ing, total_cos, total_gas = 0, 0, 0
+    cuentas_por_partida = {}
+    for c in cuentas.values():
+        if c.partida_id:
+            cuentas_por_partida.setdefault(c.partida_id, []).append(c)
+
+    total_ing, total_cos, total_gas = 0.0, 0.0, 0.0
+    asignadas_ids = set()
 
     for cid, neto in acum.items():
         c = cuentas.get(cid)
         if not c or c.tipo not in ("ingreso", "costo", "gasto"):
             continue
-        entry = {"codigo": c.codigo, "nombre": c.nombre, "monto": round(abs(neto), 2)}
         if c.tipo == "ingreso":
             total_ing += abs(neto)
         elif c.tipo == "costo":
@@ -792,54 +865,70 @@ def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
         elif c.tipo == "gasto":
             total_gas += abs(neto)
 
-        if c.partida_id and c.partida_id in partidas_er:
-            p = partidas_er[c.partida_id]
-            if p.clasificacion not in secciones:
-                secciones[p.clasificacion] = {}
-            if p.nombre not in secciones[p.clasificacion]:
-                secciones[p.clasificacion][p.nombre] = {"orden": p.orden, "cuentas": []}
-            secciones[p.clasificacion][p.nombre]["cuentas"].append(entry)
-        else:
-            if c.tipo == "ingreso":
-                sin_partida["ingresos"].append(entry)
-            elif c.tipo == "costo":
-                sin_partida["costos"].append(entry)
-            elif c.tipo == "gasto":
-                sin_partida["gastos"].append(entry)
+    def walk_tree(parent_id, depth=0):
+        children = [p for p in all_partidas if p.padre_id == parent_id]
+        nodes = []
+        for p in children:
+            ctas_items = []
+            for c in cuentas_por_partida.get(p.id, []):
+                neto = acum.get(c.id, 0)
+                if neto == 0:
+                    continue
+                display = -neto if p.invertir_signo else neto
+                ctas_items.append({"codigo": c.codigo, "nombre": c.nombre, "monto": round(abs(display), 2)})
+                asignadas_ids.add(c.id)
+            sub_nodes = walk_tree(p.id, depth + 1)
+            sub_total = sum(n["subtotal"] for n in sub_nodes) + sum(x["monto"] for x in ctas_items)
+            if sub_total != 0 or ctas_items or sub_nodes:
+                nodes.append({
+                    "partida": p.nombre, "clasificacion": p.clasificacion,
+                    "es_grupo": p.es_grupo, "profundidad": depth,
+                    "cuentas": sorted(ctas_items, key=lambda x: x["codigo"]),
+                    "hijos": sub_nodes, "subtotal": round(sub_total, 2)
+                })
+        return nodes
 
-    def build_er_section(clasificaciones, fallback_key):
-        groups = []
-        for clsf in clasificaciones:
-            if clsf in secciones:
-                for pname, pdata in sorted(secciones[clsf].items(), key=lambda x: x[1]["orden"]):
-                    groups.append({
-                        "partida": pname, "clasificacion": clsf,
-                        "cuentas": sorted(pdata["cuentas"], key=lambda x: x["codigo"]),
-                        "subtotal": sum(x["monto"] for x in pdata["cuentas"])
-                    })
-        if sin_partida[fallback_key]:
-            groups.append({
-                "partida": "Sin Clasificar", "clasificacion": "sin_clasificar",
-                "cuentas": sorted(sin_partida[fallback_key], key=lambda x: x["codigo"]),
-                "subtotal": sum(x["monto"] for x in sin_partida[fallback_key])
+    tree = walk_tree(None)
+    result_sections = {"ingresos": [], "costos": [], "gastos": []}
+    for node in tree:
+        cls = node["clasificacion"]
+        if cls in result_sections:
+            result_sections[cls].append(node)
+
+    no_asignadas = {"ingresos": [], "costos": [], "gastos": []}
+    for cid, neto in acum.items():
+        c = cuentas.get(cid)
+        if not c or cid in asignadas_ids or c.tipo not in ("ingreso", "costo", "gasto"):
+            continue
+        entry = {"codigo": c.codigo, "nombre": c.nombre, "monto": round(abs(neto), 2)}
+        if c.tipo == "ingreso":
+            no_asignadas["ingresos"].append(entry)
+        elif c.tipo == "costo":
+            no_asignadas["costos"].append(entry)
+        elif c.tipo == "gasto":
+            no_asignadas["gastos"].append(entry)
+
+    for key in no_asignadas:
+        if no_asignadas[key]:
+            result_sections[key].append({
+                "partida": "Cuentas Sin Asignar", "clasificacion": "sin_asignar",
+                "es_grupo": False, "profundidad": 0,
+                "cuentas": sorted(no_asignadas[key], key=lambda x: x["codigo"]),
+                "hijos": [], "subtotal": sum(x["monto"] for x in no_asignadas[key])
             })
-        return groups
-
-    ingresos = build_er_section(["ingresos"], "ingresos")
-    costos = build_er_section(["costos"], "costos")
-    gastos = build_er_section(["gastos"], "gastos")
 
     return {
         "periodo": f"{mes or 'Anual'}/{anio}",
         "campo_id": campo_id,
-        "ingresos": ingresos,
+        "ingresos": result_sections["ingresos"],
         "total_ingresos": round(total_ing, 2),
-        "costos": costos,
+        "costos": result_sections["costos"],
         "total_costos": round(total_cos, 2),
         "utilidad_bruta": round(total_ing - total_cos, 2),
-        "gastos": gastos,
+        "gastos": result_sections["gastos"],
         "total_gastos": round(total_gas, 2),
         "utilidad_neta": round(total_ing - total_cos - total_gas, 2),
+        "no_asignadas_count": sum(len(v) for v in no_asignadas.values())
     }
 
 

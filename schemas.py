@@ -309,7 +309,10 @@ class PartidaEstadoFinancieroCreate(BaseModel):
     nombre: str
     estado: str
     clasificacion: str
+    padre_id: Optional[int] = None
     orden: int = 0
+    invertir_signo: bool = False
+    es_grupo: bool = False
 
 class PartidaEstadoFinancieroOut(PartidaEstadoFinancieroCreate):
     id: int
