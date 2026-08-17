@@ -206,7 +206,7 @@ ESTRUCTURA_BG = [
     ]},
     {"nombre": "Activos No Corrientes", "clasificacion": "activo_no_corriente", "es_grupo": True, "hijos": [
         {"nombre": "Propiedad, Planta y Equipo", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.01"]},
-        {"nombre": "Depreciación Acumulada", "clasificacion": "activo_no_corriente", "invertir_signo": True, "prefijos": ["1.2.02"]},
+        {"nombre": "Depreciación Acumulada", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.02"]},
     ]},
     {"nombre": "Pasivos Corrientes", "clasificacion": "pasivo_corriente", "es_grupo": True, "hijos": [
         {"nombre": "Cuentas por Pagar", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.01"]},
@@ -830,21 +830,32 @@ def balance_general(anio: int = None, mes: int = None,
         elif c.tipo == "activo":
             total_a += saldo
         elif c.tipo == "pasivo":
-            total_p += abs(saldo)
+            total_p += -saldo   # acreedora normal → positivo; contrapartidas restan
         elif c.tipo == "patrimonio":
-            total_pat += abs(saldo)
+            total_pat += -saldo
+
+    def factor_signo(clasificacion):
+        # Secciones acreedoras se normalizan a positivo (-1); deudoras quedan +1.
+        # Así una cuenta de contrapartida (p.ej. Depreciación Acumulada dentro de
+        # activos) queda con signo negativo y resta correctamente en el subtotal.
+        if clasificacion in ("pasivo_corriente", "pasivo_no_corriente", "patrimonio"):
+            return -1
+        return 1
 
     def walk_tree(parent_id, depth=0):
         children = [p for p in all_partidas if p.padre_id == parent_id]
         nodes = []
         for p in children:
+            factor = factor_signo(p.clasificacion)
             ctas_items = []
             for c in cuentas_por_partida.get(p.id, []):
                 saldo_raw = acum.get(c.id, Decimal(0))
                 if saldo_raw == 0:
                     continue
-                display = float(round(-saldo_raw if p.invertir_signo else saldo_raw, 2))
-                ctas_items.append({"codigo": c.codigo, "nombre": c.nombre, "saldo": abs(display)})
+                val = float(round(saldo_raw, 2)) * factor
+                if p.invertir_signo:
+                    val = -val
+                ctas_items.append({"codigo": c.codigo, "nombre": c.nombre, "saldo": round(val, 2)})
                 asignadas_ids.add(c.id)
             sub_nodes = walk_tree(p.id, depth + 1)
             sub_total = sum(n["subtotal"] for n in sub_nodes) + sum(x["saldo"] for x in ctas_items)
@@ -891,13 +902,15 @@ def balance_general(anio: int = None, mes: int = None,
             })
 
     if resultado_ejercicio != 0:
-        total_pat += abs(resultado_ejercicio)
+        # Signo real: ganancia aumenta patrimonio, pérdida lo reduce.
+        re_val = float(round(resultado_ejercicio, 2))
+        total_pat += resultado_ejercicio
         activos_tree_filtered["patrimonio"].append({
             "partida": "Resultado del Ejercicio", "clasificacion": "patrimonio",
             "es_grupo": False, "profundidad": 0,
             "cuentas": [{"codigo": "—", "nombre": "Resultado del Ejercicio (calculado)",
-                         "saldo": float(round(abs(resultado_ejercicio), 2))}],
-            "hijos": [], "subtotal": float(round(abs(resultado_ejercicio), 2))
+                         "saldo": re_val}],
+            "hijos": [], "subtotal": re_val
         })
 
     return {
@@ -963,24 +976,35 @@ def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
         c = cuentas.get(cid)
         if not c or c.tipo not in ("ingreso", "costo", "gasto"):
             continue
+        # Normalizar a positivo por naturaleza de la sección; las contrapartidas
+        # (descuentos/devoluciones) conservan signo y restan de su total.
         if c.tipo == "ingreso":
-            total_ing += abs(neto)
+            total_ing += -neto
         elif c.tipo == "costo":
-            total_cos += abs(neto)
+            total_cos += neto
         elif c.tipo == "gasto":
-            total_gas += abs(neto)
+            total_gas += neto
+
+    def factor_signo(clasificacion):
+        # Ingresos son acreedores: se normalizan a positivo (-1). Costos y gastos
+        # deudores quedan +1. Una cuenta de contrapartida (p.ej. Descuentos sobre
+        # Ventas, deudora dentro de ingresos) queda negativa y resta correctamente.
+        return -1 if clasificacion == "ingresos" else 1
 
     def walk_tree(parent_id, depth=0):
         children = [p for p in all_partidas if p.padre_id == parent_id]
         nodes = []
         for p in children:
+            factor = factor_signo(p.clasificacion)
             ctas_items = []
             for c in cuentas_por_partida.get(p.id, []):
                 neto = acum.get(c.id, 0)
                 if neto == 0:
                     continue
-                display = -neto if p.invertir_signo else neto
-                ctas_items.append({"codigo": c.codigo, "nombre": c.nombre, "monto": round(abs(display), 2)})
+                val = neto * factor
+                if p.invertir_signo:
+                    val = -val
+                ctas_items.append({"codigo": c.codigo, "nombre": c.nombre, "monto": round(val, 2)})
                 asignadas_ids.add(c.id)
             sub_nodes = walk_tree(p.id, depth + 1)
             sub_total = sum(n["subtotal"] for n in sub_nodes) + sum(x["monto"] for x in ctas_items)
