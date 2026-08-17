@@ -28,13 +28,23 @@ def run_migrations():
         "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS condicion_pago_dias INTEGER DEFAULT 30",
         "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS tipo_ncf_default VARCHAR(5) DEFAULT 'B11'",
         "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS cuenta_cxp_id INTEGER REFERENCES cuentas_contables(id)",
+        # PartidaEstadoFinanciero — SAP FSV hierarchy columns
+        "ALTER TABLE partidas_estado_financiero ADD COLUMN IF NOT EXISTS padre_id INTEGER REFERENCES partidas_estado_financiero(id)",
+        "ALTER TABLE partidas_estado_financiero ADD COLUMN IF NOT EXISTS orden INTEGER DEFAULT 0",
+        "ALTER TABLE partidas_estado_financiero ADD COLUMN IF NOT EXISTS invertir_signo BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE partidas_estado_financiero ADD COLUMN IF NOT EXISTS es_grupo BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE partidas_estado_financiero ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT TRUE",
+        # CuentaContable — link to financial-statement line item
+        "ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS partida_id INTEGER REFERENCES partidas_estado_financiero(id)",
     ]
-    with engine.begin() as conn:
-        for sql in migrations:
-            try:
+    # Each migration runs in its own transaction so one failure does not
+    # abort the rest (PostgreSQL poisons the whole tx on any error).
+    for sql in migrations:
+        try:
+            with engine.begin() as conn:
                 conn.execute(text(sql))
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 def recalc_all_ot_costs():
