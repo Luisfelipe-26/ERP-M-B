@@ -242,6 +242,16 @@ def actualizar_cuenta(codigo: str, data: schemas.CuentaContableCreate,
     return _cuenta_to_out(cuenta)
 
 
+@router.patch("/cuentas/{cuenta_id}/partida")
+def asignar_partida(cuenta_id: int, data: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
+    cuenta = db.query(models.CuentaContable).get(cuenta_id)
+    if not cuenta:
+        raise HTTPException(404, "Cuenta no encontrada")
+    cuenta.partida_id = data.get("partida_id")
+    db.commit()
+    return {"ok": True}
+
+
 @router.delete("/cuentas/{codigo}")
 def desactivar_cuenta(codigo: str, db: Session = Depends(get_db), user=Depends(require_admin)):
     cuenta = db.query(models.CuentaContable).filter(models.CuentaContable.codigo == codigo).first()
