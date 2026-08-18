@@ -337,6 +337,17 @@ def actualizar_cuenta(codigo: str, data: schemas.CuentaContableCreate,
     return _cuenta_to_out(cuenta)
 
 
+@router.post("/cuentas/seed-catalogo")
+def seed_catalogo(db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Carga el catálogo de cuentas estándar (idempotente). Útil para poblar
+    una base de datos nueva sin re-ejecutar el seed completo."""
+    from catalogo_cuentas import sembrar_catalogo
+    creadas = sembrar_catalogo(db, models)
+    db.commit()
+    total = db.query(models.CuentaContable).filter(models.CuentaContable.activo == True).count()
+    return {"ok": True, "creadas": creadas, "total": total}
+
+
 @router.patch("/cuentas/{cuenta_id}/partida")
 def asignar_partida(cuenta_id: int, data: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
     cuenta = db.query(models.CuentaContable).get(cuenta_id)
