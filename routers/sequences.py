@@ -1,8 +1,13 @@
 """Sequence utility — atomic formatted document/entity numbering."""
 import re
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from database import get_db
+from auth import get_current_user, require_admin
 import models
+
+router = APIRouter(prefix="/api", tags=["secuencias"])
 
 SEQUENCE_CONFIG = {
     'GR':    ('GR-', 4),
@@ -17,6 +22,11 @@ SEQUENCE_CONFIG = {
     'MON':   ('MON-', 4),
     'SPR':   ('SPR-', 4),
     'TR':    ('TR-',  3),
+    'AC':    ('AC-',  4),
+    'CXP':   ('CXP-', 4),
+    'PAG':   ('PAG-', 4),
+    'CXC':   ('CXC-', 4),
+    'COB':   ('COB-', 4),
 }
 
 SEQUENCE_TABLE_MAP = {
@@ -78,3 +88,18 @@ def peek_next(tipo: str, db: Session) -> str:
     max_existing = _max_from_table(tipo, db)
     num = max(seq_num, max_existing) + 1
     return _fmt(tipo, num)
+
+
+@router.get("/secuencias")
+def listar_secuencias(db: Session = Depends(get_db), user=Depends(require_admin)):
+    seqs = db.query(models.Sequence).order_by(models.Sequence.tipo).all()
+    cfg = SEQUENCE_CONFIG
+    return [
+        {
+            "tipo": s.tipo,
+            "prefijo": cfg[s.tipo][0] if s.tipo in cfg else None,
+            "ultimo_numero": s.ultimo_numero,
+            "ultimo_generado": _fmt(s.tipo, s.ultimo_numero) if s.tipo in cfg else str(s.ultimo_numero),
+        }
+        for s in seqs
+    ]

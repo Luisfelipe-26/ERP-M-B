@@ -10,11 +10,10 @@ import models
 
 import os
 
-# H-9 FIX: Secret key from environment variable, not hardcoded
-SECRET_KEY = os.environ.get("CORVUS_SECRET_KEY", "corvus-finca-aguacates-secret-key-2024")
-if SECRET_KEY == "corvus-finca-aguacates-secret-key-2024":
-    import warnings
-    warnings.warn("⚠ CORVUS_SECRET_KEY not set — using default fallback. Set env var for production!", stacklevel=2)
+_is_production = bool(os.environ.get("DATABASE_URL"))
+SECRET_KEY = os.environ.get("CORVUS_SECRET_KEY", "" if _is_production else "corvus-dev-local-only-key")
+if not SECRET_KEY:
+    raise RuntimeError("CORVUS_SECRET_KEY env var is required in production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 

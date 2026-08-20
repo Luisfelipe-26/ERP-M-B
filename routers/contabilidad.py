@@ -11,22 +11,9 @@ from datetime import date, datetime, timedelta
 from calendar import monthrange
 from decimal import Decimal
 import models, schemas
+from routers.sequences import get_next
 
 router = APIRouter(prefix="/api/contabilidad", tags=["contabilidad"])
-
-# ── Helpers ──
-
-def get_next_seq(db: Session, tipo: str, prefix: str) -> str:
-    seq = db.query(models.Sequence).filter(
-        models.Sequence.tipo == tipo
-    ).with_for_update().first()
-    if not seq:
-        seq = models.Sequence(tipo=tipo, ultimo_numero=0)
-        db.add(seq)
-        db.flush()
-    seq.ultimo_numero += 1
-    db.flush()
-    return f"{prefix}-{seq.ultimo_numero:04d}"
 
 
 def find_periodo(db: Session, fecha: date):
@@ -59,6 +46,22 @@ def _enrich_linea_dims(db: Session, linea, lo):
         lo.almacen_nombre = alm.nombre if alm else None
 
 
+_ORIGEN_DIARIO = {
+    "OT": "OPR", "OC": "COMP", "GR": "COMP", "GI": "COMP",
+    "NOM": "NOM", "DEP": "AJU", "LIQ": "NOM",
+    "CXP": "COMP", "PAG": "BAN", "CXC": "VTA", "COB": "BAN",
+    "AJ": "AJU", "MAN": "AJU", "VTA": "VTA",
+}
+
+
+def _resolve_diario_id(db: Session, origen: str):
+    codigo = _ORIGEN_DIARIO.get(origen)
+    if not codigo:
+        return None
+    d = db.query(models.DiarioContable).filter(models.DiarioContable.codigo == codigo).first()
+    return d.id if d else None
+
+
 def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: str,
                         descripcion: str, lineas_data: list, user_nombre: str,
                         origen_id: int = None):
@@ -79,9 +82,10 @@ def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: st
     total_debe = sum(Decimal(str(l.get("debe") or 0)) for l in lineas_data)
     total_haber = sum(Decimal(str(l.get("haber") or 0)) for l in lineas_data)
 
-    numero = get_next_seq(db, "AC", "AC")
+    numero = get_next("AC", db)
     asiento = models.AsientoContable(
         numero=numero, fecha=fecha, periodo_id=periodo.id,
+        diario_id=_resolve_diario_id(db, origen),
         tipo="automatico", origen=origen, referencia_id=referencia_id,
         origen_id=origen_id,
         descripcion=descripcion, total_debe=total_debe, total_haber=total_haber,
@@ -523,6 +527,7 @@ def reabrir_periodo(id: int, db: Session = Depends(get_db), user=Depends(require
 @router.get("/asientos")
 def listar_asientos(
     estado: str = None, origen: str = None,
+    diario_id: int = None,
     desde: date = None, hasta: date = None,
     skip: int = 0, limit: int = 50,
     db: Session = Depends(get_db), user=Depends(get_current_user)
@@ -532,6 +537,8 @@ def listar_asientos(
         q = q.filter(models.AsientoContable.estado == estado)
     if origen:
         q = q.filter(models.AsientoContable.origen == origen)
+    if diario_id:
+        q = q.filter(models.AsientoContable.diario_id == diario_id)
     if desde:
         q = q.filter(models.AsientoContable.fecha >= desde)
     if hasta:
@@ -542,6 +549,7 @@ def listar_asientos(
     result = []
     for a in asientos:
         out = schemas.AsientoContableOut.model_validate(a)
+        out.diario_codigo = a.diario.codigo if a.diario else None
         out.lineas = []
         for l in a.lineas:
             lo = schemas.LineaAsientoOut.model_validate(l)
@@ -559,6 +567,7 @@ def ver_asiento(numero: str, db: Session = Depends(get_db), user=Depends(get_cur
     if not a:
         raise HTTPException(404, "Asiento no encontrado")
     out = schemas.AsientoContableOut.model_validate(a)
+    out.diario_codigo = a.diario.codigo if a.diario else None
     out.lineas = []
     for l in a.lineas:
         lo = schemas.LineaAsientoOut.model_validate(l)
@@ -599,9 +608,11 @@ def crear_asiento(data: schemas.AsientoContableCreate, db: Session = Depends(get
     if periodo.estado == "cerrado":
         raise HTTPException(400, f"El periodo {periodo.nombre} está cerrado")
 
-    numero = get_next_seq(db, "AC", "AC")
+    numero = get_next("AC", db)
+    diario_id = data.diario_id or _resolve_diario_id(db, data.origen or "MAN")
     asiento = models.AsientoContable(
         numero=numero, fecha=data.fecha, periodo_id=periodo.id,
+        diario_id=diario_id,
         tipo=data.tipo, origen=data.origen, referencia_id=data.referencia_id,
         descripcion=data.descripcion, total_debe=total_debe, total_haber=total_haber,
         estado="borrador", creado_por=user.nombre
@@ -655,7 +666,7 @@ def anular_asiento(numero: str, motivo: str = "Anulación manual",
         raise HTTPException(400, "El asiento ya está anulado")
 
     if a.estado == "contabilizado":
-        num_rev = get_next_seq(db, "AC", "AC")
+        num_rev = get_next("AC", db)
         reverso = models.AsientoContable(
             numero=num_rev, fecha=date.today(),
             periodo_id=a.periodo_id, tipo="cierre", origen=a.origen,
@@ -712,6 +723,8 @@ def _actualizar_saldos(db: Session, asiento, factor: int):
 def libro_mayor(
     cuenta_id: int = None, codigo: str = None,
     desde: date = None, hasta: date = None,
+    campo_id: str = None, unidad_negocio_id: int = None,
+    departamento_id: int = None, almacen_id: int = None,
     skip: int = 0, limit: int = 100,
     db: Session = Depends(get_db), user=Depends(get_current_user)
 ):
@@ -731,6 +744,14 @@ def libro_mayor(
         q = q.filter(models.AsientoContable.fecha >= desde)
     if hasta:
         q = q.filter(models.AsientoContable.fecha <= hasta)
+    if campo_id:
+        q = q.filter(models.LineaAsiento.campo_id == campo_id)
+    if unidad_negocio_id:
+        q = q.filter(models.LineaAsiento.unidad_negocio_id == unidad_negocio_id)
+    if departamento_id:
+        q = q.filter(models.LineaAsiento.departamento_id == departamento_id)
+    if almacen_id:
+        q = q.filter(models.LineaAsiento.almacen_id == almacen_id)
 
     total = q.count()
     order = (models.AsientoContable.fecha, models.AsientoContable.id)
@@ -762,6 +783,8 @@ def libro_mayor(
 
 @router.get("/balance-comprobacion")
 def balance_comprobacion(periodo_id: int = None, anio: int = None, mes: int = None,
+                         campo_id: str = None, unidad_negocio_id: int = None,
+                         departamento_id: int = None, almacen_id: int = None,
                          db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
@@ -781,16 +804,42 @@ def balance_comprobacion(periodo_id: int = None, anio: int = None, mes: int = No
     if not periodo_ids:
         return []
 
-    saldos = db.query(models.SaldoMensual).filter(
-        models.SaldoMensual.periodo_id.in_(periodo_ids)).all()
+    has_dim_filter = any([campo_id, unidad_negocio_id, departamento_id, almacen_id])
 
-    acum = {}
-    for s in saldos:
-        cid = s.cuenta_id
-        if cid not in acum:
-            acum[cid] = {"deudor": Decimal(0), "acreedor": Decimal(0)}
-        acum[cid]["deudor"] += Decimal(str(s.saldo_deudor or 0))
-        acum[cid]["acreedor"] += Decimal(str(s.saldo_acreedor or 0))
+    if has_dim_filter:
+        lq = db.query(
+            models.LineaAsiento.cuenta_id,
+            sqlfunc.sum(models.LineaAsiento.debe).label("total_debe"),
+            sqlfunc.sum(models.LineaAsiento.haber).label("total_haber"),
+        ).join(models.AsientoContable).filter(
+            models.AsientoContable.estado == "contabilizado",
+            models.AsientoContable.periodo_id.in_(periodo_ids),
+        )
+        if campo_id:
+            lq = lq.filter(models.LineaAsiento.campo_id == campo_id)
+        if unidad_negocio_id:
+            lq = lq.filter(models.LineaAsiento.unidad_negocio_id == unidad_negocio_id)
+        if departamento_id:
+            lq = lq.filter(models.LineaAsiento.departamento_id == departamento_id)
+        if almacen_id:
+            lq = lq.filter(models.LineaAsiento.almacen_id == almacen_id)
+        lq = lq.group_by(models.LineaAsiento.cuenta_id)
+        acum = {}
+        for row in lq.all():
+            acum[row.cuenta_id] = {
+                "deudor": Decimal(str(row.total_debe or 0)),
+                "acreedor": Decimal(str(row.total_haber or 0)),
+            }
+    else:
+        saldos = db.query(models.SaldoMensual).filter(
+            models.SaldoMensual.periodo_id.in_(periodo_ids)).all()
+        acum = {}
+        for s in saldos:
+            cid = s.cuenta_id
+            if cid not in acum:
+                acum[cid] = {"deudor": Decimal(0), "acreedor": Decimal(0)}
+            acum[cid]["deudor"] += Decimal(str(s.saldo_deudor or 0))
+            acum[cid]["acreedor"] += Decimal(str(s.saldo_acreedor or 0))
 
     cuentas = db.query(models.CuentaContable).filter(
         models.CuentaContable.activo == True
@@ -815,6 +864,8 @@ def balance_comprobacion(periodo_id: int = None, anio: int = None, mes: int = No
 
 @router.get("/balance-general")
 def balance_general(anio: int = None, mes: int = None,
+                    campo_id: str = None, unidad_negocio_id: int = None,
+                    departamento_id: int = None, almacen_id: int = None,
                     db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
@@ -828,15 +879,36 @@ def balance_general(anio: int = None, mes: int = None,
              ~and_(models.PeriodoContable.anio == anio, models.PeriodoContable.mes > mes))
     ).all()]
 
-    saldos = db.query(models.SaldoMensual).filter(
-        models.SaldoMensual.periodo_id.in_(periodo_ids)).all() if periodo_ids else []
+    has_dim_filter = any([campo_id, unidad_negocio_id, departamento_id, almacen_id])
 
     acum = {}
-    for s in saldos:
-        cid = s.cuenta_id
-        if cid not in acum:
-            acum[cid] = Decimal(0)
-        acum[cid] += Decimal(str(s.saldo_deudor or 0)) - Decimal(str(s.saldo_acreedor or 0))
+    if has_dim_filter and periodo_ids:
+        lq = db.query(
+            models.LineaAsiento.cuenta_id,
+            sqlfunc.sum(models.LineaAsiento.debe).label("total_debe"),
+            sqlfunc.sum(models.LineaAsiento.haber).label("total_haber"),
+        ).join(models.AsientoContable).filter(
+            models.AsientoContable.estado == "contabilizado",
+            models.AsientoContable.periodo_id.in_(periodo_ids),
+        )
+        if campo_id:
+            lq = lq.filter(models.LineaAsiento.campo_id == campo_id)
+        if unidad_negocio_id:
+            lq = lq.filter(models.LineaAsiento.unidad_negocio_id == unidad_negocio_id)
+        if departamento_id:
+            lq = lq.filter(models.LineaAsiento.departamento_id == departamento_id)
+        if almacen_id:
+            lq = lq.filter(models.LineaAsiento.almacen_id == almacen_id)
+        for row in lq.group_by(models.LineaAsiento.cuenta_id).all():
+            acum[row.cuenta_id] = Decimal(str(row.total_debe or 0)) - Decimal(str(row.total_haber or 0))
+    else:
+        saldos = db.query(models.SaldoMensual).filter(
+            models.SaldoMensual.periodo_id.in_(periodo_ids)).all() if periodo_ids else []
+        for s in saldos:
+            cid = s.cuenta_id
+            if cid not in acum:
+                acum[cid] = Decimal(0)
+            acum[cid] += Decimal(str(s.saldo_deudor or 0)) - Decimal(str(s.saldo_acreedor or 0))
 
     cuentas = {c.id: c for c in db.query(models.CuentaContable).filter(
         models.CuentaContable.activo == True).all()}
@@ -962,6 +1034,8 @@ def balance_general(anio: int = None, mes: int = None,
 
 @router.get("/estado-resultados")
 def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
+                      unidad_negocio_id: int = None, departamento_id: int = None,
+                      almacen_id: int = None,
                       db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
@@ -985,6 +1059,12 @@ def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
     )
     if campo_id:
         lq = lq.filter(models.LineaAsiento.campo_id == campo_id)
+    if unidad_negocio_id:
+        lq = lq.filter(models.LineaAsiento.unidad_negocio_id == unidad_negocio_id)
+    if departamento_id:
+        lq = lq.filter(models.LineaAsiento.departamento_id == departamento_id)
+    if almacen_id:
+        lq = lq.filter(models.LineaAsiento.almacen_id == almacen_id)
     lq = lq.group_by(models.LineaAsiento.cuenta_id)
 
     acum = {}
@@ -1183,7 +1263,7 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
     retencion = Decimal(str(data.retencion_isr or 0))
     total = subtotal + itbis - retencion
 
-    numero = get_next_seq(db, "CXP", "CXP")
+    numero = get_next("CXP", db)
     cxp = models.CuentaPorPagar(
         numero=numero,
         proveedor_id=data.proveedor_id,
@@ -1265,7 +1345,7 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
     if monto > saldo:
         raise HTTPException(400, f"Monto ({monto}) excede saldo pendiente ({saldo})")
 
-    numero = get_next_seq(db, "PAG", "PAG")
+    numero = get_next("PAG", db)
     pago = models.Pago(
         numero=numero, cxp_id=data.cxp_id, fecha=data.fecha,
         monto=monto, metodo_pago=data.metodo_pago,
@@ -1366,7 +1446,7 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
     itbis = Decimal(str(data.itbis or 0))
     total = subtotal + itbis
 
-    numero = get_next_seq(db, "CXC", "CXC")
+    numero = get_next("CXC", db)
     tasa = data.tasa_cambio or 1
     total_dop = total * Decimal(str(tasa)) if data.moneda == "USD" else total
     cxc = models.CuentaPorCobrar(
@@ -1443,7 +1523,7 @@ def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
     if monto > saldo:
         raise HTTPException(400, f"Monto ({monto}) excede saldo pendiente ({saldo})")
 
-    numero = get_next_seq(db, "COB", "COB")
+    numero = get_next("COB", db)
     cobro = models.Cobro(
         numero=numero, cxc_id=data.cxc_id, fecha=data.fecha,
         monto=monto, metodo_pago=data.metodo_pago,
@@ -2182,7 +2262,7 @@ def ejecutar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get
     ).first()
     if not periodo or periodo.estado == "cerrado":
         raise HTTPException(400, "Período actual no disponible o cerrado")
-    numero = get_next_seq(db, "asiento", "AST")
+    numero = get_next("AC", db)
     asiento = models.AsientoContable(
         numero=numero, fecha=hoy, periodo_id=periodo.id,
         descripcion=ar.descripcion_asiento or ar.nombre, estado="borrador",
@@ -3022,3 +3102,73 @@ def _get_documento_origen(db: Session, origen: str, referencia_id: str, origen_i
     except Exception:
         pass
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIARIOS CONTABLES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/diarios")
+def listar_diarios(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    diarios = db.query(models.DiarioContable).order_by(models.DiarioContable.codigo).all()
+    return [{"id": d.id, "codigo": d.codigo, "nombre": d.nombre,
+             "tipo": d.tipo, "cuenta_default_id": d.cuenta_default_id, "activo": d.activo}
+            for d in diarios]
+
+
+@router.post("/diarios")
+def crear_diario(data: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
+    if not data.get("codigo") or not data.get("nombre"):
+        raise HTTPException(400, "codigo y nombre son requeridos")
+    exists = db.query(models.DiarioContable).filter(
+        models.DiarioContable.codigo == data["codigo"]).first()
+    if exists:
+        raise HTTPException(400, f"Ya existe un diario con código {data['codigo']}")
+    d = models.DiarioContable(
+        codigo=data["codigo"], nombre=data["nombre"],
+        tipo=data.get("tipo"), cuenta_default_id=data.get("cuenta_default_id"),
+        activo=data.get("activo", True),
+    )
+    db.add(d)
+    db.commit()
+    db.refresh(d)
+    return {"ok": True, "id": d.id}
+
+
+@router.put("/diarios/{diario_id}")
+def actualizar_diario(diario_id: int, data: dict, db: Session = Depends(get_db),
+                      user=Depends(require_admin)):
+    d = db.query(models.DiarioContable).get(diario_id)
+    if not d:
+        raise HTTPException(404, "Diario no encontrado")
+    if "codigo" in data:
+        dup = db.query(models.DiarioContable).filter(
+            models.DiarioContable.codigo == data["codigo"],
+            models.DiarioContable.id != diario_id).first()
+        if dup:
+            raise HTTPException(400, f"Ya existe otro diario con código {data['codigo']}")
+        d.codigo = data["codigo"]
+    if "nombre" in data:
+        d.nombre = data["nombre"]
+    if "tipo" in data:
+        d.tipo = data["tipo"]
+    if "cuenta_default_id" in data:
+        d.cuenta_default_id = data["cuenta_default_id"]
+    if "activo" in data:
+        d.activo = data["activo"]
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/diarios/{diario_id}")
+def eliminar_diario(diario_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    d = db.query(models.DiarioContable).get(diario_id)
+    if not d:
+        raise HTTPException(404, "Diario no encontrado")
+    used = db.query(models.AsientoContable).filter(
+        models.AsientoContable.diario_id == diario_id).first()
+    if used:
+        raise HTTPException(400, "No se puede eliminar un diario que tiene asientos asociados")
+    db.delete(d)
+    db.commit()
+    return {"ok": True}

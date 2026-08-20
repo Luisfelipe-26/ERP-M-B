@@ -388,6 +388,7 @@ class AsientoContableCreate(BaseModel):
     origen: Optional[str] = "MAN"
     referencia_id: Optional[str] = None
     descripcion: Optional[str] = None
+    diario_id: Optional[int] = None
     lineas: List[LineaAsientoCreate] = []
 
 class AsientoContableOut(BaseModel):
@@ -395,6 +396,8 @@ class AsientoContableOut(BaseModel):
     numero: str
     fecha: date
     periodo_id: Optional[int] = None
+    diario_id: Optional[int] = None
+    diario_codigo: Optional[str] = None
     tipo: str
     origen: Optional[str] = None
     referencia_id: Optional[str] = None

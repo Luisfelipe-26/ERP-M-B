@@ -8,11 +8,11 @@ import models
 
 import os as _os
 
-ODOO_URL = _os.environ.get('ODOO_URL', 'https://corvus.marcoson.net')
-ODOO_DB = _os.environ.get('ODOO_DB', 'corvus.marcoson.net')
-ODOO_USER = _os.environ.get('ODOO_USER', 'finanzas@grupolb.com.do')
-ODOO_PASS = _os.environ.get('ODOO_PASS', 'Mathias@0627')
-SYNC_INTERVAL = int(_os.environ.get('ODOO_SYNC_INTERVAL', '10'))
+ODOO_URL = _os.environ.get('ODOO_URL', '')
+ODOO_DB = _os.environ.get('ODOO_DB', '')
+ODOO_USER = _os.environ.get('ODOO_USER', '')
+ODOO_PASS = _os.environ.get('ODOO_PASS', '')
+SYNC_INTERVAL = int(_os.environ.get('ODOO_SYNC_INTERVAL', '600'))
 
 
 def _sync_proveedores():
@@ -108,5 +108,9 @@ def _sync_loop():
 
 def start_sync():
     """Start the background sync thread (call once at app startup)."""
+    if not all([ODOO_URL, ODOO_DB, ODOO_USER, ODOO_PASS]):
+        import logging
+        logging.getLogger(__name__).warning("Odoo sync disabled — set ODOO_URL, ODOO_DB, ODOO_USER, ODOO_PASS env vars")
+        return
     t = threading.Thread(target=_sync_loop, daemon=True, name="odoo-sync")
     t.start()

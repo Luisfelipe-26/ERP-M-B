@@ -6,7 +6,7 @@ from database import engine, SessionLocal
 import models
 from routers import (
     auth, campos, trabajadores, actividades, productos,
-    contabilidad,
+    contabilidad, sequences, admin,
     ordenes, dashboard, inventario, reportes, compras,
     audit_log, tipos_producto, proveedores,
     clima, sanidad, riego, analytics,
@@ -55,6 +55,11 @@ def run_migrations():
         "CREATE INDEX IF NOT EXISTS ix_asientos_contables_origen_id ON asientos_contables(origen_id)",
         "ALTER TABLE movimientos_inventario ADD COLUMN IF NOT EXISTS asiento_id INTEGER REFERENCES asientos_contables(id)",
         "ALTER TABLE conciliacion_partidas ADD COLUMN IF NOT EXISTS asiento_id INTEGER REFERENCES asientos_contables(id)",
+        # DiarioContable — diario_id FK en asientos
+        "ALTER TABLE asientos_contables ADD COLUMN IF NOT EXISTS diario_id INTEGER REFERENCES diarios_contables(id)",
+        "CREATE INDEX IF NOT EXISTS ix_asientos_contables_diario_id ON asientos_contables(diario_id)",
+        # PerfilAcceso — perfil_id FK en usuarios
+        "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS perfil_id INTEGER REFERENCES perfiles_acceso(id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).
@@ -82,10 +87,91 @@ def recalc_all_ot_costs():
         db.close()
 
 
+def seed_perfiles():
+    """Ensure default access profiles exist and assign them to existing users."""
+    defaults = [
+        ("Administrador", "Acceso total al sistema", {
+            "contabilidad": "full", "inventario": "full", "ordenes": "full",
+            "compras": "full", "nomina": "full", "sanidad": "full", "riego": "full",
+            "campos": "full", "trabajadores": "full", "productos": "full",
+            "clientes": "full", "proveedores": "full", "activos_fijos": "full",
+            "presupuesto": "full", "configuracion": "full", "admin": "full",
+        }),
+        ("Contador", "Acceso a módulos financieros", {
+            "contabilidad": "full", "inventario": "read", "compras": "full",
+            "nomina": "full", "clientes": "full", "proveedores": "full",
+            "activos_fijos": "full", "presupuesto": "full",
+        }),
+        ("Supervisor", "Supervisión de operaciones de campo", {
+            "ordenes": "full", "inventario": "full", "campos": "full",
+            "trabajadores": "full", "productos": "read", "sanidad": "full",
+            "riego": "full", "nomina": "read",
+        }),
+        ("Operador", "Acceso básico operativo", {
+            "ordenes": "write", "inventario": "read", "campos": "read",
+            "trabajadores": "read", "productos": "read",
+        }),
+    ]
+    db = SessionLocal()
+    try:
+        for nombre, desc, permisos in defaults:
+            exists = db.query(models.PerfilAcceso).filter(
+                models.PerfilAcceso.nombre == nombre).first()
+            if not exists:
+                db.add(models.PerfilAcceso(nombre=nombre, descripcion=desc, permisos=permisos))
+        db.commit()
+        admin_perfil = db.query(models.PerfilAcceso).filter(
+            models.PerfilAcceso.nombre == "Administrador").first()
+        if admin_perfil:
+            db.query(models.Usuario).filter(
+                models.Usuario.rol == "admin",
+                models.Usuario.perfil_id == None
+            ).update({"perfil_id": admin_perfil.id}, synchronize_session=False)
+            sup_perfil = db.query(models.PerfilAcceso).filter(models.PerfilAcceso.nombre == "Supervisor").first()
+            if sup_perfil:
+                db.query(models.Usuario).filter(
+                    models.Usuario.rol == "supervisor",
+                    models.Usuario.perfil_id == None
+                ).update({"perfil_id": sup_perfil.id}, synchronize_session=False)
+            op_perfil = db.query(models.PerfilAcceso).filter(models.PerfilAcceso.nombre == "Operador").first()
+            if op_perfil:
+                db.query(models.Usuario).filter(
+                    models.Usuario.rol == "operador",
+                    models.Usuario.perfil_id == None
+                ).update({"perfil_id": op_perfil.id}, synchronize_session=False)
+            db.commit()
+    finally:
+        db.close()
+
+
+def seed_diarios():
+    """Ensure default accounting journals exist."""
+    defaults = [
+        ("COMP", "Diario de Compras", "compras"),
+        ("VTA",  "Diario de Ventas", "ventas"),
+        ("BAN",  "Diario de Banco/Tesorería", "banco"),
+        ("NOM",  "Diario de Nómina", "nomina"),
+        ("AJU",  "Diario de Ajustes", "ajuste"),
+        ("OPR",  "Diario de Operaciones", "operaciones"),
+    ]
+    db = SessionLocal()
+    try:
+        for codigo, nombre, tipo in defaults:
+            exists = db.query(models.DiarioContable).filter(
+                models.DiarioContable.codigo == codigo).first()
+            if not exists:
+                db.add(models.DiarioContable(codigo=codigo, nombre=nombre, tipo=tipo))
+        db.commit()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     models.Base.metadata.create_all(bind=engine)
     run_migrations()
+    seed_perfiles()
+    seed_diarios()
     recalc_all_ot_costs()
     start_sync()
     yield
@@ -96,9 +182,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+import os
+_cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -125,6 +213,8 @@ app.include_router(analytics.router)
 app.include_router(contabilidad.router)
 app.include_router(clientes.router)
 app.include_router(cuentas_bancarias.router)
+app.include_router(sequences.router)
+app.include_router(admin.router)
 
 
 @app.get("/")

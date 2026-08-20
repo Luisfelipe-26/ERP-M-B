@@ -1,7 +1,16 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Index, Date, Numeric, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Index, Date, Numeric, UniqueConstraint, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
+
+
+class PerfilAcceso(Base):
+    __tablename__ = "perfiles_acceso"
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(50), unique=True, nullable=False)
+    descripcion = Column(String(200))
+    permisos = Column(JSON, default={})
+    activo = Column(Boolean, default=True)
 
 
 class Usuario(Base):
@@ -11,8 +20,10 @@ class Usuario(Base):
     email = Column(String(100), unique=True, index=True, nullable=False)
     hashed_password = Column(String(200), nullable=False)
     rol = Column(String(50), default="operador")
+    perfil_id = Column(Integer, ForeignKey("perfiles_acceso.id"))
     activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, server_default=func.now())
+    perfil = relationship("PerfilAcceso")
 
 
 class Campo(Base):
@@ -638,12 +649,24 @@ class PeriodoContable(Base):
     __table_args__ = (UniqueConstraint("anio", "mes", name="uq_periodo_anio_mes"),)
 
 
+class DiarioContable(Base):
+    __tablename__ = "diarios_contables"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(10), unique=True, nullable=False)
+    nombre = Column(String(100), nullable=False)
+    tipo = Column(String(30))
+    cuenta_default_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    activo = Column(Boolean, default=True)
+    cuenta_default = relationship("CuentaContable")
+
+
 class AsientoContable(Base):
     __tablename__ = "asientos_contables"
     id = Column(Integer, primary_key=True, index=True)
     numero = Column(String(20), unique=True, index=True, nullable=False)
     fecha = Column(Date, nullable=False, index=True)
     periodo_id = Column(Integer, ForeignKey("periodos_contables.id"), index=True)
+    diario_id = Column(Integer, ForeignKey("diarios_contables.id"), index=True)
     tipo = Column(String(20), default="manual")        # automatico, manual, cierre, apertura
     origen = Column(String(10))                        # OT, OC, GR, PAG, COB, VTA, AJ, NOM, DEP, LIQ, MAN
     referencia_id = Column(String(50))
@@ -659,6 +682,7 @@ class AsientoContable(Base):
     origen_id = Column(Integer, index=True)
     creado_en = Column(DateTime, server_default=func.now())
     periodo = relationship("PeriodoContable")
+    diario = relationship("DiarioContable")
     lineas = relationship("LineaAsiento", back_populates="asiento", cascade="all, delete-orphan")
 
 
