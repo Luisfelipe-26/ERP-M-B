@@ -36,6 +36,20 @@ def run_migrations():
         "ALTER TABLE partidas_estado_financiero ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT TRUE",
         # CuentaContable — link to financial-statement line item
         "ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS partida_id INTEGER REFERENCES partidas_estado_financiero(id)",
+        # Dimensiones financieras — FKs en tablas existentes
+        "ALTER TABLE lineas_asiento ADD COLUMN IF NOT EXISTS unidad_negocio_id INTEGER REFERENCES unidades_negocio(id)",
+        "ALTER TABLE lineas_asiento ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
+        "ALTER TABLE lineas_asiento ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS unidad_negocio_id INTEGER REFERENCES unidades_negocio(id)",
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
+        "ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS unidad_negocio_id INTEGER REFERENCES unidades_negocio(id)",
+        "ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
+        "ALTER TABLE ordenes_compra ADD COLUMN IF NOT EXISTS unidad_negocio_id INTEGER REFERENCES unidades_negocio(id)",
+        "ALTER TABLE ordenes_compra ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
+        "ALTER TABLE ordenes_compra ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
+        "ALTER TABLE movimientos_inventario ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
+        "ALTER TABLE nomina_detalle ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

@@ -137,6 +137,8 @@ class OrdenTrabajo(Base):
     fecha_cierre = Column(DateTime)
     hora_cierre = Column(String(10))  # HH:MM
     creado_en = Column(DateTime, server_default=func.now())
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"), index=True)
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"), index=True)
     campo = relationship("Campo", back_populates="ordenes")
     actividad_rel = relationship("Actividad")
     mano_obra = relationship("OTManoObra", back_populates="orden")
@@ -196,6 +198,9 @@ class OrdenCompra(Base):
     fecha_recepcion = Column(DateTime)
     observaciones = Column(Text)
     creado_en = Column(DateTime, server_default=func.now())
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"), index=True)
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"), index=True)
+    almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
     lineas = relationship("OrdenCompraLinea", back_populates="orden")
     campo = relationship("Campo")
 
@@ -237,6 +242,7 @@ class MovimientoInventario(Base):
     observacion = Column(Text)
     fecha = Column(DateTime, server_default=func.now())
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), index=True)
+    almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
     producto = relationship("Producto", back_populates="movimientos")
     usuario = relationship("Usuario")
 
@@ -664,6 +670,9 @@ class LineaAsiento(Base):
     campo_id = Column(String(10), ForeignKey("campos.id_campo"), index=True)
     tercero_id = Column(String(50))
     descripcion_linea = Column(String(300))
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"), index=True)
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"), index=True)
+    almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
     asiento = relationship("AsientoContable", back_populates="lineas")
     cuenta = relationship("CuentaContable", back_populates="lineas")
 
@@ -922,6 +931,9 @@ class Presupuesto(Base):
     monto_nov = Column(Numeric(14, 2), default=0)
     monto_dic = Column(Numeric(14, 2), default=0)
     descripcion = Column(String(300))
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"), index=True)
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"), index=True)
+    almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
 
 
 class CosechaLiquidacion(Base):
@@ -977,6 +989,7 @@ class NominaDetalle(Base):
     total_deducciones = Column(Numeric(14, 2), default=0)
     neto_a_pagar = Column(Numeric(14, 2), default=0)
     campo_id_principal = Column(String(10), ForeignKey("campos.id_campo"))
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"), index=True)
     periodo = relationship("NominaPeriodo", back_populates="detalles")
     trabajador = relationship("Trabajador")
 
@@ -1034,3 +1047,32 @@ class ConciliacionPartida(Base):
     referencia = Column(String(100))
     conciliada = Column(Boolean, default=False)
     conciliacion = relationship("ConciliacionBancaria", back_populates="partidas")
+
+
+# ── Dimensiones Financieras ──────────────────────────────────
+
+class UnidadNegocio(Base):
+    __tablename__ = "unidades_negocio"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(20), unique=True, nullable=False, index=True)
+    nombre = Column(String(200), nullable=False)
+    descripcion = Column(String(500))
+    activo = Column(Boolean, default=True)
+
+
+class Departamento(Base):
+    __tablename__ = "departamentos"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(20), unique=True, nullable=False, index=True)
+    nombre = Column(String(200), nullable=False)
+    descripcion = Column(String(500))
+    activo = Column(Boolean, default=True)
+
+
+class Almacen(Base):
+    __tablename__ = "almacenes"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(20), unique=True, nullable=False, index=True)
+    nombre = Column(String(200), nullable=False)
+    ubicacion = Column(String(300))
+    activo = Column(Boolean, default=True)

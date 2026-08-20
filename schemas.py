@@ -280,6 +280,9 @@ class OrdenCompraCreate(BaseModel):
     fecha: Optional[datetime] = None
     proveedor: Optional[str] = None
     campo_id: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    almacen_id: Optional[int] = None
     observaciones: Optional[str] = None
     lineas: List[OCLineaCreate] = []
 
@@ -289,6 +292,9 @@ class OrdenCompraOut(BaseModel):
     fecha: Optional[datetime]
     proveedor: Optional[str]
     campo_id: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    almacen_id: Optional[int] = None
     estado: str
     total_estimado: float
     total_recibido: Optional[float] = 0
@@ -361,11 +367,17 @@ class LineaAsientoCreate(BaseModel):
     campo_id: Optional[str] = None
     tercero_id: Optional[str] = None
     descripcion_linea: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    almacen_id: Optional[int] = None
 
 class LineaAsientoOut(LineaAsientoCreate):
     id: int
     cuenta_codigo: Optional[str] = None
     cuenta_nombre: Optional[str] = None
+    unidad_negocio_nombre: Optional[str] = None
+    departamento_nombre: Optional[str] = None
+    almacen_nombre: Optional[str] = None
     class Config:
         from_attributes = True
 
@@ -652,6 +664,9 @@ class PresupuestoCreate(BaseModel):
     anio: int
     cuenta_id: int
     campo_id: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    almacen_id: Optional[int] = None
     monto_ene: float = 0
     monto_feb: float = 0
     monto_mar: float = 0
@@ -672,5 +687,39 @@ class PresupuestoOut(PresupuestoCreate):
     cuenta_nombre: Optional[str] = None
     campo_nombre: Optional[str] = None
     total_anual: Optional[float] = None
+    class Config:
+        from_attributes = True
+
+# Dimensiones Financieras
+class UnidadNegocioCreate(BaseModel):
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    activo: bool = True
+
+class UnidadNegocioOut(UnidadNegocioCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class DepartamentoCreate(BaseModel):
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    activo: bool = True
+
+class DepartamentoOut(DepartamentoCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class AlmacenCreate(BaseModel):
+    codigo: str
+    nombre: str
+    ubicacion: Optional[str] = None
+    activo: bool = True
+
+class AlmacenOut(AlmacenCreate):
+    id: int
     class Config:
         from_attributes = True

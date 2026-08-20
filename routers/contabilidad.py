@@ -47,6 +47,18 @@ def _get_regla_cuentas(db: Session, evento: str, concepto: str):
     return (regla.cuenta_debe_id, regla.cuenta_haber_id)
 
 
+def _enrich_linea_dims(db: Session, linea, lo):
+    if linea.unidad_negocio_id:
+        un = db.query(models.UnidadNegocio).get(linea.unidad_negocio_id)
+        lo.unidad_negocio_nombre = un.nombre if un else None
+    if linea.departamento_id:
+        dep = db.query(models.Departamento).get(linea.departamento_id)
+        lo.departamento_nombre = dep.nombre if dep else None
+    if linea.almacen_id:
+        alm = db.query(models.Almacen).get(linea.almacen_id)
+        lo.almacen_nombre = alm.nombre if alm else None
+
+
 def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: str,
                         descripcion: str, lineas_data: list, user_nombre: str):
     """Create and immediately post an automatic journal entry.
@@ -529,6 +541,7 @@ def listar_asientos(
             lo = schemas.LineaAsientoOut.model_validate(l)
             lo.cuenta_codigo = l.cuenta.codigo if l.cuenta else None
             lo.cuenta_nombre = l.cuenta.nombre if l.cuenta else None
+            _enrich_linea_dims(db, l, lo)
             out.lineas.append(lo)
         result.append(out)
     return {"total": total, "items": result}
@@ -545,6 +558,7 @@ def ver_asiento(numero: str, db: Session = Depends(get_db), user=Depends(get_cur
         lo = schemas.LineaAsientoOut.model_validate(l)
         lo.cuenta_codigo = l.cuenta.codigo if l.cuenta else None
         lo.cuenta_nombre = l.cuenta.nombre if l.cuenta else None
+        _enrich_linea_dims(db, l, lo)
         out.lineas.append(lo)
     return out
 
@@ -593,7 +607,10 @@ def crear_asiento(data: schemas.AsientoContableCreate, db: Session = Depends(get
         linea = models.LineaAsiento(
             asiento_id=asiento.id, cuenta_id=l.cuenta_id,
             debe=l.debe, haber=l.haber, campo_id=l.campo_id or None,
-            tercero_id=l.tercero_id, descripcion_linea=l.descripcion_linea
+            tercero_id=l.tercero_id, descripcion_linea=l.descripcion_linea,
+            unidad_negocio_id=l.unidad_negocio_id,
+            departamento_id=l.departamento_id,
+            almacen_id=l.almacen_id,
         )
         db.add(linea)
     db.commit()
@@ -1893,6 +1910,15 @@ def listar_presupuestos(anio: int = None, db: Session = Depends(get_db),
         if p.campo_id:
             campo = db.query(models.Campo).filter(models.Campo.id_campo == p.campo_id).first()
             d["campo_nombre"] = campo.nombre if campo else None
+        if p.unidad_negocio_id:
+            un = db.query(models.UnidadNegocio).get(p.unidad_negocio_id)
+            d["unidad_negocio_nombre"] = un.nombre if un else None
+        if p.departamento_id:
+            dep = db.query(models.Departamento).get(p.departamento_id)
+            d["departamento_nombre"] = dep.nombre if dep else None
+        if p.almacen_id:
+            alm = db.query(models.Almacen).get(p.almacen_id)
+            d["almacen_nombre"] = alm.nombre if alm else None
         meses = [p.monto_ene, p.monto_feb, p.monto_mar, p.monto_abr, p.monto_may, p.monto_jun,
                  p.monto_jul, p.monto_ago, p.monto_sep, p.monto_oct, p.monto_nov, p.monto_dic]
         d["total_anual"] = round(sum(float(m or 0) for m in meses), 2)
@@ -2487,3 +2513,125 @@ def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)
         alertas.append({"tipo": "periodo_abierto", "nivel": "info", "titulo": f"{len(old_periods)} período(s) contable(s) sin cerrar", "detalle": ", ".join(f"{p.mes:02d}/{p.anio}" for p in old_periods[:3]), "accion": "/contabilidad"})
 
     return {"alertas": alertas, "total": len(alertas)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIMENSIONES FINANCIERAS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Unidades de Negocio ──
+
+@router.get("/unidades-negocio", response_model=list[schemas.UnidadNegocioOut])
+def listar_unidades_negocio(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return db.query(models.UnidadNegocio).order_by(models.UnidadNegocio.codigo).all()
+
+@router.post("/unidades-negocio", response_model=schemas.UnidadNegocioOut)
+def crear_unidad_negocio(data: schemas.UnidadNegocioCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    existe = db.query(models.UnidadNegocio).filter(models.UnidadNegocio.codigo == data.codigo).first()
+    if existe:
+        raise HTTPException(400, f"Ya existe una unidad de negocio con código {data.codigo}")
+    obj = models.UnidadNegocio(**data.model_dump())
+    db.add(obj); db.commit(); db.refresh(obj)
+    return obj
+
+@router.put("/unidades-negocio/{id}", response_model=schemas.UnidadNegocioOut)
+def actualizar_unidad_negocio(id: int, data: schemas.UnidadNegocioCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.UnidadNegocio).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    for k, v in data.model_dump().items():
+        setattr(obj, k, v)
+    db.commit(); db.refresh(obj)
+    return obj
+
+@router.delete("/unidades-negocio/{id}")
+def eliminar_unidad_negocio(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.UnidadNegocio).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    db.delete(obj); db.commit()
+    return {"ok": True}
+
+# ── Departamentos ──
+
+@router.get("/departamentos", response_model=list[schemas.DepartamentoOut])
+def listar_departamentos(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return db.query(models.Departamento).order_by(models.Departamento.codigo).all()
+
+@router.post("/departamentos", response_model=schemas.DepartamentoOut)
+def crear_departamento(data: schemas.DepartamentoCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    existe = db.query(models.Departamento).filter(models.Departamento.codigo == data.codigo).first()
+    if existe:
+        raise HTTPException(400, f"Ya existe un departamento con código {data.codigo}")
+    obj = models.Departamento(**data.model_dump())
+    db.add(obj); db.commit(); db.refresh(obj)
+    return obj
+
+@router.put("/departamentos/{id}", response_model=schemas.DepartamentoOut)
+def actualizar_departamento(id: int, data: schemas.DepartamentoCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.Departamento).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    for k, v in data.model_dump().items():
+        setattr(obj, k, v)
+    db.commit(); db.refresh(obj)
+    return obj
+
+@router.delete("/departamentos/{id}")
+def eliminar_departamento(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.Departamento).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    db.delete(obj); db.commit()
+    return {"ok": True}
+
+# ── Almacenes ──
+
+@router.get("/almacenes", response_model=list[schemas.AlmacenOut])
+def listar_almacenes(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return db.query(models.Almacen).order_by(models.Almacen.codigo).all()
+
+@router.post("/almacenes", response_model=schemas.AlmacenOut)
+def crear_almacen(data: schemas.AlmacenCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    existe = db.query(models.Almacen).filter(models.Almacen.codigo == data.codigo).first()
+    if existe:
+        raise HTTPException(400, f"Ya existe un almacén con código {data.codigo}")
+    obj = models.Almacen(**data.model_dump())
+    db.add(obj); db.commit(); db.refresh(obj)
+    return obj
+
+@router.put("/almacenes/{id}", response_model=schemas.AlmacenOut)
+def actualizar_almacen(id: int, data: schemas.AlmacenCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.Almacen).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    for k, v in data.model_dump().items():
+        setattr(obj, k, v)
+    db.commit(); db.refresh(obj)
+    return obj
+
+@router.delete("/almacenes/{id}")
+def eliminar_almacen(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.Almacen).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    db.delete(obj); db.commit()
+    return {"ok": True}
