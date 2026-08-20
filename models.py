@@ -243,6 +243,7 @@ class MovimientoInventario(Base):
     fecha = Column(DateTime, server_default=func.now())
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), index=True)
     almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
     producto = relationship("Producto", back_populates="movimientos")
     usuario = relationship("Usuario")
 
@@ -655,6 +656,7 @@ class AsientoContable(Base):
     contabilizado_en = Column(DateTime)
     anulado_por = Column(String(100))
     asiento_reverso_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    origen_id = Column(Integer, index=True)
     creado_en = Column(DateTime, server_default=func.now())
     periodo = relationship("PeriodoContable")
     lineas = relationship("LineaAsiento", back_populates="asiento", cascade="all, delete-orphan")
@@ -1046,6 +1048,7 @@ class ConciliacionPartida(Base):
     fecha = Column(Date)
     referencia = Column(String(100))
     conciliada = Column(Boolean, default=False)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
     conciliacion = relationship("ConciliacionBancaria", back_populates="partidas")
 
 

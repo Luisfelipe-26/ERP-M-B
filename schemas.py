@@ -398,6 +398,7 @@ class AsientoContableOut(BaseModel):
     tipo: str
     origen: Optional[str] = None
     referencia_id: Optional[str] = None
+    origen_id: Optional[int] = None
     descripcion: Optional[str] = None
     total_debe: float
     total_haber: float
@@ -721,5 +722,49 @@ class AlmacenCreate(BaseModel):
 
 class AlmacenOut(AlmacenCreate):
     id: int
+    class Config:
+        from_attributes = True
+
+# Nómina
+class NominaProcesar(BaseModel):
+    tipo: str = "quincenal"
+    fecha_inicio: date
+    fecha_fin: date
+
+class NominaDetalleOut(BaseModel):
+    id: int
+    trabajador_id: str
+    trabajador_nombre: Optional[str] = None
+    dias_trabajados: int = 0
+    salario_bruto: float = 0
+    horas_extra: float = 0
+    monto_horas_extra: float = 0
+    bonificacion: float = 0
+    total_devengado: float = 0
+    deduccion_sfs: float = 0
+    deduccion_afp: float = 0
+    deduccion_isr: float = 0
+    otras_deducciones: float = 0
+    total_deducciones: float = 0
+    neto_a_pagar: float = 0
+    departamento_id: Optional[int] = None
+    class Config:
+        from_attributes = True
+
+class NominaPeriodoOut(BaseModel):
+    id: int
+    tipo: str
+    fecha_inicio: date
+    fecha_fin: date
+    total_bruto: float = 0
+    total_deducciones: float = 0
+    total_neto: float = 0
+    total_tss_empleador: float = 0
+    estado: str
+    asiento_id: Optional[int] = None
+    asiento_numero: Optional[str] = None
+    procesado_por: Optional[str] = None
+    creado_en: Optional[datetime] = None
+    detalles: List[NominaDetalleOut] = []
     class Config:
         from_attributes = True

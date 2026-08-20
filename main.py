@@ -50,6 +50,11 @@ def run_migrations():
         "ALTER TABLE ordenes_compra ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
         "ALTER TABLE movimientos_inventario ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
         "ALTER TABLE nomina_detalle ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
+        # Trazabilidad — origen_id en asientos, asiento_id en movimientos y conciliación
+        "ALTER TABLE asientos_contables ADD COLUMN IF NOT EXISTS origen_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_asientos_contables_origen_id ON asientos_contables(origen_id)",
+        "ALTER TABLE movimientos_inventario ADD COLUMN IF NOT EXISTS asiento_id INTEGER REFERENCES asientos_contables(id)",
+        "ALTER TABLE conciliacion_partidas ADD COLUMN IF NOT EXISTS asiento_id INTEGER REFERENCES asientos_contables(id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

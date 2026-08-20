@@ -60,9 +60,11 @@ def _enrich_linea_dims(db: Session, linea, lo):
 
 
 def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: str,
-                        descripcion: str, lineas_data: list, user_nombre: str):
+                        descripcion: str, lineas_data: list, user_nombre: str,
+                        origen_id: int = None):
     """Create and immediately post an automatic journal entry.
-    lineas_data: list of dicts {cuenta_id, debe, haber, campo_id?, tercero_id?, descripcion_linea?}
+    lineas_data: list of dicts {cuenta_id, debe, haber, campo_id?, tercero_id?, descripcion_linea?,
+                                unidad_negocio_id?, departamento_id?, almacen_id?}
     Returns the AsientoContable or None if periodo missing/closed.
     """
     periodo = find_periodo(db, fecha)
@@ -81,6 +83,7 @@ def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: st
     asiento = models.AsientoContable(
         numero=numero, fecha=fecha, periodo_id=periodo.id,
         tipo="automatico", origen=origen, referencia_id=referencia_id,
+        origen_id=origen_id,
         descripcion=descripcion, total_debe=total_debe, total_haber=total_haber,
         estado="contabilizado", creado_por="Sistema",
         contabilizado_por="Sistema", contabilizado_en=datetime.utcnow()
@@ -94,7 +97,10 @@ def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: st
             debe=Decimal(str(l.get("debe") or 0)),
             haber=Decimal(str(l.get("haber") or 0)),
             campo_id=l.get("campo_id"), tercero_id=l.get("tercero_id"),
-            descripcion_linea=l.get("descripcion_linea")
+            descripcion_linea=l.get("descripcion_linea"),
+            unidad_negocio_id=l.get("unidad_negocio_id"),
+            departamento_id=l.get("departamento_id"),
+            almacen_id=l.get("almacen_id"),
         ))
 
     _actualizar_saldos(db, asiento, 1)
@@ -2635,3 +2641,384 @@ def eliminar_almacen(id: int, db: Session = Depends(get_db), user=Depends(get_cu
         raise HTTPException(404, "No encontrado")
     db.delete(obj); db.commit()
     return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NÓMINA — Procesamiento y contabilización
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/nomina/periodos")
+def listar_nomina_periodos(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    periodos = db.query(models.NominaPeriodo).order_by(models.NominaPeriodo.fecha_fin.desc()).all()
+    result = []
+    for p in periodos:
+        asiento_num = None
+        if p.asiento_id:
+            a = db.query(models.AsientoContable).get(p.asiento_id)
+            asiento_num = a.numero if a else None
+        result.append({
+            "id": p.id, "tipo": p.tipo,
+            "fecha_inicio": p.fecha_inicio.isoformat(), "fecha_fin": p.fecha_fin.isoformat(),
+            "total_bruto": float(p.total_bruto or 0), "total_deducciones": float(p.total_deducciones or 0),
+            "total_neto": float(p.total_neto or 0), "total_tss_empleador": float(p.total_tss_empleador or 0),
+            "estado": p.estado, "asiento_id": p.asiento_id, "asiento_numero": asiento_num,
+            "procesado_por": p.procesado_por,
+            "creado_en": p.creado_en.isoformat() if p.creado_en else None,
+            "num_detalles": len(p.detalles),
+        })
+    return result
+
+
+@router.post("/nomina/procesar")
+def procesar_nomina(data: schemas.NominaProcesar, db: Session = Depends(get_db),
+                    user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+
+    existe = db.query(models.NominaPeriodo).filter(
+        models.NominaPeriodo.fecha_inicio == data.fecha_inicio,
+        models.NominaPeriodo.fecha_fin == data.fecha_fin,
+    ).first()
+    if existe:
+        raise HTTPException(400, f"Ya existe un periodo de nómina del {data.fecha_inicio} al {data.fecha_fin}")
+
+    mes = data.fecha_fin.month
+    ano = data.fecha_fin.year
+
+    rows = db.query(
+        models.Trabajador.id_trab,
+        models.Trabajador.nombre,
+        models.Trabajador.cargo,
+        sqlfunc.coalesce(sqlfunc.sum(models.OTManoObra.costo_mo), 0).label("total_mo"),
+        sqlfunc.count(models.OTManoObra.id).label("jornadas")
+    ).outerjoin(
+        models.OTManoObra,
+        models.Trabajador.id_trab == models.OTManoObra.trabajador_id
+    ).filter(
+        models.Trabajador.activo == True
+    ).filter(
+        (models.OTManoObra.id.is_(None)) |
+        (
+            models.OTManoObra.fecha.isnot(None) &
+            (extract('month', models.OTManoObra.fecha) == mes) &
+            (extract('year', models.OTManoObra.fecha) == ano)
+        )
+    ).group_by(
+        models.Trabajador.id_trab, models.Trabajador.nombre,
+        models.Trabajador.cargo
+    ).all()
+
+    periodo = models.NominaPeriodo(
+        tipo=data.tipo, fecha_inicio=data.fecha_inicio, fecha_fin=data.fecha_fin,
+        estado="procesada", procesado_por=user.nombre
+    )
+    db.add(periodo)
+    db.flush()
+
+    total_bruto = Decimal("0")
+    total_ded = Decimal("0")
+    total_neto = Decimal("0")
+    total_tss = Decimal("0")
+
+    for r in rows:
+        bruto = Decimal(str(r.total_mo or 0))
+        if bruto <= 0:
+            continue
+
+        sfs = round(bruto * Decimal("0.0304"), 2)
+        afp = round(bruto * Decimal("0.0287"), 2)
+        isr = Decimal("0")
+        ded_total = sfs + afp + isr
+        neto = bruto - ded_total
+        tss_emp = round(bruto * Decimal("0.0709") + bruto * Decimal("0.0710"), 2)
+
+        det = models.NominaDetalle(
+            nomina_periodo_id=periodo.id, trabajador_id=r.id_trab,
+            dias_trabajados=int(r.jornadas), salario_bruto=bruto,
+            total_devengado=bruto,
+            deduccion_sfs=sfs, deduccion_afp=afp, deduccion_isr=isr,
+            total_deducciones=ded_total, neto_a_pagar=neto,
+        )
+        db.add(det)
+
+        total_bruto += bruto
+        total_ded += ded_total
+        total_neto += neto
+        total_tss += tss_emp
+
+    periodo.total_bruto = total_bruto
+    periodo.total_deducciones = total_ded
+    periodo.total_neto = total_neto
+    periodo.total_tss_empleador = total_tss
+
+    asiento = None
+    r_nom = _get_regla_cuentas(db, "NOM", "nomina")
+    if r_nom and total_bruto > 0:
+        lineas = [
+            {"cuenta_id": r_nom[0], "debe": float(total_bruto), "haber": 0,
+             "descripcion_linea": f"Gasto nómina {data.fecha_inicio} — {data.fecha_fin}"},
+            {"cuenta_id": r_nom[1], "debe": 0, "haber": float(total_neto),
+             "descripcion_linea": f"Nómina por pagar {data.fecha_inicio} — {data.fecha_fin}"},
+        ]
+        if total_ded > 0:
+            r_ded = _get_regla_cuentas(db, "NOM", "deducciones")
+            cta_ded = r_ded[1] if r_ded else r_nom[1]
+            lineas.append({"cuenta_id": cta_ded, "debe": 0, "haber": float(total_ded),
+                           "descripcion_linea": f"Retenciones nómina (SFS+AFP)"})
+
+        asiento = _crear_asiento_auto(
+            db, data.fecha_fin, "NOM", f"NOM-{periodo.id}",
+            f"Nómina {data.tipo} {data.fecha_inicio} — {data.fecha_fin}",
+            lineas, user.nombre, origen_id=periodo.id
+        )
+        if asiento:
+            periodo.asiento_id = asiento.id
+
+    db.commit()
+    db.refresh(periodo)
+    return {
+        "ok": True, "id": periodo.id,
+        "total_bruto": float(total_bruto), "total_neto": float(total_neto),
+        "total_deducciones": float(total_ded), "total_tss_empleador": float(total_tss),
+        "trabajadores": len([r for r in rows if Decimal(str(r.total_mo or 0)) > 0]),
+        "asiento": asiento.numero if asiento else None,
+    }
+
+
+@router.get("/nomina/periodos/{id}")
+def detalle_nomina_periodo(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    p = db.query(models.NominaPeriodo).get(id)
+    if not p:
+        raise HTTPException(404, "Periodo no encontrado")
+    detalles = []
+    for d in p.detalles:
+        trab = db.query(models.Trabajador).filter(models.Trabajador.id_trab == d.trabajador_id).first()
+        detalles.append({
+            "id": d.id, "trabajador_id": d.trabajador_id,
+            "trabajador_nombre": trab.nombre if trab else d.trabajador_id,
+            "dias_trabajados": d.dias_trabajados, "salario_bruto": float(d.salario_bruto or 0),
+            "total_devengado": float(d.total_devengado or 0),
+            "deduccion_sfs": float(d.deduccion_sfs or 0), "deduccion_afp": float(d.deduccion_afp or 0),
+            "deduccion_isr": float(d.deduccion_isr or 0),
+            "total_deducciones": float(d.total_deducciones or 0),
+            "neto_a_pagar": float(d.neto_a_pagar or 0),
+            "departamento_id": d.departamento_id,
+        })
+    asiento_num = None
+    if p.asiento_id:
+        a = db.query(models.AsientoContable).get(p.asiento_id)
+        asiento_num = a.numero if a else None
+    return {
+        "id": p.id, "tipo": p.tipo,
+        "fecha_inicio": p.fecha_inicio.isoformat(), "fecha_fin": p.fecha_fin.isoformat(),
+        "total_bruto": float(p.total_bruto or 0), "total_deducciones": float(p.total_deducciones or 0),
+        "total_neto": float(p.total_neto or 0), "total_tss_empleador": float(p.total_tss_empleador or 0),
+        "estado": p.estado, "asiento_id": p.asiento_id, "asiento_numero": asiento_num,
+        "procesado_por": p.procesado_por,
+        "detalles": detalles,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONCILIACIÓN ↔ ASIENTOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/conciliaciones/{conc_id}/vincular-asiento")
+def vincular_partida_asiento(conc_id: int, partida_id: int = Query(...),
+                              asiento_id: int = Query(...),
+                              db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    partida = db.query(models.ConciliacionPartida).filter(
+        models.ConciliacionPartida.id == partida_id,
+        models.ConciliacionPartida.conciliacion_id == conc_id,
+    ).first()
+    if not partida:
+        raise HTTPException(404, "Partida de conciliación no encontrada")
+    asiento = db.query(models.AsientoContable).get(asiento_id)
+    if not asiento:
+        raise HTTPException(404, "Asiento contable no encontrado")
+    partida.asiento_id = asiento.id
+    partida.conciliada = True
+    db.commit()
+    return {"ok": True, "partida_id": partida.id, "asiento_numero": asiento.numero}
+
+
+@router.delete("/conciliaciones/{conc_id}/desvincular-asiento")
+def desvincular_partida_asiento(conc_id: int, partida_id: int = Query(...),
+                                 db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    partida = db.query(models.ConciliacionPartida).filter(
+        models.ConciliacionPartida.id == partida_id,
+        models.ConciliacionPartida.conciliacion_id == conc_id,
+    ).first()
+    if not partida:
+        raise HTTPException(404, "Partida no encontrada")
+    partida.asiento_id = None
+    partida.conciliada = False
+    db.commit()
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRAZABILIDAD — Vista unificada documento → asiento
+# ══════════════════════════════════════════════════════════════════════════════
+
+ORIGEN_LABELS = {
+    "OT": "Orden de Trabajo", "OC": "Orden de Compra", "GR": "Entrada Mercancía",
+    "GI": "Salida Mercancía", "AJ": "Ajuste Inventario", "NOM": "Nómina",
+    "CXP": "Cuenta por Pagar", "PAG": "Pago", "VTA": "Venta/CxC",
+    "COB": "Cobro", "DEP": "Depreciación", "CIE": "Cierre Periodo", "MAN": "Manual",
+}
+
+@router.get("/trazabilidad")
+def trazabilidad(origen: str = Query(None), referencia: str = Query(None),
+                 asiento_id: int = Query(None), limit: int = Query(50, le=200),
+                 db: Session = Depends(get_db), user=Depends(get_current_user)):
+    q = db.query(models.AsientoContable)
+
+    if asiento_id:
+        q = q.filter(models.AsientoContable.id == asiento_id)
+    else:
+        if origen:
+            q = q.filter(models.AsientoContable.origen == origen)
+        if referencia:
+            q = q.filter(models.AsientoContable.referencia_id.ilike(f"%{referencia}%"))
+        q = q.filter(models.AsientoContable.tipo == "automatico")
+
+    asientos = q.order_by(models.AsientoContable.fecha.desc()).limit(limit).all()
+    result = []
+    for a in asientos:
+        lineas = []
+        for l in a.lineas:
+            cuenta = db.query(models.CuentaContable).get(l.cuenta_id) if l.cuenta_id else None
+            lo = {
+                "cuenta_codigo": cuenta.codigo if cuenta else None,
+                "cuenta_nombre": cuenta.nombre if cuenta else None,
+                "debe": float(l.debe or 0), "haber": float(l.haber or 0),
+                "descripcion_linea": l.descripcion_linea,
+            }
+            if l.unidad_negocio_id:
+                un = db.query(models.UnidadNegocio).get(l.unidad_negocio_id)
+                lo["unidad_negocio"] = un.nombre if un else None
+            if l.departamento_id:
+                dep = db.query(models.Departamento).get(l.departamento_id)
+                lo["departamento"] = dep.nombre if dep else None
+            if l.almacen_id:
+                alm = db.query(models.Almacen).get(l.almacen_id)
+                lo["almacen"] = alm.nombre if alm else None
+            lineas.append(lo)
+
+        doc_info = _get_documento_origen(db, a.origen, a.referencia_id, a.origen_id)
+
+        result.append({
+            "asiento_id": a.id, "asiento_numero": a.numero,
+            "fecha": a.fecha.isoformat(), "origen": a.origen,
+            "origen_label": ORIGEN_LABELS.get(a.origen, a.origen),
+            "referencia_id": a.referencia_id, "origen_id": a.origen_id,
+            "descripcion": a.descripcion,
+            "total_debe": float(a.total_debe or 0), "total_haber": float(a.total_haber or 0),
+            "estado": a.estado,
+            "documento": doc_info,
+            "lineas": lineas,
+        })
+    return {"items": result, "total": len(result)}
+
+
+@router.get("/trazabilidad/documento")
+def trazabilidad_documento(tipo: str = Query(..., description="OT, OC, GR, GI, AJ, NOM, CXP, PAG, COB"),
+                            referencia: str = Query(...),
+                            db: Session = Depends(get_db), user=Depends(get_current_user)):
+    asientos = db.query(models.AsientoContable).filter(
+        models.AsientoContable.origen == tipo,
+        models.AsientoContable.referencia_id == referencia,
+    ).order_by(models.AsientoContable.fecha.asc()).all()
+
+    doc_info = _get_documento_origen(db, tipo, referencia, None)
+
+    cadena = []
+    for a in asientos:
+        lineas = []
+        for l in a.lineas:
+            cuenta = db.query(models.CuentaContable).get(l.cuenta_id) if l.cuenta_id else None
+            lineas.append({
+                "cuenta_codigo": cuenta.codigo if cuenta else None,
+                "cuenta_nombre": cuenta.nombre if cuenta else None,
+                "debe": float(l.debe or 0), "haber": float(l.haber or 0),
+                "descripcion_linea": l.descripcion_linea,
+            })
+        cadena.append({
+            "asiento_id": a.id, "asiento_numero": a.numero,
+            "fecha": a.fecha.isoformat(), "estado": a.estado,
+            "total_debe": float(a.total_debe or 0), "total_haber": float(a.total_haber or 0),
+            "descripcion": a.descripcion,
+            "lineas": lineas,
+        })
+
+    return {
+        "tipo": tipo, "tipo_label": ORIGEN_LABELS.get(tipo, tipo),
+        "referencia": referencia,
+        "documento": doc_info,
+        "asientos": cadena,
+        "total_asientos": len(cadena),
+    }
+
+
+def _get_documento_origen(db: Session, origen: str, referencia_id: str, origen_id: int):
+    if not origen:
+        return None
+    try:
+        if origen == "OT" and referencia_id:
+            ot = db.query(models.OrdenTrabajo).filter(models.OrdenTrabajo.ot_id == int(referencia_id)).first()
+            if ot:
+                return {"tipo": "OT", "id": ot.ot_id, "estado": ot.estado,
+                        "campo": ot.campo_id, "actividad": ot.actividad_id,
+                        "costo_total": float(ot.costo_total or 0)}
+        elif origen == "OC" and referencia_id:
+            oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == referencia_id).first()
+            if oc:
+                return {"tipo": "OC", "id": oc.oc_id, "estado": oc.estado,
+                        "proveedor": oc.proveedor, "total": float(oc.total or 0)}
+        elif origen in ("GR", "GI", "AJ"):
+            mov = None
+            if origen_id:
+                mov = db.query(models.MovimientoInventario).get(origen_id)
+            if not mov and referencia_id:
+                mov = db.query(models.MovimientoInventario).filter(
+                    models.MovimientoInventario.num_documento == referencia_id).first()
+            if mov:
+                return {"tipo": origen, "id": mov.id, "num_documento": mov.num_documento,
+                        "producto_id": mov.producto_id, "cantidad": mov.cantidad,
+                        "tipo_mov": mov.tipo, "motivo": mov.motivo,
+                        "producto_nombre": mov.producto.producto if mov.producto else None}
+        elif origen == "NOM":
+            per = None
+            if origen_id:
+                per = db.query(models.NominaPeriodo).get(origen_id)
+            if per:
+                return {"tipo": "NOM", "id": per.id, "estado": per.estado,
+                        "fecha_inicio": per.fecha_inicio.isoformat(),
+                        "fecha_fin": per.fecha_fin.isoformat(),
+                        "total_bruto": float(per.total_bruto or 0),
+                        "total_neto": float(per.total_neto or 0)}
+        elif origen == "CXP" and referencia_id:
+            cxp = db.query(models.CuentaPorPagar).filter(models.CuentaPorPagar.numero == referencia_id).first()
+            if cxp:
+                prov = db.query(models.Proveedor).get(cxp.proveedor_id) if cxp.proveedor_id else None
+                return {"tipo": "CXP", "id": cxp.id, "numero": cxp.numero,
+                        "proveedor": prov.nombre if prov else None,
+                        "total": float(cxp.total or 0), "estado": cxp.estado}
+        elif origen == "PAG" and referencia_id:
+            pago = db.query(models.Pago).filter(models.Pago.numero == referencia_id).first()
+            if pago:
+                return {"tipo": "PAG", "id": pago.id, "numero": pago.numero,
+                        "monto": float(pago.monto or 0), "metodo_pago": pago.metodo_pago}
+        elif origen == "COB" and referencia_id:
+            cobro = db.query(models.Cobro).filter(models.Cobro.numero == referencia_id).first()
+            if cobro:
+                return {"tipo": "COB", "id": cobro.id, "numero": cobro.numero,
+                        "monto": float(cobro.monto or 0)}
+    except Exception:
+        pass
+    return None

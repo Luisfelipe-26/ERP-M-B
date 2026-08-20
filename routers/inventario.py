@@ -4,6 +4,7 @@ from sqlalchemy import func
 from database import get_db
 import models, schemas, auth
 from routers.sequences import get_next, peek_next
+from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
 from typing import List, Optional
 from datetime import datetime
 import audit
@@ -220,6 +221,31 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
               {"producto": data.producto_id, "cantidad": data.cantidad, "precio": data.precio_compra,
                "costo_promedio_new": round(nuevo_costo_promedio, 4), "oc": data.orden_compra_id})
 
+    monto = round(data.cantidad * data.precio_compra, 2)
+    if monto > 0 and p.cuenta_inventario_id:
+        r_inv = _get_regla_cuentas(db, "inventario", "entrada")
+        cta_debe = p.cuenta_inventario_id
+        cta_haber = r_inv[1] if r_inv else p.cuenta_costo_id
+        if cta_debe and cta_haber:
+            fecha_asiento = data.fecha or datetime.now()
+            if hasattr(fecha_asiento, 'date'):
+                fecha_asiento = fecha_asiento.date()
+            asiento = _crear_asiento_auto(
+                db, fecha_asiento,
+                "GR", num_doc,
+                f"Entrada inventario {num_doc} — {p.producto}",
+                [
+                    {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
+                     "almacen_id": getattr(data, 'almacen_id', None) or mov.almacen_id,
+                     "descripcion_linea": f"Inventario entrada {p.producto}"},
+                    {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
+                     "descripcion_linea": f"Contrapartida GR {num_doc}"},
+                ],
+                current_user.nombre, origen_id=mov.id
+            )
+            if asiento:
+                mov.asiento_id = asiento.id
+
     db.commit()
     db.refresh(mov)
     return _mov_out(mov)
@@ -275,6 +301,26 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
               {"producto": data.producto_id, "cantidad": data.cantidad, "motivo": data.motivo,
                "ot_id": data.ot_id})
 
+    monto = round(data.cantidad * cp, 2)
+    if monto > 0 and p.cuenta_inventario_id and p.cuenta_costo_id:
+        r_inv = _get_regla_cuentas(db, "inventario", "salida")
+        cta_debe = r_inv[0] if r_inv else p.cuenta_costo_id
+        cta_haber = p.cuenta_inventario_id
+        asiento = _crear_asiento_auto(
+            db, datetime.now().date(), "GI", num_doc,
+            f"Salida inventario {num_doc} — {p.producto} ({data.motivo})",
+            [
+                {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
+                 "descripcion_linea": f"Costo salida {p.producto} — {data.motivo}"},
+                {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
+                 "almacen_id": mov.almacen_id,
+                 "descripcion_linea": f"Inventario salida {num_doc}"},
+            ],
+            current_user.nombre, origen_id=mov.id
+        )
+        if asiento:
+            mov.asiento_id = asiento.id
+
     db.commit()
     db.refresh(mov)
     return _mov_out(mov)
@@ -326,6 +372,33 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
               f"Ajuste {num_doc}: {p.producto} — Sistema: {stock_anterior} → Conteo: {data.cantidad_contada} (dif: {diferencia:+.2f})",
               {"producto": data.producto_id, "stock_sistema": float(stock_anterior),
                "conteo": data.cantidad_contada, "diferencia": diferencia})
+
+    monto_ajuste = round(abs(diferencia) * cp, 2)
+    if monto_ajuste > 0 and p.cuenta_inventario_id:
+        r_aj = _get_regla_cuentas(db, "inventario", "ajuste")
+        cta_ajuste = r_aj[0] if r_aj else p.cuenta_costo_id
+        if cta_ajuste:
+            if diferencia > 0:
+                lineas = [
+                    {"cuenta_id": p.cuenta_inventario_id, "debe": monto_ajuste, "haber": 0,
+                     "descripcion_linea": f"Ajuste positivo inventario {p.producto}"},
+                    {"cuenta_id": cta_ajuste, "debe": 0, "haber": monto_ajuste,
+                     "descripcion_linea": f"Contrapartida ajuste {num_doc}"},
+                ]
+            else:
+                lineas = [
+                    {"cuenta_id": cta_ajuste, "debe": monto_ajuste, "haber": 0,
+                     "descripcion_linea": f"Ajuste negativo inventario {p.producto}"},
+                    {"cuenta_id": p.cuenta_inventario_id, "debe": 0, "haber": monto_ajuste,
+                     "descripcion_linea": f"Inventario ajuste {num_doc}"},
+                ]
+            asiento = _crear_asiento_auto(
+                db, datetime.now().date(), "AJ", num_doc,
+                f"Ajuste inventario {num_doc} — {p.producto} (dif: {diferencia:+.2f})",
+                lineas, current_user.nombre, origen_id=mov.id
+            )
+            if asiento:
+                mov.asiento_id = asiento.id
 
     db.commit()
     db.refresh(mov)
