@@ -3,7 +3,7 @@ Módulo Contabilidad — Núcleo contable: plan de cuentas, periodos, asientos, 
 Contabilización automática integrada (CxP, Pagos, CxC, Cobros).
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func as sqlfunc, cast, Date as SqlDate, and_, extract
 from database import get_db
 from auth import get_current_user, require_admin
@@ -50,7 +50,7 @@ _ORIGEN_DIARIO = {
     "OT": "OPR", "OC": "COMP", "GR": "COMP", "GI": "COMP",
     "NOM": "NOM", "DEP": "AJU", "LIQ": "NOM",
     "CXP": "COMP", "PAG": "BAN", "CXC": "VTA", "COB": "BAN",
-    "AJ": "AJU", "MAN": "AJU", "VTA": "VTA",
+    "AJ": "AJU", "MAN": "AJU", "VTA": "VTA", "CIE": "AJU",
 }
 
 
@@ -544,8 +544,9 @@ def listar_asientos(
     if hasta:
         q = q.filter(models.AsientoContable.fecha <= hasta)
     total = q.count()
-    asientos = q.order_by(models.AsientoContable.fecha.desc(), models.AsientoContable.id.desc()
-                          ).offset(skip).limit(limit).all()
+    asientos = q.options(joinedload(models.AsientoContable.diario)).order_by(
+        models.AsientoContable.fecha.desc(), models.AsientoContable.id.desc()
+    ).offset(skip).limit(limit).all()
     result = []
     for a in asientos:
         out = schemas.AsientoContableOut.model_validate(a)

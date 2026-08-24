@@ -9,7 +9,7 @@ class PerfilAcceso(Base):
     id = Column(Integer, primary_key=True, index=True)
     nombre = Column(String(50), unique=True, nullable=False)
     descripcion = Column(String(200))
-    permisos = Column(JSON, default={})
+    permisos = Column(JSON, default=dict)
     activo = Column(Boolean, default=True)
 
 
@@ -530,7 +530,7 @@ class SoilReading(Base):
     id = Column(Integer, primary_key=True, index=True)
     campo_id = Column(String(10), ForeignKey("campos.id_campo"), nullable=False, index=True)
     reading_datetime = Column(DateTime, nullable=False, index=True)
-    depth_cm = Column(Integer, nullable=False)     # 20, 50
+    depth_cm = Column(Integer, nullable=False)     # 20, 30, 50, 60
     value_cbar = Column(Float)                     # Tensiómetro
     visual_scale = Column(Integer)                 # 1=saturado ... 5=seco
     reading_type = Column(String(20))              # tensiometro, visual, sensor
@@ -596,6 +596,22 @@ class FieldIrrigationConfig(Base):
     # Kc por etapa (JSON)
     kc_by_stage = Column(Text)  # {"floracion":0.65,"cuaje":0.75,"llenado":0.85,"maduracion":0.78}
     notes = Column(Text)
+
+
+class IrrigationSchedule(Base):
+    """Programa de riego recurrente por campo."""
+    __tablename__ = "irrigation_schedules"
+    id = Column(Integer, primary_key=True, index=True)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"), nullable=False, index=True)
+    nombre = Column(String(100), nullable=False)
+    dias_semana = Column(String(20))
+    hora_inicio = Column(String(5))
+    duracion_minutos = Column(Integer)
+    volumen_litros = Column(Float)
+    fertiriego = Column(Boolean, default=False)
+    activo = Column(Boolean, default=True)
+    notas = Column(Text)
+    creado_en = Column(DateTime, server_default=func.now())
 
 
 # ══════════════════════════════════════════════════════════════════════════════

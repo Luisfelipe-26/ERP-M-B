@@ -1,6 +1,6 @@
 """Admin — perfiles de acceso y gestión de usuarios."""
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from database import get_db
 from auth import get_current_user, require_admin, get_password_hash
 import models
@@ -80,7 +80,7 @@ def eliminar_perfil(perfil_id: int, db: Session = Depends(get_db), user=Depends(
 
 @router.get("/usuarios")
 def listar_usuarios(db: Session = Depends(get_db), user=Depends(require_admin)):
-    usuarios = db.query(models.Usuario).order_by(models.Usuario.nombre).all()
+    usuarios = db.query(models.Usuario).options(joinedload(models.Usuario.perfil)).order_by(models.Usuario.nombre).all()
     return [
         {"id": u.id, "nombre": u.nombre, "email": u.email, "rol": u.rol,
          "perfil_id": u.perfil_id,
