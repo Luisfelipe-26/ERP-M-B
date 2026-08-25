@@ -199,31 +199,9 @@ for codigo, cuenta in all_cuentas.items():
         if padre and cuenta.cuenta_padre_id != padre.id:
             cuenta.cuenta_padre_id = padre.id
 
-# Reglas de contabilización
-reglas_data = [
-    ("compra",       "factura_proveedor",  "1.1.03.01", "2.1.01.01", "Compra insumos: Db Inventario, Cr CxP Proveedores"),
-    ("compra",       "itbis_compra",       "1.1.02.03", "2.1.01.01", "ITBIS en compras: Db Crédito Fiscal, Cr CxP"),
-    ("venta",        "factura_cliente",     "1.1.02.01", "4.1.01",    "Venta aguacate: Db CxC Clientes, Cr Ingreso Venta"),
-    ("venta",        "itbis_venta",        "1.1.02.01", "2.1.02.01", "ITBIS en ventas: Db CxC, Cr ITBIS por Pagar"),
-    ("venta",        "costo_venta",        "5.1.02",    "1.1.03.03", "Costo venta: Db Costo Insumos, Cr Inventario Terminado"),
-    ("pago",         "pago_proveedor",     "2.1.01.01", "1.1.01.03", "Pago proveedor: Db CxP, Cr Banco"),
-    ("cobro",        "cobro_cliente",       "1.1.01.03", "1.1.02.01", "Cobro cliente: Db Banco, Cr CxC"),
-    ("nomina",       "salario_jornada",     "5.1.01",    "2.1.01.02", "Nómina MO directa: Db Costo MO, Cr Nóminas por Pagar"),
-    ("nomina",       "pago_nomina",         "2.1.01.02", "1.1.01.03", "Pago nómina: Db Nóminas por Pagar, Cr Banco"),
-    ("nomina",       "tss_empleador",       "5.1.01",    "2.1.03.01", "TSS empleador: Db Costo MO, Cr TSS Empleador x Pagar"),
-    ("consumo_ot",   "salida_insumo",       "5.1.02",    "1.1.03.01", "Consumo OT: Db Costo Insumos, Cr Inventario Insumos"),
-    ("depreciacion", "dep_mensual",         "5.1.03",    "1.2.02.01", "Depreciación: Db Costo Dep, Cr Dep Acumulada"),
-]
-for r in reglas_data:
-    if not db.query(models.ReglaContabilizacion).filter_by(evento=r[0], concepto=r[1]).first():
-        cd = all_cuentas.get(r[2])
-        ch = all_cuentas.get(r[3])
-        if cd and ch:
-            db.add(models.ReglaContabilizacion(
-                evento=r[0], concepto=r[1],
-                cuenta_debe_id=cd.id, cuenta_haber_id=ch.id,
-                descripcion=r[4]
-            ))
+# Reglas de contabilización (fuente única: reglas_contables.py)
+from reglas_contables import sembrar_reglas
+sembrar_reglas(db, models)
 
 # Configuración Empresa
 if not db.query(models.ConfiguracionEmpresa).first():

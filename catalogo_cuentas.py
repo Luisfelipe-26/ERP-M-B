@@ -130,6 +130,7 @@ CUENTAS_DATA = [
     ("5.2",      "Costos Indirectos de Producción",   "costo",      "deudora",  "Resultado", 2, False),
     ("5.2.01",   "Supervisión de Campo",              "costo",      "deudora",  "Resultado", 3, True),
     ("5.2.02",   "Mantenimiento de Equipos",          "costo",      "deudora",  "Resultado", 3, True),
+    ("5.2.03",   "Merma y Faltantes de Inventario",   "costo",      "deudora",  "Resultado", 3, True),
     ("5.3",      "Ajustes al Costo",                  "costo",      "acreedora", "Resultado", 2, False),
     ("5.3.01",   "Descuentos sobre Compras",          "costo",      "acreedora", "Resultado", 3, True),
     ("5.3.02",   "Devoluciones sobre Compras",        "costo",      "acreedora", "Resultado", 3, True),

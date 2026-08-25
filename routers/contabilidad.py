@@ -380,6 +380,20 @@ def seed_catalogo(db: Session = Depends(get_db), user=Depends(require_admin)):
     return {"ok": True, "creadas": creadas, "total": total}
 
 
+@router.post("/reglas/seed-default")
+def seed_reglas_default(db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Carga las reglas de contabilización estándar (idempotente). Puebla una
+    base sin reglas o completa las que falten, sin duplicar las existentes.
+    Requiere que las cuentas del catálogo ya existan (ejecutar seed-catalogo
+    antes). Devuelve las reglas creadas y las omitidas por cuenta faltante."""
+    from reglas_contables import sembrar_reglas
+    creadas, faltantes = sembrar_reglas(db, models)
+    db.commit()
+    total = db.query(models.ReglaContabilizacion).filter(
+        models.ReglaContabilizacion.activo == True).count()
+    return {"ok": True, "creadas": creadas, "total": total, "faltantes": faltantes}
+
+
 @router.patch("/cuentas/{cuenta_id}/partida")
 def asignar_partida(cuenta_id: int, data: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
     cuenta = db.query(models.CuentaContable).get(cuenta_id)
