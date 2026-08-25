@@ -993,6 +993,55 @@ class TransferenciaPresupuesto(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class ConfigPresupuesto(Base):
+    __tablename__ = "config_presupuesto"
+    id = Column(Integer, primary_key=True, index=True)
+    umbral_alerta = Column(Integer, default=85)
+    umbral_bloqueo = Column(Integer, default=100)
+    control_habilitado = Column(Boolean, default=True)
+    distribucion_default = Column(String(20), default="mensual")
+    requiere_aprobacion = Column(Boolean, default=True)
+
+
+class RegistroPresupuestario(Base):
+    __tablename__ = "registros_presupuestarios"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, nullable=False)
+    fecha = Column(Date, nullable=False)
+    tipo = Column(String(20), nullable=False)
+    anio = Column(Integer, nullable=False)
+    descripcion = Column(String(300))
+    estado = Column(String(20), default="borrador")
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    created_at = Column(DateTime, server_default=func.now())
+    lineas = relationship("LineaRegistroPresupuestario", cascade="all, delete-orphan",
+                          backref="registro")
+
+
+class LineaRegistroPresupuestario(Base):
+    __tablename__ = "lineas_registro_presupuestario"
+    id = Column(Integer, primary_key=True, index=True)
+    registro_id = Column(Integer, ForeignKey("registros_presupuestarios.id", ondelete="CASCADE"),
+                         nullable=False)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"))
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"))
+    monto_ene = Column(Numeric(14, 2), default=0)
+    monto_feb = Column(Numeric(14, 2), default=0)
+    monto_mar = Column(Numeric(14, 2), default=0)
+    monto_abr = Column(Numeric(14, 2), default=0)
+    monto_may = Column(Numeric(14, 2), default=0)
+    monto_jun = Column(Numeric(14, 2), default=0)
+    monto_jul = Column(Numeric(14, 2), default=0)
+    monto_ago = Column(Numeric(14, 2), default=0)
+    monto_sep = Column(Numeric(14, 2), default=0)
+    monto_oct = Column(Numeric(14, 2), default=0)
+    monto_nov = Column(Numeric(14, 2), default=0)
+    monto_dic = Column(Numeric(14, 2), default=0)
+    descripcion = Column(String(200))
+
+
 class CosechaLiquidacion(Base):
     __tablename__ = "cosecha_liquidaciones"
     id = Column(Integer, primary_key=True, index=True)

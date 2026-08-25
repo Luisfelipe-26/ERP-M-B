@@ -63,6 +63,49 @@ def run_migrations():
         # Presupuesto — versiones y estado
         "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS version VARCHAR(30) DEFAULT 'original'",
         "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS estado VARCHAR(20) DEFAULT 'borrador'",
+        # Registros presupuestarios (asientos de presupuesto)
+        """CREATE TABLE IF NOT EXISTS registros_presupuestarios (
+            id SERIAL PRIMARY KEY,
+            numero VARCHAR(20) UNIQUE NOT NULL,
+            fecha DATE NOT NULL,
+            tipo VARCHAR(20) NOT NULL,
+            anio INTEGER NOT NULL,
+            descripcion VARCHAR(300),
+            estado VARCHAR(20) DEFAULT 'borrador',
+            usuario_id INTEGER REFERENCES usuarios(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS lineas_registro_presupuestario (
+            id SERIAL PRIMARY KEY,
+            registro_id INTEGER NOT NULL REFERENCES registros_presupuestarios(id) ON DELETE CASCADE,
+            cuenta_id INTEGER NOT NULL REFERENCES cuentas_contables(id),
+            campo_id VARCHAR(10) REFERENCES campos(id_campo),
+            unidad_negocio_id INTEGER REFERENCES unidades_negocio(id),
+            departamento_id INTEGER REFERENCES departamentos(id),
+            monto_ene NUMERIC(14,2) DEFAULT 0,
+            monto_feb NUMERIC(14,2) DEFAULT 0,
+            monto_mar NUMERIC(14,2) DEFAULT 0,
+            monto_abr NUMERIC(14,2) DEFAULT 0,
+            monto_may NUMERIC(14,2) DEFAULT 0,
+            monto_jun NUMERIC(14,2) DEFAULT 0,
+            monto_jul NUMERIC(14,2) DEFAULT 0,
+            monto_ago NUMERIC(14,2) DEFAULT 0,
+            monto_sep NUMERIC(14,2) DEFAULT 0,
+            monto_oct NUMERIC(14,2) DEFAULT 0,
+            monto_nov NUMERIC(14,2) DEFAULT 0,
+            monto_dic NUMERIC(14,2) DEFAULT 0,
+            descripcion VARCHAR(200)
+        )""",
+        """CREATE TABLE IF NOT EXISTS config_presupuesto (
+            id SERIAL PRIMARY KEY,
+            umbral_alerta INTEGER DEFAULT 85,
+            umbral_bloqueo INTEGER DEFAULT 100,
+            control_habilitado BOOLEAN DEFAULT TRUE,
+            distribucion_default VARCHAR(20) DEFAULT 'mensual',
+            requiere_aprobacion BOOLEAN DEFAULT TRUE
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_registros_presup_anio ON registros_presupuestarios(anio)",
+        "CREATE INDEX IF NOT EXISTS ix_lineas_reg_presup_registro ON lineas_registro_presupuestario(registro_id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

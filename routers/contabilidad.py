@@ -2070,12 +2070,10 @@ def listar_presupuestos(anio: int = None, db: Session = Depends(get_db),
     campo_ids = {p.campo_id for p in items if p.campo_id}
     un_ids = {p.unidad_negocio_id for p in items if p.unidad_negocio_id}
     dep_ids = {p.departamento_id for p in items if p.departamento_id}
-    alm_ids = {p.almacen_id for p in items if p.almacen_id}
     ctas = {c.id: c for c in db.query(models.CuentaContable).filter(models.CuentaContable.id.in_(cta_ids)).all()} if cta_ids else {}
     campos_map = {c.id_campo: c for c in db.query(models.Campo).filter(models.Campo.id_campo.in_(campo_ids)).all()} if campo_ids else {}
     uns = {u.id: u for u in db.query(models.UnidadNegocio).filter(models.UnidadNegocio.id.in_(un_ids)).all()} if un_ids else {}
     deps = {d.id: d for d in db.query(models.Departamento).filter(models.Departamento.id.in_(dep_ids)).all()} if dep_ids else {}
-    alms = {a.id: a for a in db.query(models.Almacen).filter(models.Almacen.id.in_(alm_ids)).all()} if alm_ids else {}
     meses_keys = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
                   "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
     result = []
@@ -2087,7 +2085,6 @@ def listar_presupuestos(anio: int = None, db: Session = Depends(get_db),
         d["campo_nombre"] = campos_map[p.campo_id].nombre if p.campo_id and p.campo_id in campos_map else None
         d["unidad_negocio_nombre"] = uns[p.unidad_negocio_id].nombre if p.unidad_negocio_id and p.unidad_negocio_id in uns else None
         d["departamento_nombre"] = deps[p.departamento_id].nombre if p.departamento_id and p.departamento_id in deps else None
-        d["almacen_nombre"] = alms[p.almacen_id].nombre if p.almacen_id and p.almacen_id in alms else None
         total = sum(float(getattr(p, mk) or 0) for mk in meses_keys)
         d["total_anual"] = round(total, 2)
         result.append(d)
@@ -2105,7 +2102,6 @@ def crear_presupuesto(data: schemas.PresupuestoCreate,
         models.Presupuesto.campo_id == data.campo_id,
         models.Presupuesto.unidad_negocio_id == data.unidad_negocio_id,
         models.Presupuesto.departamento_id == data.departamento_id,
-        models.Presupuesto.almacen_id == data.almacen_id,
         models.Presupuesto.version == data.version,
     )
     if dup_q.first():
@@ -2142,7 +2138,6 @@ def eliminar_presupuesto(id: int, db: Session = Depends(get_db), user=Depends(re
 @router.get("/presupuesto-vs-real")
 def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
                         unidad_negocio_id: int = None, departamento_id: int = None,
-                        almacen_id: int = None,
                         db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
@@ -2153,8 +2148,6 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
         q = q.filter(models.Presupuesto.unidad_negocio_id == unidad_negocio_id)
     if departamento_id:
         q = q.filter(models.Presupuesto.departamento_id == departamento_id)
-    if almacen_id:
-        q = q.filter(models.Presupuesto.almacen_id == almacen_id)
     presupuestos = q.all()
     if not presupuestos:
         return []
@@ -2343,6 +2336,296 @@ def aprobar_lote(anio: int = Query(...), db: Session = Depends(get_db),
     n = q.update({"estado": "aprobado"})
     db.commit()
     return {"ok": True, "aprobados": n}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REGISTROS PRESUPUESTARIOS (Asientos de Presupuesto)
+# ══════════════════════════════════════════════════════════════════════════════
+
+TIPOS_REGISTRO = ("original", "adicion", "transferencia", "revision")
+MK_PRES = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+           "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+
+
+def _enrich_linea(ln, ctas, campos_map, uns, deps):
+    d = {c.name: float(getattr(ln, c.name)) if c.name.startswith("monto_") else getattr(ln, c.name)
+         for c in ln.__table__.columns}
+    cta = ctas.get(ln.cuenta_id)
+    d["cuenta_codigo"] = cta.codigo if cta else None
+    d["cuenta_nombre"] = cta.nombre if cta else None
+    d["campo_nombre"] = campos_map.get(ln.campo_id, {}).get("nombre") if ln.campo_id else None
+    d["unidad_negocio_nombre"] = uns.get(ln.unidad_negocio_id, {}).get("nombre") if ln.unidad_negocio_id else None
+    d["departamento_nombre"] = deps.get(ln.departamento_id, {}).get("nombre") if ln.departamento_id else None
+    d["total"] = round(sum(float(getattr(ln, mk) or 0) for mk in MK_PRES), 2)
+    return d
+
+
+def _build_lookups(db, lineas):
+    cta_ids = {ln.cuenta_id for ln in lineas}
+    campo_ids = {ln.campo_id for ln in lineas if ln.campo_id}
+    un_ids = {ln.unidad_negocio_id for ln in lineas if ln.unidad_negocio_id}
+    dep_ids = {ln.departamento_id for ln in lineas if ln.departamento_id}
+    ctas = {c.id: c for c in db.query(models.CuentaContable).filter(
+        models.CuentaContable.id.in_(cta_ids)).all()} if cta_ids else {}
+    campos_map = {c.id_campo: {"nombre": c.nombre} for c in db.query(models.Campo).filter(
+        models.Campo.id_campo.in_(campo_ids)).all()} if campo_ids else {}
+    uns = {u.id: {"nombre": u.nombre} for u in db.query(models.UnidadNegocio).filter(
+        models.UnidadNegocio.id.in_(un_ids)).all()} if un_ids else {}
+    deps = {d.id: {"nombre": d.nombre} for d in db.query(models.Departamento).filter(
+        models.Departamento.id.in_(dep_ids)).all()} if dep_ids else {}
+    return ctas, campos_map, uns, deps
+
+
+@router.get("/registros-presupuestarios")
+def listar_registros_presupuestarios(anio: int = None, tipo: str = None,
+                                     db: Session = Depends(get_db),
+                                     user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.RegistroPresupuestario)
+    if anio:
+        q = q.filter(models.RegistroPresupuestario.anio == anio)
+    if tipo:
+        q = q.filter(models.RegistroPresupuestario.tipo == tipo)
+    regs = q.order_by(models.RegistroPresupuestario.created_at.desc()).all()
+    if not regs:
+        return []
+    all_lineas = []
+    for r in regs:
+        all_lineas.extend(r.lineas)
+    ctas, campos_map, uns, deps = _build_lookups(db, all_lineas) if all_lineas else ({}, {}, {}, {})
+    usr_ids = {r.usuario_id for r in regs if r.usuario_id}
+    usrs = {u.id: u.nombre for u in db.query(models.Usuario).filter(
+        models.Usuario.id.in_(usr_ids)).all()} if usr_ids else {}
+    result = []
+    for r in regs:
+        lineas_out = [_enrich_linea(ln, ctas, campos_map, uns, deps) for ln in r.lineas]
+        total = round(sum(l["total"] for l in lineas_out), 2)
+        result.append({
+            "id": r.id, "numero": r.numero, "fecha": str(r.fecha), "tipo": r.tipo,
+            "anio": r.anio, "descripcion": r.descripcion, "estado": r.estado,
+            "usuario_nombre": usrs.get(r.usuario_id, ""),
+            "created_at": str(r.created_at) if r.created_at else None,
+            "lineas": lineas_out, "total": total,
+        })
+    return result
+
+
+@router.get("/registros-presupuestarios/{id}")
+def obtener_registro_presupuestario(id: int, db: Session = Depends(get_db),
+                                    user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    r = db.query(models.RegistroPresupuestario).options(
+        joinedload(models.RegistroPresupuestario.lineas)).get(id)
+    if not r:
+        raise HTTPException(404, "Registro no encontrado")
+    ctas, campos_map, uns, deps = _build_lookups(db, r.lineas) if r.lineas else ({}, {}, {}, {})
+    usr = db.query(models.Usuario).get(r.usuario_id) if r.usuario_id else None
+    lineas_out = [_enrich_linea(ln, ctas, campos_map, uns, deps) for ln in r.lineas]
+    return {
+        "id": r.id, "numero": r.numero, "fecha": str(r.fecha), "tipo": r.tipo,
+        "anio": r.anio, "descripcion": r.descripcion, "estado": r.estado,
+        "usuario_nombre": usr.nombre if usr else "",
+        "created_at": str(r.created_at) if r.created_at else None,
+        "lineas": lineas_out,
+        "total": round(sum(l["total"] for l in lineas_out), 2),
+    }
+
+
+@router.post("/registros-presupuestarios")
+def crear_registro_presupuestario(data: schemas.RegistroPresupuestarioIn,
+                                  db: Session = Depends(get_db),
+                                  user=Depends(require_admin)):
+    if data.tipo not in TIPOS_REGISTRO:
+        raise HTTPException(400, f"Tipo debe ser uno de: {', '.join(TIPOS_REGISTRO)}")
+    if not data.lineas:
+        raise HTTPException(400, "Debe incluir al menos una línea")
+    for ln in data.lineas:
+        if not db.query(models.CuentaContable).get(ln.cuenta_id):
+            raise HTTPException(400, f"Cuenta {ln.cuenta_id} no existe")
+    numero = get_next("RP", db)
+    reg = models.RegistroPresupuestario(
+        numero=numero, fecha=date.today(), tipo=data.tipo,
+        anio=data.anio, descripcion=data.descripcion,
+        estado="borrador", usuario_id=user.id,
+    )
+    db.add(reg)
+    db.flush()
+    for ln in data.lineas:
+        linea = models.LineaRegistroPresupuestario(
+            registro_id=reg.id, cuenta_id=ln.cuenta_id,
+            campo_id=ln.campo_id, unidad_negocio_id=ln.unidad_negocio_id,
+            departamento_id=ln.departamento_id, descripcion=ln.descripcion,
+        )
+        for mk in MK_PRES:
+            setattr(linea, mk, getattr(ln, mk, 0) or 0)
+        db.add(linea)
+    db.commit()
+    db.refresh(reg)
+    return {"ok": True, "id": reg.id, "numero": numero}
+
+
+@router.put("/registros-presupuestarios/{id}")
+def actualizar_registro_presupuestario(id: int, data: schemas.RegistroPresupuestarioIn,
+                                       db: Session = Depends(get_db),
+                                       user=Depends(require_admin)):
+    reg = db.query(models.RegistroPresupuestario).get(id)
+    if not reg:
+        raise HTTPException(404, "Registro no encontrado")
+    if reg.estado != "borrador":
+        raise HTTPException(400, "Solo se pueden editar registros en estado borrador")
+    reg.tipo = data.tipo
+    reg.anio = data.anio
+    reg.descripcion = data.descripcion
+    db.query(models.LineaRegistroPresupuestario).filter(
+        models.LineaRegistroPresupuestario.registro_id == id).delete()
+    for ln in data.lineas:
+        linea = models.LineaRegistroPresupuestario(
+            registro_id=id, cuenta_id=ln.cuenta_id,
+            campo_id=ln.campo_id, unidad_negocio_id=ln.unidad_negocio_id,
+            departamento_id=ln.departamento_id, descripcion=ln.descripcion,
+        )
+        for mk in MK_PRES:
+            setattr(linea, mk, getattr(ln, mk, 0) or 0)
+        db.add(linea)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/registros-presupuestarios/{id}")
+def eliminar_registro_presupuestario(id: int, db: Session = Depends(get_db),
+                                     user=Depends(require_admin)):
+    reg = db.query(models.RegistroPresupuestario).get(id)
+    if not reg:
+        raise HTTPException(404, "Registro no encontrado")
+    if reg.estado == "aprobado":
+        raise HTTPException(400, "No se puede eliminar un registro aprobado")
+    db.delete(reg)
+    db.commit()
+    return {"ok": True}
+
+
+@router.put("/registros-presupuestarios/{id}/aprobar")
+def aprobar_registro_presupuestario(id: int, db: Session = Depends(get_db),
+                                    user=Depends(require_admin)):
+    reg = db.query(models.RegistroPresupuestario).options(
+        joinedload(models.RegistroPresupuestario.lineas)).get(id)
+    if not reg:
+        raise HTTPException(404, "Registro no encontrado")
+    if reg.estado == "aprobado":
+        raise HTTPException(400, "Ya está aprobado")
+    try:
+        for ln in reg.lineas:
+            pres = db.query(models.Presupuesto).filter(
+                models.Presupuesto.anio == reg.anio,
+                models.Presupuesto.cuenta_id == ln.cuenta_id,
+                models.Presupuesto.campo_id == ln.campo_id,
+                models.Presupuesto.unidad_negocio_id == ln.unidad_negocio_id,
+                models.Presupuesto.departamento_id == ln.departamento_id,
+            ).first()
+            if reg.tipo == "original":
+                if pres:
+                    for mk in MK_PRES:
+                        setattr(pres, mk, float(getattr(ln, mk) or 0))
+                    pres.version = "original"
+                    pres.estado = "aprobado"
+                else:
+                    pres = models.Presupuesto(
+                        anio=reg.anio, cuenta_id=ln.cuenta_id, campo_id=ln.campo_id,
+                        unidad_negocio_id=ln.unidad_negocio_id,
+                        departamento_id=ln.departamento_id,
+                        descripcion=ln.descripcion, version="original", estado="aprobado",
+                    )
+                    for mk in MK_PRES:
+                        setattr(pres, mk, float(getattr(ln, mk) or 0))
+                    db.add(pres)
+            elif reg.tipo in ("adicion", "transferencia"):
+                if not pres:
+                    pres = models.Presupuesto(
+                        anio=reg.anio, cuenta_id=ln.cuenta_id, campo_id=ln.campo_id,
+                        unidad_negocio_id=ln.unidad_negocio_id,
+                        departamento_id=ln.departamento_id,
+                        descripcion=ln.descripcion, version="original", estado="aprobado",
+                    )
+                    for mk in MK_PRES:
+                        setattr(pres, mk, 0)
+                    db.add(pres)
+                    db.flush()
+                for mk in MK_PRES:
+                    old = float(getattr(pres, mk) or 0)
+                    delta = float(getattr(ln, mk) or 0)
+                    setattr(pres, mk, round(old + delta, 2))
+            elif reg.tipo == "revision":
+                if pres:
+                    for mk in MK_PRES:
+                        setattr(pres, mk, float(getattr(ln, mk) or 0))
+                else:
+                    pres = models.Presupuesto(
+                        anio=reg.anio, cuenta_id=ln.cuenta_id, campo_id=ln.campo_id,
+                        unidad_negocio_id=ln.unidad_negocio_id,
+                        departamento_id=ln.departamento_id,
+                        descripcion=ln.descripcion, version="original", estado="aprobado",
+                    )
+                    for mk in MK_PRES:
+                        setattr(pres, mk, float(getattr(ln, mk) or 0))
+                    db.add(pres)
+        reg.estado = "aprobado"
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al aprobar, operación revertida")
+    return {"ok": True, "lineas_procesadas": len(reg.lineas)}
+
+
+@router.put("/registros-presupuestarios/{id}/rechazar")
+def rechazar_registro_presupuestario(id: int, db: Session = Depends(get_db),
+                                     user=Depends(require_admin)):
+    reg = db.query(models.RegistroPresupuestario).get(id)
+    if not reg:
+        raise HTTPException(404, "Registro no encontrado")
+    if reg.estado == "aprobado":
+        raise HTTPException(400, "No se puede rechazar un registro ya aprobado")
+    reg.estado = "rechazado"
+    db.commit()
+    return {"ok": True}
+
+
+# ── Configuración del módulo presupuesto ──
+
+@router.get("/config-presupuesto")
+def obtener_config_presupuesto(db: Session = Depends(get_db),
+                               user=Depends(get_current_user)):
+    cfg = db.query(models.ConfigPresupuesto).first()
+    if not cfg:
+        cfg = models.ConfigPresupuesto()
+        db.add(cfg)
+        db.commit()
+        db.refresh(cfg)
+    return {
+        "umbral_alerta": cfg.umbral_alerta,
+        "umbral_bloqueo": cfg.umbral_bloqueo,
+        "control_habilitado": cfg.control_habilitado,
+        "distribucion_default": cfg.distribucion_default,
+        "requiere_aprobacion": cfg.requiere_aprobacion,
+    }
+
+
+@router.put("/config-presupuesto")
+def actualizar_config_presupuesto(data: schemas.ConfigPresupuestoIn,
+                                  db: Session = Depends(get_db),
+                                  user=Depends(require_admin)):
+    cfg = db.query(models.ConfigPresupuesto).first()
+    if not cfg:
+        cfg = models.ConfigPresupuesto()
+        db.add(cfg)
+    cfg.umbral_alerta = data.umbral_alerta
+    cfg.umbral_bloqueo = data.umbral_bloqueo
+    cfg.control_habilitado = data.control_habilitado
+    cfg.distribucion_default = data.distribucion_default
+    cfg.requiere_aprobacion = data.requiere_aprobacion
+    db.commit()
+    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

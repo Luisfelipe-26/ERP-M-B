@@ -27,6 +27,7 @@ SEQUENCE_CONFIG = {
     'PAG':   ('PAG-', 4),
     'CXC':   ('CXC-', 4),
     'COB':   ('COB-', 4),
+    'RP':    ('RP-',  4),
 }
 
 SEQUENCE_TABLE_MAP = {

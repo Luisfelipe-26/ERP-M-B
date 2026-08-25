@@ -670,7 +670,6 @@ class PresupuestoCreate(BaseModel):
     campo_id: Optional[str] = None
     unidad_negocio_id: Optional[int] = None
     departamento_id: Optional[int] = None
-    almacen_id: Optional[int] = None
     monto_ene: float = 0
     monto_feb: float = 0
     monto_mar: float = 0
@@ -695,7 +694,6 @@ class PresupuestoOut(PresupuestoCreate):
     total_anual: Optional[float] = None
     unidad_negocio_nombre: Optional[str] = None
     departamento_nombre: Optional[str] = None
-    almacen_nombre: Optional[str] = None
     class Config:
         from_attributes = True
 
@@ -728,6 +726,66 @@ class PresupuestoBatchItem(BaseModel):
     descripcion: Optional[str] = None
     version: Optional[str] = None
     estado: Optional[str] = None
+
+# Registros presupuestarios (asientos de presupuesto)
+class LineaRegistroPresupuestarioIn(BaseModel):
+    cuenta_id: int
+    campo_id: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    monto_ene: float = 0
+    monto_feb: float = 0
+    monto_mar: float = 0
+    monto_abr: float = 0
+    monto_may: float = 0
+    monto_jun: float = 0
+    monto_jul: float = 0
+    monto_ago: float = 0
+    monto_sep: float = 0
+    monto_oct: float = 0
+    monto_nov: float = 0
+    monto_dic: float = 0
+    descripcion: Optional[str] = None
+
+class RegistroPresupuestarioIn(BaseModel):
+    tipo: str
+    anio: int
+    descripcion: Optional[str] = None
+    lineas: List[LineaRegistroPresupuestarioIn]
+
+class LineaRegistroPresupuestarioOut(LineaRegistroPresupuestarioIn):
+    id: int
+    registro_id: int
+    cuenta_codigo: Optional[str] = None
+    cuenta_nombre: Optional[str] = None
+    campo_nombre: Optional[str] = None
+    unidad_negocio_nombre: Optional[str] = None
+    departamento_nombre: Optional[str] = None
+    total: Optional[float] = None
+    class Config:
+        from_attributes = True
+
+class RegistroPresupuestarioOut(BaseModel):
+    id: int
+    numero: str
+    fecha: date
+    tipo: str
+    anio: int
+    descripcion: Optional[str] = None
+    estado: str
+    usuario_nombre: Optional[str] = None
+    created_at: Optional[datetime] = None
+    lineas: List[LineaRegistroPresupuestarioOut] = []
+    total: Optional[float] = None
+    class Config:
+        from_attributes = True
+
+class ConfigPresupuestoIn(BaseModel):
+    umbral_alerta: int = 85
+    umbral_bloqueo: int = 100
+    control_habilitado: bool = True
+    distribucion_default: str = "mensual"
+    requiere_aprobacion: bool = True
 
 # Dimensiones Financieras
 class UnidadNegocioCreate(BaseModel):
