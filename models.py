@@ -976,6 +976,21 @@ class Presupuesto(Base):
     unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"), index=True)
     departamento_id = Column(Integer, ForeignKey("departamentos.id"), index=True)
     almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
+    version = Column(String(30), default="original")
+    estado = Column(String(20), default="borrador")
+
+
+class TransferenciaPresupuesto(Base):
+    __tablename__ = "transferencias_presupuesto"
+    id = Column(Integer, primary_key=True, index=True)
+    fecha = Column(Date, nullable=False)
+    origen_presupuesto_id = Column(Integer, ForeignKey("presupuestos.id"), nullable=False)
+    destino_presupuesto_id = Column(Integer, ForeignKey("presupuestos.id"), nullable=False)
+    mes = Column(Integer, nullable=False)
+    monto = Column(Numeric(14, 2), nullable=False)
+    motivo = Column(String(300))
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    created_at = Column(DateTime, server_default=func.now())
 
 
 class CosechaLiquidacion(Base):

@@ -2180,6 +2180,97 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
     return result
 
 
+@router.post("/presupuestos/transferir")
+def transferir_presupuesto(data: schemas.TransferenciaPresupuestoIn,
+                           db: Session = Depends(get_db), user=Depends(require_admin)):
+    origen = db.query(models.Presupuesto).get(data.origen_id)
+    destino = db.query(models.Presupuesto).get(data.destino_id)
+    if not origen or not destino:
+        raise HTTPException(404, "Presupuesto origen o destino no encontrado")
+    if data.mes < 1 or data.mes > 12:
+        raise HTTPException(400, "Mes debe estar entre 1 y 12")
+    if data.monto <= 0:
+        raise HTTPException(400, "Monto debe ser positivo")
+    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+           "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    campo = mk[data.mes - 1]
+    saldo_origen = float(getattr(origen, campo) or 0)
+    if data.monto > saldo_origen:
+        raise HTTPException(400, f"Monto excede el saldo del mes ({saldo_origen:.2f})")
+    setattr(origen, campo, round(saldo_origen - data.monto, 2))
+    saldo_destino = float(getattr(destino, campo) or 0)
+    setattr(destino, campo, round(saldo_destino + data.monto, 2))
+    from datetime import date as dt_date
+    t = models.TransferenciaPresupuesto(
+        fecha=dt_date.today(), origen_presupuesto_id=data.origen_id,
+        destino_presupuesto_id=data.destino_id, mes=data.mes,
+        monto=data.monto, motivo=data.motivo, usuario_id=user.id
+    )
+    db.add(t)
+    db.commit()
+    return {"ok": True, "id": t.id}
+
+
+@router.post("/presupuestos/copiar-anio")
+def copiar_presupuesto_anio(data: schemas.CopiarPresupuestoIn,
+                            db: Session = Depends(get_db), user=Depends(require_admin)):
+    originales = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == data.anio_origen
+    ).all()
+    if not originales:
+        raise HTTPException(404, f"No hay presupuestos para el año {data.anio_origen}")
+    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+           "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    creados = 0
+    omitidos = 0
+    for p in originales:
+        dup = db.query(models.Presupuesto).filter(
+            models.Presupuesto.anio == data.anio_destino,
+            models.Presupuesto.cuenta_id == p.cuenta_id,
+            models.Presupuesto.campo_id == p.campo_id
+        ).first()
+        if dup:
+            omitidos += 1
+            continue
+        nuevo = models.Presupuesto(
+            anio=data.anio_destino, cuenta_id=p.cuenta_id, campo_id=p.campo_id,
+            descripcion=p.descripcion, unidad_negocio_id=p.unidad_negocio_id,
+            departamento_id=p.departamento_id, almacen_id=p.almacen_id,
+            version="original", estado="borrador"
+        )
+        for m in mk:
+            setattr(nuevo, m, round(float(getattr(p, m) or 0) * data.factor, 2))
+        db.add(nuevo)
+        creados += 1
+    db.commit()
+    return {"ok": True, "creados": creados, "omitidos": omitidos}
+
+
+@router.put("/presupuestos/{id}/estado")
+def cambiar_estado_presupuesto(id: int, estado: str = Query(...),
+                               db: Session = Depends(get_db), user=Depends(require_admin)):
+    if estado not in ("borrador", "aprobado", "rechazado"):
+        raise HTTPException(400, "Estado no válido")
+    p = db.query(models.Presupuesto).get(id)
+    if not p:
+        raise HTTPException(404, "Presupuesto no encontrado")
+    p.estado = estado
+    db.commit()
+    return {"ok": True}
+
+
+@router.put("/presupuestos/aprobar-lote")
+def aprobar_lote(anio: int = Query(...), db: Session = Depends(get_db),
+                 user=Depends(require_admin)):
+    q = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.estado == "borrador"
+    )
+    n = q.update({"estado": "aprobado"})
+    db.commit()
+    return {"ok": True, "aprobados": n}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ESTADO DE FLUJO DE EFECTIVO
 # ══════════════════════════════════════════════════════════════════════════════

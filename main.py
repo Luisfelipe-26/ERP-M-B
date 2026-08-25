@@ -60,6 +60,9 @@ def run_migrations():
         "CREATE INDEX IF NOT EXISTS ix_asientos_contables_diario_id ON asientos_contables(diario_id)",
         # PerfilAcceso — perfil_id FK en usuarios
         "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS perfil_id INTEGER REFERENCES perfiles_acceso(id)",
+        # Presupuesto — versiones y estado
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS version VARCHAR(30) DEFAULT 'original'",
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS estado VARCHAR(20) DEFAULT 'borrador'",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

@@ -684,6 +684,8 @@ class PresupuestoCreate(BaseModel):
     monto_nov: float = 0
     monto_dic: float = 0
     descripcion: Optional[str] = None
+    version: str = "original"
+    estado: str = "borrador"
 
 class PresupuestoOut(PresupuestoCreate):
     id: int
@@ -691,8 +693,23 @@ class PresupuestoOut(PresupuestoCreate):
     cuenta_nombre: Optional[str] = None
     campo_nombre: Optional[str] = None
     total_anual: Optional[float] = None
+    unidad_negocio_nombre: Optional[str] = None
+    departamento_nombre: Optional[str] = None
+    almacen_nombre: Optional[str] = None
     class Config:
         from_attributes = True
+
+class TransferenciaPresupuestoIn(BaseModel):
+    origen_id: int
+    destino_id: int
+    mes: int
+    monto: float
+    motivo: Optional[str] = None
+
+class CopiarPresupuestoIn(BaseModel):
+    anio_origen: int
+    anio_destino: int
+    factor: float = 1.0
 
 # Dimensiones Financieras
 class UnidadNegocioCreate(BaseModel):
