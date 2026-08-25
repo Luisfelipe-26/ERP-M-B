@@ -394,6 +394,58 @@ def seed_reglas_default(db: Session = Depends(get_db), user=Depends(require_admi
     return {"ok": True, "creadas": creadas, "total": total, "faltantes": faltantes}
 
 
+# Cuentas por defecto de productos de inventario  (código_inventario, código_costo)
+CUENTAS_PRODUCTO_DEFAULT = ("1.1.03.01", "5.1.02")   # Insumos Agrícolas / Insumos Agrícolas (Consumo)
+# Overrides por tipo de producto (tipo normalizado a MAYÚSCULAS)
+CUENTAS_PRODUCTO_POR_TIPO = {
+    "EMPAQUE": ("1.1.03.04", "5.1.08"),
+    "MATERIAL DE EMPAQUE": ("1.1.03.04", "5.1.08"),
+    "COMBUSTIBLE": ("1.1.03.05", "5.1.09"),
+    "LUBRICANTE": ("1.1.03.05", "5.1.09"),
+    "REPUESTO": ("1.1.03.06", "5.2.02"),
+    "HERRAMIENTA": ("1.1.03.06", "5.2.02"),
+}
+
+
+@router.post("/productos/asignar-cuentas")
+def asignar_cuentas_productos(sobrescribir: bool = False,
+                              db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Asigna cuenta de inventario y de costo a los productos inventariables:
+    por defecto Insumos Agrícolas (1.1.03.01 / 5.1.02), con overrides por tipo.
+    Los servicios (no inventariables) se omiten. Con sobrescribir=False solo
+    completa los campos vacíos; con True reasigna todos. Requiere que las
+    cuentas existan (ejecutar seed-catalogo antes)."""
+    cuentas = {c.codigo: c.id for c in db.query(models.CuentaContable).all()}
+    productos = db.query(models.Producto).filter(models.Producto.activo == True).all()
+    actualizados = 0
+    sin_cambio = 0
+    omitidos_servicio = 0
+    por_tipo = {}
+    for p in productos:
+        if not p.es_inventariable:
+            omitidos_servicio += 1
+            continue
+        tipo = (p.tipo or "").strip().upper()
+        cod_inv, cod_costo = CUENTAS_PRODUCTO_POR_TIPO.get(tipo, CUENTAS_PRODUCTO_DEFAULT)
+        id_inv, id_costo = cuentas.get(cod_inv), cuentas.get(cod_costo)
+        cambio = False
+        if id_inv and (sobrescribir or not p.cuenta_inventario_id) and p.cuenta_inventario_id != id_inv:
+            p.cuenta_inventario_id = id_inv
+            cambio = True
+        if id_costo and (sobrescribir or not p.cuenta_costo_id) and p.cuenta_costo_id != id_costo:
+            p.cuenta_costo_id = id_costo
+            cambio = True
+        if cambio:
+            actualizados += 1
+            clave = tipo or "(sin tipo)"
+            por_tipo[clave] = por_tipo.get(clave, 0) + 1
+        else:
+            sin_cambio += 1
+    db.commit()
+    return {"ok": True, "actualizados": actualizados, "sin_cambio": sin_cambio,
+            "omitidos_servicio": omitidos_servicio, "por_tipo": por_tipo}
+
+
 @router.patch("/cuentas/{cuenta_id}/partida")
 def asignar_partida(cuenta_id: int, data: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
     cuenta = db.query(models.CuentaContable).get(cuenta_id)
