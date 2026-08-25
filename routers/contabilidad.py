@@ -237,6 +237,11 @@ ESTRUCTURA_BG = [
         {"nombre": "Impuestos por Pagar", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.02"]},
         {"nombre": "Obligaciones Laborales", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.03"]},
         {"nombre": "Provisiones", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.04"]},
+        {"nombre": "Deuda Financiera Corriente", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.05"]},
+    ]},
+    {"nombre": "Pasivos No Corrientes", "clasificacion": "pasivo_no_corriente", "es_grupo": True, "hijos": [
+        {"nombre": "Préstamos por Pagar LP", "clasificacion": "pasivo_no_corriente", "prefijos": ["2.2.01"]},
+        {"nombre": "Impuesto Diferido", "clasificacion": "pasivo_no_corriente", "prefijos": ["2.2.02"]},
     ]},
     {"nombre": "Patrimonio", "clasificacion": "patrimonio", "es_grupo": True, "hijos": [
         {"nombre": "Capital y Reservas", "clasificacion": "patrimonio", "prefijos": ["3.1", "3.2"]},
@@ -248,6 +253,7 @@ ESTRUCTURA_ER = [
     {"nombre": "Otros Ingresos", "clasificacion": "ingresos", "prefijos": ["4.2"]},
     {"nombre": "Costo de Producción Agrícola", "clasificacion": "costos", "prefijos": ["5.1", "5.2", "5.3"]},
     {"nombre": "Gastos Administrativos", "clasificacion": "gastos", "prefijos": ["6.1"]},
+    {"nombre": "Gastos de Comercialización", "clasificacion": "gastos", "prefijos": ["6.4"]},
     {"nombre": "Gastos Financieros", "clasificacion": "gastos", "prefijos": ["6.2"]},
     {"nombre": "Gastos de Impuestos", "clasificacion": "gastos", "prefijos": ["6.3"]},
 ]

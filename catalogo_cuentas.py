@@ -62,8 +62,19 @@ CUENTAS_DATA = [
     ("2.1.03.03", "Vacaciones por Pagar",             "pasivo",     "acreedora", "Balance",  4, True),
     ("2.1.03.04", "Prestaciones por Pagar",           "pasivo",     "acreedora", "Balance",  4, True),
     ("2.1.03.05", "INFOTEP por Pagar",                "pasivo",     "acreedora", "Balance",  4, True),
+    ("2.1.03.06", "Regalía Pascual por Pagar (Salario 13)", "pasivo", "acreedora", "Balance", 4, True),
+    ("2.1.03.07", "Participación de Beneficios por Pagar",   "pasivo", "acreedora", "Balance", 4, True),
     ("2.1.04",   "Provisiones",                       "pasivo",     "acreedora", "Balance",  3, False),
     ("2.1.04.01", "Provisión Prestaciones Laborales", "pasivo",     "acreedora", "Balance",  4, True),
+    ("2.1.05",   "Deuda Financiera Corriente",        "pasivo",     "acreedora", "Balance",  3, False),
+    ("2.1.05.01", "Porción Corriente Préstamos LP",   "pasivo",     "acreedora", "Balance",  4, True),
+    ("2.1.05.02", "Préstamos Bancarios CP / Sobregiros", "pasivo",  "acreedora", "Balance",  4, True),
+    # ── PASIVOS NO CORRIENTES ──
+    ("2.2",       "PASIVOS NO CORRIENTES",            "pasivo",     "acreedora", "Balance",  2, False),
+    ("2.2.01",   "Préstamos por Pagar LP",            "pasivo",     "acreedora", "Balance",  3, False),
+    ("2.2.01.01", "Préstamos Bancarios Largo Plazo",  "pasivo",     "acreedora", "Balance",  4, True),
+    ("2.2.02",   "Impuesto Diferido",                 "pasivo",     "acreedora", "Balance",  3, False),
+    ("2.2.02.01", "Pasivo por Impuesto Diferido",     "pasivo",     "acreedora", "Balance",  4, True),
     # ── PATRIMONIO ──
     ("3",        "PATRIMONIO",                        "patrimonio", "acreedora", "Balance",  1, False),
     ("3.1",      "Capital Social",                    "patrimonio", "acreedora", "Balance",  2, True),
@@ -116,6 +127,11 @@ CUENTAS_DATA = [
     ("6.3",      "Gastos de Impuestos",               "gasto",      "deudora",  "Resultado", 2, False),
     ("6.3.01",   "Gasto ISR Corriente",               "gasto",      "deudora",  "Resultado", 3, True),
     ("6.3.02",   "Gasto ISR Diferido",                "gasto",      "deudora",  "Resultado", 3, True),
+    ("6.4",      "Gastos de Comercialización",        "gasto",      "deudora",  "Resultado", 2, False),
+    ("6.4.01",   "Comisiones sobre Ventas",           "gasto",      "deudora",  "Resultado", 3, True),
+    ("6.4.02",   "Fletes y Distribución",             "gasto",      "deudora",  "Resultado", 3, True),
+    ("6.4.03",   "Gastos de Exportación",             "gasto",      "deudora",  "Resultado", 3, True),
+    ("6.4.04",   "Publicidad y Promoción",            "gasto",      "deudora",  "Resultado", 3, True),
 ]
 
 
