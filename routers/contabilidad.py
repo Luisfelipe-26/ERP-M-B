@@ -229,6 +229,8 @@ ESTRUCTURA_BG = [
     {"nombre": "Activos No Corrientes", "clasificacion": "activo_no_corriente", "es_grupo": True, "hijos": [
         {"nombre": "Propiedad, Planta y Equipo", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.01"]},
         {"nombre": "Depreciación Acumulada", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.02"]},
+        {"nombre": "Activos Biológicos (NIC 41)", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.03"]},
+        {"nombre": "Amortización Act. Biológicos", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.04"]},
     ]},
     {"nombre": "Pasivos Corrientes", "clasificacion": "pasivo_corriente", "es_grupo": True, "hijos": [
         {"nombre": "Cuentas por Pagar", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.01"]},
