@@ -711,6 +711,24 @@ class CopiarPresupuestoIn(BaseModel):
     anio_destino: int
     factor: float = 1.0
 
+class PresupuestoBatchItem(BaseModel):
+    id: int
+    monto_ene: Optional[float] = None
+    monto_feb: Optional[float] = None
+    monto_mar: Optional[float] = None
+    monto_abr: Optional[float] = None
+    monto_may: Optional[float] = None
+    monto_jun: Optional[float] = None
+    monto_jul: Optional[float] = None
+    monto_ago: Optional[float] = None
+    monto_sep: Optional[float] = None
+    monto_oct: Optional[float] = None
+    monto_nov: Optional[float] = None
+    monto_dic: Optional[float] = None
+    descripcion: Optional[str] = None
+    version: Optional[str] = None
+    estado: Optional[str] = None
+
 # Dimensiones Financieras
 class UnidadNegocioCreate(BaseModel):
     codigo: str

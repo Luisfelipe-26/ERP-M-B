@@ -2064,27 +2064,32 @@ def listar_presupuestos(anio: int = None, db: Session = Depends(get_db),
     if anio:
         q = q.filter(models.Presupuesto.anio == anio)
     items = q.all()
+    if not items:
+        return []
+    cta_ids = {p.cuenta_id for p in items}
+    campo_ids = {p.campo_id for p in items if p.campo_id}
+    un_ids = {p.unidad_negocio_id for p in items if p.unidad_negocio_id}
+    dep_ids = {p.departamento_id for p in items if p.departamento_id}
+    alm_ids = {p.almacen_id for p in items if p.almacen_id}
+    ctas = {c.id: c for c in db.query(models.CuentaContable).filter(models.CuentaContable.id.in_(cta_ids)).all()} if cta_ids else {}
+    campos_map = {c.id_campo: c for c in db.query(models.Campo).filter(models.Campo.id_campo.in_(campo_ids)).all()} if campo_ids else {}
+    uns = {u.id: u for u in db.query(models.UnidadNegocio).filter(models.UnidadNegocio.id.in_(un_ids)).all()} if un_ids else {}
+    deps = {d.id: d for d in db.query(models.Departamento).filter(models.Departamento.id.in_(dep_ids)).all()} if dep_ids else {}
+    alms = {a.id: a for a in db.query(models.Almacen).filter(models.Almacen.id.in_(alm_ids)).all()} if alm_ids else {}
+    meses_keys = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+                  "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
     result = []
     for p in items:
+        cta = ctas.get(p.cuenta_id)
         d = schemas.PresupuestoOut.model_validate(p).model_dump()
-        cta = db.query(models.CuentaContable).get(p.cuenta_id)
         d["cuenta_codigo"] = cta.codigo if cta else None
         d["cuenta_nombre"] = cta.nombre if cta else None
-        if p.campo_id:
-            campo = db.query(models.Campo).filter(models.Campo.id_campo == p.campo_id).first()
-            d["campo_nombre"] = campo.nombre if campo else None
-        if p.unidad_negocio_id:
-            un = db.query(models.UnidadNegocio).get(p.unidad_negocio_id)
-            d["unidad_negocio_nombre"] = un.nombre if un else None
-        if p.departamento_id:
-            dep = db.query(models.Departamento).get(p.departamento_id)
-            d["departamento_nombre"] = dep.nombre if dep else None
-        if p.almacen_id:
-            alm = db.query(models.Almacen).get(p.almacen_id)
-            d["almacen_nombre"] = alm.nombre if alm else None
-        meses = [p.monto_ene, p.monto_feb, p.monto_mar, p.monto_abr, p.monto_may, p.monto_jun,
-                 p.monto_jul, p.monto_ago, p.monto_sep, p.monto_oct, p.monto_nov, p.monto_dic]
-        d["total_anual"] = round(sum(float(m or 0) for m in meses), 2)
+        d["campo_nombre"] = campos_map[p.campo_id].nombre if p.campo_id and p.campo_id in campos_map else None
+        d["unidad_negocio_nombre"] = uns[p.unidad_negocio_id].nombre if p.unidad_negocio_id and p.unidad_negocio_id in uns else None
+        d["departamento_nombre"] = deps[p.departamento_id].nombre if p.departamento_id and p.departamento_id in deps else None
+        d["almacen_nombre"] = alms[p.almacen_id].nombre if p.almacen_id and p.almacen_id in alms else None
+        total = sum(float(getattr(p, mk) or 0) for mk in meses_keys)
+        d["total_anual"] = round(total, 2)
         result.append(d)
     return result
 
@@ -2094,13 +2099,17 @@ def crear_presupuesto(data: schemas.PresupuestoCreate,
                       db: Session = Depends(get_db), user=Depends(require_admin)):
     if not db.query(models.CuentaContable).get(data.cuenta_id):
         raise HTTPException(400, "Cuenta contable no existe")
-    dup = db.query(models.Presupuesto).filter(
+    dup_q = db.query(models.Presupuesto).filter(
         models.Presupuesto.anio == data.anio,
         models.Presupuesto.cuenta_id == data.cuenta_id,
-        models.Presupuesto.campo_id == data.campo_id
-    ).first()
-    if dup:
-        raise HTTPException(400, "Ya existe presupuesto para esa cuenta/campo/año")
+        models.Presupuesto.campo_id == data.campo_id,
+        models.Presupuesto.unidad_negocio_id == data.unidad_negocio_id,
+        models.Presupuesto.departamento_id == data.departamento_id,
+        models.Presupuesto.almacen_id == data.almacen_id,
+        models.Presupuesto.version == data.version,
+    )
+    if dup_q.first():
+        raise HTTPException(400, "Ya existe presupuesto para esa combinación cuenta/campo/dimensiones/versión/año")
     p = models.Presupuesto(**data.model_dump())
     db.add(p)
     db.commit()
@@ -2132,19 +2141,42 @@ def eliminar_presupuesto(id: int, db: Session = Depends(get_db), user=Depends(re
 
 @router.get("/presupuesto-vs-real")
 def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
+                        unidad_negocio_id: int = None, departamento_id: int = None,
+                        almacen_id: int = None,
                         db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
     q = db.query(models.Presupuesto).filter(models.Presupuesto.anio == anio)
     if campo_id:
         q = q.filter(models.Presupuesto.campo_id == campo_id)
+    if unidad_negocio_id:
+        q = q.filter(models.Presupuesto.unidad_negocio_id == unidad_negocio_id)
+    if departamento_id:
+        q = q.filter(models.Presupuesto.departamento_id == departamento_id)
+    if almacen_id:
+        q = q.filter(models.Presupuesto.almacen_id == almacen_id)
     presupuestos = q.all()
+    if not presupuestos:
+        return []
+
+    cta_ids = {p.cuenta_id for p in presupuestos}
+    ctas = {c.id: c for c in db.query(models.CuentaContable).filter(models.CuentaContable.id.in_(cta_ids)).all()}
+    periodos = {p.mes: p for p in db.query(models.PeriodoContable).filter(
+        models.PeriodoContable.anio == anio).all()}
+    periodo_ids = [p.id for p in periodos.values()]
+    saldos_raw = db.query(models.SaldoMensual).filter(
+        models.SaldoMensual.cuenta_id.in_(cta_ids),
+        models.SaldoMensual.periodo_id.in_(periodo_ids)
+    ).all() if periodo_ids else []
+    saldos = {}
+    for sm in saldos_raw:
+        saldos[(sm.cuenta_id, sm.periodo_id)] = sm
 
     meses_keys = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
                   "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
     result = []
     for p in presupuestos:
-        cta = db.query(models.CuentaContable).get(p.cuenta_id)
+        cta = ctas.get(p.cuenta_id)
         row = {
             "cuenta_id": p.cuenta_id,
             "cuenta_codigo": cta.codigo if cta else None,
@@ -2153,19 +2185,14 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
             "meses": [],
             "total_presupuesto": 0, "total_real": 0,
         }
+        nat = cta.naturaleza if cta else "deudora"
         for i, mk in enumerate(meses_keys, 1):
             pres = float(getattr(p, mk) or 0)
-            periodo = db.query(models.PeriodoContable).filter(
-                models.PeriodoContable.anio == anio, models.PeriodoContable.mes == i
-            ).first()
             real = 0.0
-            if periodo:
-                sm = db.query(models.SaldoMensual).filter(
-                    models.SaldoMensual.cuenta_id == p.cuenta_id,
-                    models.SaldoMensual.periodo_id == periodo.id
-                ).first()
+            per = periodos.get(i)
+            if per:
+                sm = saldos.get((p.cuenta_id, per.id))
                 if sm:
-                    nat = cta.naturaleza if cta else "deudora"
                     real = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
                     if nat == "acreedora":
                         real = -real
@@ -2197,18 +2224,65 @@ def transferir_presupuesto(data: schemas.TransferenciaPresupuestoIn,
     saldo_origen = float(getattr(origen, campo) or 0)
     if data.monto > saldo_origen:
         raise HTTPException(400, f"Monto excede el saldo del mes ({saldo_origen:.2f})")
-    setattr(origen, campo, round(saldo_origen - data.monto, 2))
-    saldo_destino = float(getattr(destino, campo) or 0)
-    setattr(destino, campo, round(saldo_destino + data.monto, 2))
-    from datetime import date as dt_date
-    t = models.TransferenciaPresupuesto(
-        fecha=dt_date.today(), origen_presupuesto_id=data.origen_id,
-        destino_presupuesto_id=data.destino_id, mes=data.mes,
-        monto=data.monto, motivo=data.motivo, usuario_id=user.id
-    )
-    db.add(t)
-    db.commit()
+    try:
+        setattr(origen, campo, round(saldo_origen - data.monto, 2))
+        saldo_destino = float(getattr(destino, campo) or 0)
+        setattr(destino, campo, round(saldo_destino + data.monto, 2))
+        t = models.TransferenciaPresupuesto(
+            fecha=date.today(), origen_presupuesto_id=data.origen_id,
+            destino_presupuesto_id=data.destino_id, mes=data.mes,
+            monto=data.monto, motivo=data.motivo, usuario_id=user.id
+        )
+        db.add(t)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error en transferencia, operación revertida")
     return {"ok": True, "id": t.id}
+
+
+@router.get("/presupuestos/transferencias")
+def listar_transferencias(anio: int = Query(...), db: Session = Depends(get_db),
+                          user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    pres_ids = [p.id for p in db.query(models.Presupuesto.id).filter(
+        models.Presupuesto.anio == anio).all()]
+    if not pres_ids:
+        return []
+    trs = db.query(models.TransferenciaPresupuesto).filter(
+        models.TransferenciaPresupuesto.origen_presupuesto_id.in_(pres_ids)
+    ).order_by(models.TransferenciaPresupuesto.created_at.desc()).all()
+    result = []
+    for t in trs:
+        orig = db.query(models.Presupuesto).get(t.origen_presupuesto_id)
+        dest = db.query(models.Presupuesto).get(t.destino_presupuesto_id)
+        orig_cta = db.query(models.CuentaContable).get(orig.cuenta_id) if orig else None
+        dest_cta = db.query(models.CuentaContable).get(dest.cuenta_id) if dest else None
+        meses_n = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+        result.append({
+            "id": t.id, "fecha": str(t.fecha),
+            "origen": f"{orig_cta.codigo} — {orig_cta.nombre}" if orig_cta else "?",
+            "destino": f"{dest_cta.codigo} — {dest_cta.nombre}" if dest_cta else "?",
+            "mes": meses_n[t.mes - 1] if 1 <= t.mes <= 12 else str(t.mes),
+            "monto": float(t.monto), "motivo": t.motivo or "",
+        })
+    return result
+
+
+@router.put("/presupuestos/batch")
+def batch_update_presupuestos(items: list[schemas.PresupuestoBatchItem],
+                              db: Session = Depends(get_db), user=Depends(require_admin)):
+    ok = 0
+    for item in items:
+        p = db.query(models.Presupuesto).get(item.id)
+        if not p:
+            continue
+        for k, v in item.model_dump(exclude={"id"}, exclude_none=True).items():
+            setattr(p, k, v)
+        ok += 1
+    db.commit()
+    return {"ok": True, "actualizados": ok}
 
 
 @router.post("/presupuestos/copiar-anio")
