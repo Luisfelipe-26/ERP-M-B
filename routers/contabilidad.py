@@ -231,6 +231,8 @@ ESTRUCTURA_BG = [
         {"nombre": "Depreciación Acumulada", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.02"]},
         {"nombre": "Activos Biológicos (NIC 41)", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.03"]},
         {"nombre": "Amortización Act. Biológicos", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.04"]},
+        {"nombre": "Activos Intangibles", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.05"]},
+        {"nombre": "Activo por Impuesto Diferido", "clasificacion": "activo_no_corriente", "prefijos": ["1.2.06"]},
     ]},
     {"nombre": "Pasivos Corrientes", "clasificacion": "pasivo_corriente", "es_grupo": True, "hijos": [
         {"nombre": "Cuentas por Pagar", "clasificacion": "pasivo_corriente", "prefijos": ["2.1.01"]},
@@ -244,7 +246,7 @@ ESTRUCTURA_BG = [
         {"nombre": "Impuesto Diferido", "clasificacion": "pasivo_no_corriente", "prefijos": ["2.2.02"]},
     ]},
     {"nombre": "Patrimonio", "clasificacion": "patrimonio", "es_grupo": True, "hijos": [
-        {"nombre": "Capital y Reservas", "clasificacion": "patrimonio", "prefijos": ["3.1", "3.2"]},
+        {"nombre": "Capital y Reservas", "clasificacion": "patrimonio", "prefijos": ["3.1", "3.2", "3.5", "3.6"]},
         {"nombre": "Resultados Acumulados", "clasificacion": "patrimonio", "prefijos": ["3.3", "3.4"]},
     ]},
 ]
