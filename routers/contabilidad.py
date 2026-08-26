@@ -3348,6 +3348,18 @@ def dashboard_financiero(db: Session = Depends(get_db), user=Depends(get_current
         models.AsientoContable.estado == "borrador"
     ).scalar() or 0
 
+    contab_entidades = ("ASIENTO", "PERIODO", "CUENTA", "CXP", "PAGO", "CXC", "COBRO",
+                        "CONCILIACION", "ASIENTO_RECURRENTE", "DIARIO", "REGLA")
+    recientes_q = db.query(models.AuditLog).filter(
+        models.AuditLog.entidad.in_(contab_entidades)
+    ).order_by(models.AuditLog.fecha.desc()).limit(8).all()
+    actividad_reciente = [{
+        "fecha": str(a.fecha)[:16].replace("T", " "),
+        "usuario": a.usuario_nombre, "accion": a.accion,
+        "entidad": a.entidad, "entidad_id": a.entidad_id,
+        "detalle": a.detalle,
+    } for a in recientes_q]
+
     return {
         "saldo_bancos": saldo_bancos,
         "total_cxc": total_cxc, "cxc_vencidas": cxc_vencidas, "num_cxc": len(cxc_pend),
@@ -3359,6 +3371,7 @@ def dashboard_financiero(db: Session = Depends(get_db), user=Depends(get_current
         "periodo_actual": per_actual.nombre if per_actual else None,
         "periodo_estado": per_actual.estado if per_actual else None,
         "asientos_borrador": asientos_borrador,
+        "actividad_reciente": actividad_reciente,
     }
 
 
