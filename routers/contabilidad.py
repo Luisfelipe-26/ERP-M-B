@@ -815,20 +815,26 @@ def crear_asiento(data: schemas.AsientoContableCreate, db: Session = Depends(get
         descripcion=data.descripcion, total_debe=total_debe, total_haber=total_haber,
         estado="borrador", creado_por=user.nombre
     )
-    db.add(asiento)
-    db.flush()
+    try:
+        db.add(asiento)
+        db.flush()
 
-    for l in data.lineas:
-        linea = models.LineaAsiento(
-            asiento_id=asiento.id, cuenta_id=l.cuenta_id,
-            debe=l.debe, haber=l.haber, campo_id=l.campo_id or None,
-            tercero_id=l.tercero_id, descripcion_linea=l.descripcion_linea,
-            unidad_negocio_id=l.unidad_negocio_id,
-            departamento_id=l.departamento_id,
-            almacen_id=l.almacen_id,
-        )
-        db.add(linea)
-    db.commit()
+        for l in data.lineas:
+            linea = models.LineaAsiento(
+                asiento_id=asiento.id, cuenta_id=l.cuenta_id,
+                debe=l.debe, haber=l.haber, campo_id=l.campo_id or None,
+                tercero_id=l.tercero_id, descripcion_linea=l.descripcion_linea,
+                unidad_negocio_id=l.unidad_negocio_id,
+                departamento_id=l.departamento_id,
+                almacen_id=l.almacen_id,
+            )
+            db.add(linea)
+        _audit(db, user, "CREAR", "ASIENTO", numero, f"Manual — debe={total_debe} haber={total_haber}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error creando asiento %s", numero)
+        raise HTTPException(500, "Error al crear asiento")
     db.refresh(asiento)
     return {"ok": True, "numero": numero, "id": asiento.id}
 
@@ -3009,21 +3015,29 @@ def ejecutar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get
     ).first()
     if not periodo or periodo.estado == "cerrado":
         raise HTTPException(400, "Período actual no disponible o cerrado")
-    numero = get_next("AC", db)
-    asiento = models.AsientoContable(
-        numero=numero, fecha=hoy, periodo_id=periodo.id,
-        descripcion=ar.descripcion_asiento or ar.nombre, estado="borrador",
-    )
-    db.add(asiento)
-    db.flush()
-    for l in ar.lineas:
-        db.add(models.LineaAsiento(
-            asiento_id=asiento.id, cuenta_id=l.cuenta_id,
-            descripcion=l.descripcion or "", debe=l.debe or 0, haber=l.haber or 0,
-        ))
-    ar.ultima_ejecucion = hoy
-    ar.veces_ejecutado = (ar.veces_ejecutado or 0) + 1
-    db.commit()
+    try:
+        numero = get_next("AC", db)
+        asiento = models.AsientoContable(
+            numero=numero, fecha=hoy, periodo_id=periodo.id,
+            diario_id=_resolve_diario_id(db, "AJU"),
+            descripcion=ar.descripcion_asiento or ar.nombre, estado="borrador",
+            creado_por=user.nombre,
+        )
+        db.add(asiento)
+        db.flush()
+        for l in ar.lineas:
+            db.add(models.LineaAsiento(
+                asiento_id=asiento.id, cuenta_id=l.cuenta_id,
+                descripcion_linea=l.descripcion or "", debe=l.debe or 0, haber=l.haber or 0,
+            ))
+        ar.ultima_ejecucion = hoy
+        ar.veces_ejecutado = (ar.veces_ejecutado or 0) + 1
+        _audit(db, user, "CREAR", "ASIENTO_RECURRENTE", str(id), f"Ejecutado → asiento {numero}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error ejecutando recurrente %s", id)
+        raise HTTPException(500, "Error al ejecutar asiento recurrente")
     return {"msg": f"Asiento {numero} creado", "asiento_numero": numero}
 
 
@@ -3164,21 +3178,27 @@ def listar_conciliaciones(cuenta_bancaria_id: int = None, db: Session = Depends(
 def crear_conciliacion(data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol not in ("admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
-    c = models.ConciliacionBancaria(
-        cuenta_bancaria_id=data["cuenta_bancaria_id"],
-        periodo_id=data["periodo_id"],
-        saldo_extracto=data.get("saldo_extracto", 0),
-        saldo_libro=data.get("saldo_libro", 0),
-        diferencia=round(float(data.get("saldo_extracto", 0)) - float(data.get("saldo_libro", 0)), 2),
-    )
-    db.add(c)
-    db.flush()
-    for p in data.get("partidas", []):
-        db.add(models.ConciliacionPartida(
-            conciliacion_id=c.id, tipo=p["tipo"], descripcion=p.get("descripcion", ""),
-            monto=p["monto"], fecha=p.get("fecha"), referencia=p.get("referencia", ""),
-        ))
-    db.commit()
+    try:
+        c = models.ConciliacionBancaria(
+            cuenta_bancaria_id=data["cuenta_bancaria_id"],
+            periodo_id=data["periodo_id"],
+            saldo_extracto=data.get("saldo_extracto", 0),
+            saldo_libro=data.get("saldo_libro", 0),
+            diferencia=round(float(data.get("saldo_extracto", 0)) - float(data.get("saldo_libro", 0)), 2),
+        )
+        db.add(c)
+        db.flush()
+        for p in data.get("partidas", []):
+            db.add(models.ConciliacionPartida(
+                conciliacion_id=c.id, tipo=p["tipo"], descripcion=p.get("descripcion", ""),
+                monto=p["monto"], fecha=p.get("fecha"), referencia=p.get("referencia", ""),
+            ))
+        _audit(db, user, "CREAR", "CONCILIACION", str(c.id), f"Banco={data['cuenta_bancaria_id']} periodo={data['periodo_id']}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error creando conciliación")
+        raise HTTPException(500, "Error al crear conciliación")
     return {"id": c.id, "msg": "Conciliación creada"}
 
 
