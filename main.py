@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text, inspect, func
 from database import engine, SessionLocal
 import models
+import auth as auth_module
 from routers import (
     auth, campos, trabajadores, actividades, productos,
     contabilidad, sequences, admin,
@@ -212,12 +213,38 @@ def seed_diarios():
         db.close()
 
 
+def seed_admin():
+    """Ensure a default admin user exists so the system is always accessible."""
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@corvus.do")
+    admin_pass = os.environ.get("ADMIN_PASSWORD")
+    if not admin_pass:
+        return
+    db = SessionLocal()
+    try:
+        exists = db.query(models.Usuario).filter(models.Usuario.email == admin_email).first()
+        if not exists:
+            admin_perfil = db.query(models.PerfilAcceso).filter(
+                models.PerfilAcceso.nombre == "Administrador").first()
+            db.add(models.Usuario(
+                nombre="Administrador",
+                email=admin_email,
+                hashed_password=auth_module.get_password_hash(admin_pass),
+                rol="admin",
+                perfil_id=admin_perfil.id if admin_perfil else None,
+                activo=True,
+            ))
+            db.commit()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     models.Base.metadata.create_all(bind=engine)
     run_migrations()
     seed_perfiles()
     seed_diarios()
+    seed_admin()
     recalc_all_ot_costs()
     start_sync()
     yield
