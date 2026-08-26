@@ -10,10 +10,19 @@ from auth import get_current_user, require_admin
 from datetime import date, datetime, timedelta
 from calendar import monthrange
 from decimal import Decimal
-import models, schemas
+import models, schemas, logging
 from routers.sequences import get_next
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/contabilidad", tags=["contabilidad"])
+
+
+def _audit(db: Session, user, accion: str, entidad: str, entidad_id: str, detalle: str):
+    db.add(models.AuditLog(
+        usuario_id=user.id, usuario_nombre=user.nombre,
+        accion=accion, entidad=entidad, entidad_id=str(entidad_id), detalle=detalle,
+    ))
 
 
 def find_periodo(db: Session, fecha: date):
@@ -833,12 +842,17 @@ def contabilizar_asiento(numero: str, db: Session = Depends(get_db), user=Depend
     if ctrl["bloqueado"]:
         raise HTTPException(409, "Presupuesto excedido: " + "; ".join(ctrl["alertas"]))
 
-    a.estado = "contabilizado"
-    a.contabilizado_por = user.nombre
-    a.contabilizado_en = datetime.utcnow()
-
-    _actualizar_saldos(db, a, 1)
-    db.commit()
+    try:
+        a.estado = "contabilizado"
+        a.contabilizado_por = user.nombre
+        a.contabilizado_en = datetime.utcnow()
+        _actualizar_saldos(db, a, 1)
+        _audit(db, user, "ESTADO", "ASIENTO", numero, f"Contabilizado — total {a.total_debe}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error contabilizando asiento %s", numero)
+        raise HTTPException(500, "Error al contabilizar asiento")
     resp = {"ok": True, "msg": f"Asiento {numero} contabilizado"}
     if ctrl["alertas"]:
         resp["alertas_presupuesto"] = ctrl["alertas"]
@@ -854,32 +868,38 @@ def anular_asiento(numero: str, motivo: str = "Anulación manual",
     if a.estado == "anulado":
         raise HTTPException(400, "El asiento ya está anulado")
 
-    if a.estado == "contabilizado":
-        num_rev = get_next("AC", db)
-        reverso = models.AsientoContable(
-            numero=num_rev, fecha=date.today(),
-            periodo_id=a.periodo_id, tipo="cierre", origen=a.origen,
-            referencia_id=a.referencia_id,
-            descripcion=f"Reverso de {numero}: {motivo}",
-            total_debe=a.total_debe, total_haber=a.total_haber,
-            estado="contabilizado", creado_por=user.nombre,
-            contabilizado_por=user.nombre, contabilizado_en=datetime.utcnow()
-        )
-        db.add(reverso)
-        db.flush()
-        for l in a.lineas:
-            db.add(models.LineaAsiento(
-                asiento_id=reverso.id, cuenta_id=l.cuenta_id,
-                debe=l.haber, haber=l.debe,
-                campo_id=l.campo_id, tercero_id=l.tercero_id,
-                descripcion_linea=f"Reverso: {l.descripcion_linea or ''}"
-            ))
-        _actualizar_saldos(db, reverso, 1)
-        a.asiento_reverso_id = reverso.id
+    try:
+        if a.estado == "contabilizado":
+            num_rev = get_next("AC", db)
+            reverso = models.AsientoContable(
+                numero=num_rev, fecha=date.today(),
+                periodo_id=a.periodo_id, tipo="cierre", origen=a.origen,
+                referencia_id=a.referencia_id,
+                descripcion=f"Reverso de {numero}: {motivo}",
+                total_debe=a.total_debe, total_haber=a.total_haber,
+                estado="contabilizado", creado_por=user.nombre,
+                contabilizado_por=user.nombre, contabilizado_en=datetime.utcnow()
+            )
+            db.add(reverso)
+            db.flush()
+            for l in a.lineas:
+                db.add(models.LineaAsiento(
+                    asiento_id=reverso.id, cuenta_id=l.cuenta_id,
+                    debe=l.haber, haber=l.debe,
+                    campo_id=l.campo_id, tercero_id=l.tercero_id,
+                    descripcion_linea=f"Reverso: {l.descripcion_linea or ''}"
+                ))
+            _actualizar_saldos(db, reverso, 1)
+            a.asiento_reverso_id = reverso.id
 
-    a.estado = "anulado"
-    a.anulado_por = user.nombre
-    db.commit()
+        a.estado = "anulado"
+        a.anulado_por = user.nombre
+        _audit(db, user, "ESTADO", "ASIENTO", numero, f"Anulado — {motivo}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error anulando asiento %s", numero)
+        raise HTTPException(500, "Error al anular asiento")
     return {"ok": True, "msg": f"Asiento {numero} anulado"}
 
 
@@ -1498,17 +1518,22 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
             lineas.append({"cuenta_id": cta_ret.id, "debe": 0, "haber": retencion,
                             "descripcion_linea": "Retención ISR por pagar"})
 
-    asiento = None
-    if lineas:
-        asiento = _crear_asiento_auto(
-            db, data.fecha_factura, "CXP", numero,
-            f"Factura proveedor {prov.nombre} — {numero}",
-            lineas, user.nombre
-        )
-        if asiento:
-            cxp.asiento_id = asiento.id
-
-    db.commit()
+    try:
+        asiento = None
+        if lineas:
+            asiento = _crear_asiento_auto(
+                db, data.fecha_factura, "CXP", numero,
+                f"Factura proveedor {prov.nombre} — {numero}",
+                lineas, user.nombre
+            )
+            if asiento:
+                cxp.asiento_id = asiento.id
+        _audit(db, user, "CREAR", "CXP", numero, f"Factura {prov.nombre} total={total}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error creando CxP %s", numero)
+        raise HTTPException(500, "Error al crear cuenta por pagar")
     db.refresh(cxp)
     return {"ok": True, "numero": numero, "id": cxp.id,
             "asiento": asiento.numero if asiento else None}
@@ -1559,27 +1584,32 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
             cb.saldo_segun_libro = Decimal(str(cb.saldo_segun_libro or 0)) - monto
             cuenta_banco_contable_id = cb.cuenta_contable_id
 
-    asiento = None
-    if r_pago and monto > 0:
-        cta_haber = cuenta_banco_contable_id or r_pago[1]
-        prov = db.query(models.Proveedor).get(cxp.proveedor_id) if cxp.proveedor_id else None
-        prov_nombre = prov.nombre if prov else "Proveedor"
-        asiento = _crear_asiento_auto(
-            db, data.fecha, "PAG", numero,
-            f"Pago a {prov_nombre} — {numero}",
-            [
-                {"cuenta_id": r_pago[0], "debe": monto, "haber": 0,
-                 "tercero_id": str(cxp.proveedor_id),
-                 "descripcion_linea": f"Pago CxP {cxp.numero}"},
-                {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
-                 "descripcion_linea": f"Salida banco — {data.metodo_pago or 'transferencia'}"},
-            ],
-            user.nombre
-        )
-        if asiento:
-            pago.asiento_id = asiento.id
-
-    db.commit()
+    try:
+        asiento = None
+        if r_pago and monto > 0:
+            cta_haber = cuenta_banco_contable_id or r_pago[1]
+            prov = db.query(models.Proveedor).get(cxp.proveedor_id) if cxp.proveedor_id else None
+            prov_nombre = prov.nombre if prov else "Proveedor"
+            asiento = _crear_asiento_auto(
+                db, data.fecha, "PAG", numero,
+                f"Pago a {prov_nombre} — {numero}",
+                [
+                    {"cuenta_id": r_pago[0], "debe": monto, "haber": 0,
+                     "tercero_id": str(cxp.proveedor_id),
+                     "descripcion_linea": f"Pago CxP {cxp.numero}"},
+                    {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
+                     "descripcion_linea": f"Salida banco — {data.metodo_pago or 'transferencia'}"},
+                ],
+                user.nombre
+            )
+            if asiento:
+                pago.asiento_id = asiento.id
+        _audit(db, user, "CREAR", "PAGO", numero, f"Pago CxP {cxp.numero} monto={monto}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error registrando pago %s", numero)
+        raise HTTPException(500, "Error al registrar pago")
     db.refresh(pago)
     return {"ok": True, "numero": numero, "id": pago.id,
             "saldo_restante": float(cxp.saldo_pendiente),
@@ -1676,17 +1706,22 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
         lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis,
                         "descripcion_linea": "ITBIS por pagar"})
 
-    asiento = None
-    if lineas:
-        asiento = _crear_asiento_auto(
-            db, data.fecha, "VTA", numero,
-            f"Venta a {cli.nombre} — {numero}",
-            lineas, user.nombre
-        )
-        if asiento:
-            cxc.asiento_id = asiento.id
-
-    db.commit()
+    try:
+        asiento = None
+        if lineas:
+            asiento = _crear_asiento_auto(
+                db, data.fecha, "VTA", numero,
+                f"Venta a {cli.nombre} — {numero}",
+                lineas, user.nombre
+            )
+            if asiento:
+                cxc.asiento_id = asiento.id
+        _audit(db, user, "CREAR", "CXC", numero, f"Venta {cli.nombre} total={total}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error creando CxC %s", numero)
+        raise HTTPException(500, "Error al crear cuenta por cobrar")
     db.refresh(cxc)
     return {"ok": True, "numero": numero, "id": cxc.id,
             "asiento": asiento.numero if asiento else None}
@@ -1737,27 +1772,32 @@ def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
             cb.saldo_segun_libro = Decimal(str(cb.saldo_segun_libro or 0)) + monto
             cuenta_banco_contable_id = cb.cuenta_contable_id
 
-    asiento = None
-    if r_cobro and monto > 0:
-        cta_debe = cuenta_banco_contable_id or r_cobro[0]
-        cli = db.query(models.Cliente).get(cxc.cliente_id) if cxc.cliente_id else None
-        cli_nombre = cli.nombre if cli else "Cliente"
-        asiento = _crear_asiento_auto(
-            db, data.fecha, "COB", numero,
-            f"Cobro de {cli_nombre} — {numero}",
-            [
-                {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
-                 "descripcion_linea": f"Entrada banco — {data.metodo_pago or 'transferencia'}"},
-                {"cuenta_id": r_cobro[1], "debe": 0, "haber": monto,
-                 "tercero_id": str(cxc.cliente_id),
-                 "descripcion_linea": f"Cobro CxC {cxc.numero}"},
-            ],
-            user.nombre
-        )
-        if asiento:
-            cobro.asiento_id = asiento.id
-
-    db.commit()
+    try:
+        asiento = None
+        if r_cobro and monto > 0:
+            cta_debe = cuenta_banco_contable_id or r_cobro[0]
+            cli = db.query(models.Cliente).get(cxc.cliente_id) if cxc.cliente_id else None
+            cli_nombre = cli.nombre if cli else "Cliente"
+            asiento = _crear_asiento_auto(
+                db, data.fecha, "COB", numero,
+                f"Cobro de {cli_nombre} — {numero}",
+                [
+                    {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
+                     "descripcion_linea": f"Entrada banco — {data.metodo_pago or 'transferencia'}"},
+                    {"cuenta_id": r_cobro[1], "debe": 0, "haber": monto,
+                     "tercero_id": str(cxc.cliente_id),
+                     "descripcion_linea": f"Cobro CxC {cxc.numero}"},
+                ],
+                user.nombre
+            )
+            if asiento:
+                cobro.asiento_id = asiento.id
+        _audit(db, user, "CREAR", "COBRO", numero, f"Cobro CxC {cxc.numero} monto={monto}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error registrando cobro %s", numero)
+        raise HTTPException(500, "Error al registrar cobro")
     db.refresh(cobro)
     return {"ok": True, "numero": numero, "id": cobro.id,
             "saldo_restante": float(cxc.saldo_pendiente),
@@ -2720,9 +2760,11 @@ def aprobar_registro_presupuestario(id: int, db: Session = Depends(get_db),
                         setattr(pres, mk, float(getattr(ln, mk) or 0))
                     db.add(pres)
         reg.estado = "aprobado"
+        _audit(db, user, "ESTADO", "REG_PRESUP", reg.numero, f"Aprobado — {reg.tipo} año {reg.anio}")
         db.commit()
     except Exception:
         db.rollback()
+        logger.exception("Error aprobando registro presupuestario %s", id)
         raise HTTPException(500, "Error al aprobar, operación revertida")
     return {"ok": True, "lineas_procesadas": len(reg.lineas)}
 
@@ -3604,7 +3646,13 @@ def procesar_nomina(data: schemas.NominaProcesar, db: Session = Depends(get_db),
         if asiento:
             periodo.asiento_id = asiento.id
 
-    db.commit()
+    try:
+        _audit(db, user, "CREAR", "NOMINA", str(periodo.id), f"Nómina {data.fecha_inicio}—{data.fecha_fin} bruto={total_bruto}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error procesando nómina")
+        raise HTTPException(500, "Error al procesar nómina")
     db.refresh(periodo)
     return {
         "ok": True, "id": periodo.id,

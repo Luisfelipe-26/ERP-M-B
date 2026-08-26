@@ -158,7 +158,7 @@ def seed_perfiles():
             "riego": "full", "nomina": "read",
         }),
         ("Operador", "Acceso básico operativo", {
-            "ordenes": "write", "inventario": "read", "campos": "read",
+            "ordenes": "full", "inventario": "read", "campos": "read",
             "trabajadores": "read", "productos": "read",
         }),
     ]
@@ -296,3 +296,13 @@ app.include_router(admin.router)
 @app.get("/")
 def root():
     return {"message": "ERP Finca CORVUS API v1.0", "docs": "/docs"}
+
+
+@app.get("/health")
+def health_check():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected"}
+    except Exception as e:
+        return {"status": "degraded", "database": str(e)}
