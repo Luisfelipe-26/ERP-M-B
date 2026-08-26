@@ -2608,6 +2608,9 @@ def obtener_config_presupuesto(db: Session = Depends(get_db),
         "control_habilitado": cfg.control_habilitado,
         "distribucion_default": cfg.distribucion_default,
         "requiere_aprobacion": cfg.requiere_aprobacion,
+        "dim_campo": cfg.dim_campo if cfg.dim_campo is not None else True,
+        "dim_unidad_negocio": cfg.dim_unidad_negocio if cfg.dim_unidad_negocio is not None else True,
+        "dim_departamento": cfg.dim_departamento if cfg.dim_departamento is not None else True,
     }
 
 
@@ -2624,6 +2627,9 @@ def actualizar_config_presupuesto(data: schemas.ConfigPresupuestoIn,
     cfg.control_habilitado = data.control_habilitado
     cfg.distribucion_default = data.distribucion_default
     cfg.requiere_aprobacion = data.requiere_aprobacion
+    cfg.dim_campo = data.dim_campo
+    cfg.dim_unidad_negocio = data.dim_unidad_negocio
+    cfg.dim_departamento = data.dim_departamento
     db.commit()
     return {"ok": True}
 

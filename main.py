@@ -105,6 +105,9 @@ def run_migrations():
             distribucion_default VARCHAR(20) DEFAULT 'mensual',
             requiere_aprobacion BOOLEAN DEFAULT TRUE
         )""",
+        "ALTER TABLE config_presupuesto ADD COLUMN IF NOT EXISTS dim_campo BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE config_presupuesto ADD COLUMN IF NOT EXISTS dim_unidad_negocio BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE config_presupuesto ADD COLUMN IF NOT EXISTS dim_departamento BOOLEAN DEFAULT TRUE",
         "CREATE INDEX IF NOT EXISTS ix_registros_presup_anio ON registros_presupuestarios(anio)",
         "CREATE INDEX IF NOT EXISTS ix_lineas_reg_presup_registro ON lineas_registro_presupuestario(registro_id)",
     ]

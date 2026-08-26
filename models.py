@@ -1001,6 +1001,9 @@ class ConfigPresupuesto(Base):
     control_habilitado = Column(Boolean, default=True)
     distribucion_default = Column(String(20), default="mensual")
     requiere_aprobacion = Column(Boolean, default=True)
+    dim_campo = Column(Boolean, default=True)
+    dim_unidad_negocio = Column(Boolean, default=True)
+    dim_departamento = Column(Boolean, default=True)
 
 
 class RegistroPresupuestario(Base):

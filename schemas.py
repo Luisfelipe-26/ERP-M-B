@@ -786,6 +786,9 @@ class ConfigPresupuestoIn(BaseModel):
     control_habilitado: bool = True
     distribucion_default: str = "mensual"
     requiere_aprobacion: bool = True
+    dim_campo: bool = True
+    dim_unidad_negocio: bool = True
+    dim_departamento: bool = True
 
 # Dimensiones Financieras
 class UnidadNegocioCreate(BaseModel):
