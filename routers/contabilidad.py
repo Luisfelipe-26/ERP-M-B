@@ -2157,13 +2157,42 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
     periodos = {p.mes: p for p in db.query(models.PeriodoContable).filter(
         models.PeriodoContable.anio == anio).all()}
     periodo_ids = [p.id for p in periodos.values()]
-    saldos_raw = db.query(models.SaldoMensual).filter(
-        models.SaldoMensual.cuenta_id.in_(cta_ids),
-        models.SaldoMensual.periodo_id.in_(periodo_ids)
-    ).all() if periodo_ids else []
-    saldos = {}
-    for sm in saldos_raw:
-        saldos[(sm.cuenta_id, sm.periodo_id)] = sm
+
+    has_dim_filter = campo_id or unidad_negocio_id or departamento_id
+
+    if has_dim_filter and periodo_ids:
+        from sqlalchemy import extract
+        lq = db.query(
+            models.LineaAsiento.cuenta_id,
+            extract("month", models.AsientoContable.fecha).label("mes"),
+            func.coalesce(func.sum(models.LineaAsiento.debe), 0).label("total_debe"),
+            func.coalesce(func.sum(models.LineaAsiento.haber), 0).label("total_haber"),
+        ).join(
+            models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
+        ).filter(
+            models.LineaAsiento.cuenta_id.in_(cta_ids),
+            models.AsientoContable.estado == "contabilizado",
+            extract("year", models.AsientoContable.fecha) == anio,
+        )
+        if campo_id:
+            lq = lq.filter(models.LineaAsiento.campo_id == campo_id)
+        if unidad_negocio_id:
+            lq = lq.filter(models.LineaAsiento.unidad_negocio_id == unidad_negocio_id)
+        if departamento_id:
+            lq = lq.filter(models.LineaAsiento.departamento_id == departamento_id)
+        lq = lq.group_by(models.LineaAsiento.cuenta_id, extract("month", models.AsientoContable.fecha))
+        reales_dim = {}
+        for row in lq.all():
+            reales_dim[(row.cuenta_id, int(row.mes))] = (float(row.total_debe), float(row.total_haber))
+    else:
+        reales_dim = None
+        saldos_raw = db.query(models.SaldoMensual).filter(
+            models.SaldoMensual.cuenta_id.in_(cta_ids),
+            models.SaldoMensual.periodo_id.in_(periodo_ids)
+        ).all() if periodo_ids else []
+        saldos = {}
+        for sm in saldos_raw:
+            saldos[(sm.cuenta_id, sm.periodo_id)] = sm
 
     meses_keys = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
                   "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
@@ -2175,6 +2204,8 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
             "cuenta_codigo": cta.codigo if cta else None,
             "cuenta_nombre": cta.nombre if cta else None,
             "campo_id": p.campo_id,
+            "unidad_negocio_id": p.unidad_negocio_id,
+            "departamento_id": p.departamento_id,
             "meses": [],
             "total_presupuesto": 0, "total_real": 0,
         }
@@ -2182,13 +2213,19 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
         for i, mk in enumerate(meses_keys, 1):
             pres = float(getattr(p, mk) or 0)
             real = 0.0
-            per = periodos.get(i)
-            if per:
-                sm = saldos.get((p.cuenta_id, per.id))
-                if sm:
-                    real = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
-                    if nat == "acreedora":
-                        real = -real
+            if reales_dim is not None:
+                debe, haber = reales_dim.get((p.cuenta_id, i), (0.0, 0.0))
+                real = debe - haber
+                if nat == "acreedora":
+                    real = -real
+            else:
+                per = periodos.get(i)
+                if per:
+                    sm = saldos.get((p.cuenta_id, per.id))
+                    if sm:
+                        real = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
+                        if nat == "acreedora":
+                            real = -real
             desv = round(real - pres, 2) if pres else 0
             row["meses"].append({"mes": i, "presupuesto": pres, "real": round(real, 2), "desviacion": desv})
             row["total_presupuesto"] += pres
