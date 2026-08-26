@@ -684,10 +684,16 @@ def cerrar_periodo(id: int, db: Session = Depends(get_db), user=Depends(require_
                     lineas_cierre, user.nombre
                 )
 
-    p.estado = "cerrado"
-    p.cerrado_por = user.nombre
-    p.cerrado_en = datetime.utcnow()
-    db.commit()
+    try:
+        p.estado = "cerrado"
+        p.cerrado_por = user.nombre
+        p.cerrado_en = datetime.utcnow()
+        _audit(db, user, "ESTADO", "PERIODO", p.nombre, f"Cerrado — resultado={resultado}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error cerrando periodo %s", id)
+        raise HTTPException(500, "Error al cerrar período")
     return {"ok": True, "msg": f"Periodo {p.nombre} cerrado",
             "asiento_cierre": asiento_cierre.numero if asiento_cierre else None}
 
