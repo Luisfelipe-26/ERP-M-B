@@ -719,6 +719,7 @@ def listar_asientos(
     estado: str = None, origen: str = None,
     diario_id: int = None,
     desde: date = None, hasta: date = None,
+    search: str = None,
     skip: int = 0, limit: int = 50,
     db: Session = Depends(get_db), user=Depends(get_current_user)
 ):
@@ -733,6 +734,12 @@ def listar_asientos(
         q = q.filter(models.AsientoContable.fecha >= desde)
     if hasta:
         q = q.filter(models.AsientoContable.fecha <= hasta)
+    if search:
+        term = f"%{search}%"
+        q = q.filter(
+            (models.AsientoContable.numero.ilike(term))
+            | (models.AsientoContable.descripcion.ilike(term))
+        )
     total = q.count()
     asientos = q.options(joinedload(models.AsientoContable.diario)).order_by(
         models.AsientoContable.fecha.desc(), models.AsientoContable.id.desc()
