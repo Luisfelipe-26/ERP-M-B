@@ -3306,6 +3306,13 @@ def dashboard_financiero(db: Session = Depends(get_db), user=Depends(get_current
     meses_label = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
     tendencia = [{"mes": meses_label[i], "ingresos": ingresos_mes[i], "gastos": gastos_mes[i], "utilidad": round(ingresos_mes[i] - gastos_mes[i], 2)} for i in range(12)]
 
+    per_actual = db.query(models.PeriodoContable).filter(
+        models.PeriodoContable.anio == hoy.year, models.PeriodoContable.mes == hoy.month
+    ).first()
+    asientos_borrador = db.query(sqlfunc.count(models.AsientoContable.id)).filter(
+        models.AsientoContable.estado == "borrador"
+    ).scalar() or 0
+
     return {
         "saldo_bancos": saldo_bancos,
         "total_cxc": total_cxc, "cxc_vencidas": cxc_vencidas, "num_cxc": len(cxc_pend),
@@ -3314,6 +3321,9 @@ def dashboard_financiero(db: Session = Depends(get_db), user=Depends(get_current
         "gastos_anio": round(sum(gastos_mes), 2),
         "utilidad_anio": round(sum(ingresos_mes) - sum(gastos_mes), 2),
         "tendencia": tendencia,
+        "periodo_actual": per_actual.nombre if per_actual else None,
+        "periodo_estado": per_actual.estado if per_actual else None,
+        "asientos_borrador": asientos_borrador,
     }
 
 
