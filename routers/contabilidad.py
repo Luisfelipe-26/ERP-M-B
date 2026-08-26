@@ -3290,6 +3290,64 @@ def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)
     if old_periods:
         alertas.append({"tipo": "periodo_abierto", "nivel": "info", "titulo": f"{len(old_periods)} período(s) contable(s) sin cerrar", "detalle": ", ".join(f"{p.mes:02d}/{p.anio}" for p in old_periods[:3]), "accion": "/contabilidad"})
 
+    cfg_pres = db.query(models.ConfigPresupuesto).first()
+    if cfg_pres and cfg_pres.control_habilitado:
+        anio_actual = hoy.year
+        mes_actual = hoy.month
+        mk_actual = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may",
+                      "monto_jun", "monto_jul", "monto_ago", "monto_sep", "monto_oct",
+                      "monto_nov", "monto_dic"][mes_actual - 1]
+        presupuestos = db.query(models.Presupuesto).filter(
+            models.Presupuesto.anio == anio_actual).all()
+        cta_ids = {p.cuenta_id for p in presupuestos}
+        if cta_ids:
+            ctas = {c.id: c for c in db.query(models.CuentaContable).filter(
+                models.CuentaContable.id.in_(cta_ids)).all()}
+            reales = {}
+            for row in db.query(
+                models.LineaAsiento.cuenta_id,
+                sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.debe), 0).label("t")
+            ).join(models.AsientoContable,
+                   models.LineaAsiento.asiento_id == models.AsientoContable.id
+            ).filter(
+                models.LineaAsiento.cuenta_id.in_(cta_ids),
+                models.AsientoContable.estado == "contabilizado",
+                extract("year", models.AsientoContable.fecha) == anio_actual,
+                extract("month", models.AsientoContable.fecha) == mes_actual,
+            ).group_by(models.LineaAsiento.cuenta_id).all():
+                reales[row.cuenta_id] = float(row.t)
+
+            excedidas = []
+            en_alerta = []
+            for p in presupuestos:
+                pres_mes = float(getattr(p, mk_actual) or 0)
+                if pres_mes <= 0:
+                    continue
+                cta = ctas.get(p.cuenta_id)
+                if not cta or (cta.codigo or "")[0:1] not in ("4", "5", "6"):
+                    continue
+                real = reales.get(p.cuenta_id, 0)
+                pct = (real / pres_mes) * 100
+                if pct >= (cfg_pres.umbral_bloqueo or 100):
+                    excedidas.append(f"{cta.codigo} {cta.nombre} ({pct:.0f}%)")
+                elif pct >= (cfg_pres.umbral_alerta or 85):
+                    en_alerta.append(f"{cta.codigo} {cta.nombre} ({pct:.0f}%)")
+
+            if excedidas:
+                alertas.append({
+                    "tipo": "presupuesto_excedido", "nivel": "danger",
+                    "titulo": f"{len(excedidas)} cuenta(s) exceden presupuesto del mes",
+                    "detalle": "; ".join(excedidas[:5]),
+                    "accion": "/presupuesto",
+                })
+            if en_alerta:
+                alertas.append({
+                    "tipo": "presupuesto_alerta", "nivel": "warning",
+                    "titulo": f"{len(en_alerta)} cuenta(s) cerca del límite presupuestario",
+                    "detalle": "; ".join(en_alerta[:5]),
+                    "accion": "/presupuesto",
+                })
+
     return {"alertas": alertas, "total": len(alertas)}
 
 
