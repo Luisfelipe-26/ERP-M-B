@@ -62,6 +62,101 @@ def _resolve_diario_id(db: Session, origen: str):
     return d.id if d else None
 
 
+# ── Control presupuestario ──────────────────────────────────────────────────
+
+_CLASES_PRESUPUESTABLES = {"4", "5", "6"}
+
+
+def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
+    """Check budget availability for expense/cost/revenue lines.
+    Returns dict with 'alertas' (warnings) and 'bloqueado' (bool).
+    Raises HTTPException(409) when control is enabled and budget is exceeded.
+    """
+    cfg = db.query(models.ConfigPresupuesto).first()
+    if not cfg or not cfg.control_habilitado:
+        return {"alertas": [], "bloqueado": False}
+
+    anio = fecha.year
+    mes_idx = fecha.month - 1
+    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may",
+           "monto_jun", "monto_jul", "monto_ago", "monto_sep", "monto_oct",
+           "monto_nov", "monto_dic"][mes_idx]
+
+    alertas = []
+    bloqueado = False
+
+    for l in lineas_data:
+        cuenta = db.query(models.CuentaContable).get(l.get("cuenta_id") or getattr(l, "cuenta_id", None))
+        if not cuenta:
+            continue
+        clase = (cuenta.codigo or "")[0:1]
+        if clase not in _CLASES_PRESUPUESTABLES:
+            continue
+
+        cta_id = cuenta.id
+        monto_linea = float(l.get("debe", 0) or getattr(l, "debe", 0) or 0)
+        if monto_linea <= 0:
+            continue
+
+        campo_id = l.get("campo_id") or getattr(l, "campo_id", None)
+        un_id = l.get("unidad_negocio_id") or getattr(l, "unidad_negocio_id", None)
+        dep_id = l.get("departamento_id") or getattr(l, "departamento_id", None)
+
+        pq = db.query(models.Presupuesto).filter(
+            models.Presupuesto.anio == anio,
+            models.Presupuesto.cuenta_id == cta_id,
+        )
+        if cfg.dim_campo and campo_id:
+            pq = pq.filter(models.Presupuesto.campo_id == campo_id)
+        if cfg.dim_unidad_negocio and un_id:
+            pq = pq.filter(models.Presupuesto.unidad_negocio_id == un_id)
+        if cfg.dim_departamento and dep_id:
+            pq = pq.filter(models.Presupuesto.departamento_id == dep_id)
+
+        pres = pq.first()
+        if not pres:
+            continue
+
+        presupuesto_mes = float(getattr(pres, mk) or 0)
+        if presupuesto_mes <= 0:
+            continue
+
+        lq = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.debe), 0)
+        ).join(
+            models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
+        ).filter(
+            models.LineaAsiento.cuenta_id == cta_id,
+            models.AsientoContable.estado == "contabilizado",
+            extract("year", models.AsientoContable.fecha) == anio,
+            extract("month", models.AsientoContable.fecha) == fecha.month,
+        )
+        if cfg.dim_campo and campo_id:
+            lq = lq.filter(models.LineaAsiento.campo_id == campo_id)
+        if cfg.dim_unidad_negocio and un_id:
+            lq = lq.filter(models.LineaAsiento.unidad_negocio_id == un_id)
+        if cfg.dim_departamento and dep_id:
+            lq = lq.filter(models.LineaAsiento.departamento_id == dep_id)
+
+        real_actual = float(lq.scalar() or 0)
+        real_proyectado = real_actual + monto_linea
+        pct = (real_proyectado / presupuesto_mes) * 100
+
+        if pct >= (cfg.umbral_bloqueo or 100):
+            bloqueado = True
+            alertas.append(
+                f"{cuenta.codigo} {cuenta.nombre}: {pct:.0f}% del presupuesto "
+                f"(RD$ {real_proyectado:,.2f} / {presupuesto_mes:,.2f}) — EXCEDIDO"
+            )
+        elif pct >= (cfg.umbral_alerta or 85):
+            alertas.append(
+                f"{cuenta.codigo} {cuenta.nombre}: {pct:.0f}% del presupuesto "
+                f"(RD$ {real_proyectado:,.2f} / {presupuesto_mes:,.2f}) — ALERTA"
+            )
+
+    return {"alertas": alertas, "bloqueado": bloqueado}
+
+
 def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: str,
                         descripcion: str, lineas_data: list, user_nombre: str,
                         origen_id: int = None):
@@ -77,6 +172,10 @@ def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: st
     lineas_data = [l for l in lineas_data
                    if Decimal(str(l.get("debe") or 0)) > 0 or Decimal(str(l.get("haber") or 0)) > 0]
     if not lineas_data:
+        return None
+
+    ctrl = _verificar_presupuesto(db, lineas_data, fecha)
+    if ctrl["bloqueado"]:
         return None
 
     total_debe = sum(Decimal(str(l.get("debe") or 0)) for l in lineas_data)
@@ -724,13 +823,26 @@ def contabilizar_asiento(numero: str, db: Session = Depends(get_db), user=Depend
     if periodo and periodo.estado == "cerrado":
         raise HTTPException(400, f"El periodo {periodo.nombre} está cerrado")
 
+    ctrl = _verificar_presupuesto(
+        db,
+        [{"cuenta_id": l.cuenta_id, "debe": l.debe, "campo_id": l.campo_id,
+          "unidad_negocio_id": l.unidad_negocio_id, "departamento_id": l.departamento_id}
+         for l in a.lineas],
+        a.fecha,
+    )
+    if ctrl["bloqueado"]:
+        raise HTTPException(409, "Presupuesto excedido: " + "; ".join(ctrl["alertas"]))
+
     a.estado = "contabilizado"
     a.contabilizado_por = user.nombre
     a.contabilizado_en = datetime.utcnow()
 
     _actualizar_saldos(db, a, 1)
     db.commit()
-    return {"ok": True, "msg": f"Asiento {numero} contabilizado"}
+    resp = {"ok": True, "msg": f"Asiento {numero} contabilizado"}
+    if ctrl["alertas"]:
+        resp["alertas_presupuesto"] = ctrl["alertas"]
+    return resp
 
 
 @router.post("/asientos/{numero}/anular")
@@ -2669,6 +2781,18 @@ def actualizar_config_presupuesto(data: schemas.ConfigPresupuestoIn,
     cfg.dim_departamento = data.dim_departamento
     db.commit()
     return {"ok": True}
+
+
+@router.post("/presupuesto/verificar-disponibilidad")
+def verificar_disponibilidad(data: schemas.VerificarPresupuestoIn,
+                             db: Session = Depends(get_db),
+                             user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    lineas = [{"cuenta_id": l.cuenta_id, "debe": l.monto,
+               "campo_id": l.campo_id, "unidad_negocio_id": l.unidad_negocio_id,
+               "departamento_id": l.departamento_id} for l in data.lineas]
+    return _verificar_presupuesto(db, lineas, data.fecha)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

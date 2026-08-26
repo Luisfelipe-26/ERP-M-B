@@ -790,6 +790,17 @@ class ConfigPresupuestoIn(BaseModel):
     dim_unidad_negocio: bool = True
     dim_departamento: bool = True
 
+class LineaVerificarPresupuesto(BaseModel):
+    cuenta_id: int
+    monto: float
+    campo_id: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+
+class VerificarPresupuestoIn(BaseModel):
+    fecha: date
+    lineas: List[LineaVerificarPresupuesto]
+
 # Dimensiones Financieras
 class UnidadNegocioCreate(BaseModel):
     codigo: str
