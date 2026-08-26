@@ -590,8 +590,23 @@ def listar_periodos(anio: int = None, db: Session = Depends(get_db),
     q = db.query(models.PeriodoContable)
     if anio:
         q = q.filter(models.PeriodoContable.anio == anio)
-    return [schemas.PeriodoContableOut.model_validate(p)
-            for p in q.order_by(models.PeriodoContable.anio.desc(), models.PeriodoContable.mes).all()]
+    periodos = q.order_by(models.PeriodoContable.anio.desc(), models.PeriodoContable.mes).all()
+    periodo_ids = [p.id for p in periodos]
+    counts = {}
+    if periodo_ids:
+        rows = db.query(
+            models.AsientoContable.periodo_id,
+            sqlfunc.count(models.AsientoContable.id),
+        ).filter(models.AsientoContable.periodo_id.in_(periodo_ids)).group_by(
+            models.AsientoContable.periodo_id
+        ).all()
+        counts = {r[0]: r[1] for r in rows}
+    result = []
+    for p in periodos:
+        d = schemas.PeriodoContableOut.model_validate(p).model_dump()
+        d["asientos_count"] = counts.get(p.id, 0)
+        result.append(d)
+    return result
 
 
 @router.post("/periodos/generar")
@@ -3262,6 +3277,26 @@ def actualizar_conciliacion(id: int, data: dict, db: Session = Depends(get_db), 
     return {"msg": "Conciliación actualizada"}
 
 
+@router.delete("/conciliaciones/{id}")
+def eliminar_conciliacion(id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    c = db.query(models.ConciliacionBancaria).get(id)
+    if not c:
+        raise HTTPException(404, "No encontrada")
+    if c.estado == "conciliada":
+        raise HTTPException(400, "No se puede eliminar una conciliación ya cerrada")
+    try:
+        db.query(models.ConciliacionPartida).filter(
+            models.ConciliacionPartida.conciliacion_id == id).delete()
+        db.delete(c)
+        _audit(db, user, "ELIMINAR", "CONCILIACION", str(id), f"Eliminada")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error eliminando conciliación %s", id)
+        raise HTTPException(500, "Error al eliminar conciliación")
+    return {"msg": "Conciliación eliminada"}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD FINANCIERO + NOTIFICACIONES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3952,8 +3987,19 @@ def _get_documento_origen(db: Session, origen: str, referencia_id: str, origen_i
 @router.get("/diarios")
 def listar_diarios(db: Session = Depends(get_db), user=Depends(get_current_user)):
     diarios = db.query(models.DiarioContable).order_by(models.DiarioContable.codigo).all()
+    diario_ids = [d.id for d in diarios]
+    counts = {}
+    if diario_ids:
+        rows = db.query(
+            models.AsientoContable.diario_id,
+            sqlfunc.count(models.AsientoContable.id),
+        ).filter(models.AsientoContable.diario_id.in_(diario_ids)).group_by(
+            models.AsientoContable.diario_id
+        ).all()
+        counts = {r[0]: r[1] for r in rows}
     return [{"id": d.id, "codigo": d.codigo, "nombre": d.nombre,
-             "tipo": d.tipo, "cuenta_default_id": d.cuenta_default_id, "activo": d.activo}
+             "tipo": d.tipo, "cuenta_default_id": d.cuenta_default_id, "activo": d.activo,
+             "asientos_count": counts.get(d.id, 0)}
             for d in diarios]
 
 
