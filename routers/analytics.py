@@ -183,10 +183,12 @@ def eficiencia_insumos(
 
 @router.get("/costo-por-kg")
 def costo_por_kg(
-    temporada: int = 2026,
+    temporada: Optional[int] = None,
     db: Session = Depends(get_db),
     _=Depends(auth.get_current_user),
 ):
+    if temporada is None:
+        temporada = datetime.now().year
     campos_list = db.query(models.Campo).filter(models.Campo.activo == True).all()
     industry_avg = 0.55  # USD/kg benchmark
 
@@ -267,9 +269,13 @@ def costo_por_kg(
 
 @router.get("/balance-hidrico-resumen")
 def balance_hidrico_resumen(
+    ano: Optional[int] = None,
     db: Session = Depends(get_db),
     _=Depends(auth.get_current_user),
 ):
+    if ano is None:
+        ano = datetime.now().year
+
     q = (
         db.query(
             models.DailyWaterBalance.campo_id,
@@ -279,6 +285,7 @@ def balance_hidrico_resumen(
             func.coalesce(func.sum(models.DailyWaterBalance.irrigation_mm), 0).label("total_irrigation"),
             func.coalesce(func.sum(models.DailyWaterBalance.balance_mm), 0).label("net_balance"),
         )
+        .filter(extract("year", models.DailyWaterBalance.fecha) == ano)
         .group_by(models.DailyWaterBalance.campo_id)
     )
 
@@ -431,12 +438,13 @@ def presion_plagas(
 
 @router.get("/comparativo-campos")
 def comparativo_campos(
+    ano: Optional[int] = None,
     db: Session = Depends(get_db),
     _=Depends(auth.get_current_user),
 ):
     campos_list = db.query(models.Campo).filter(models.Campo.activo == True).all()
-    now = datetime.now()
-    ano = now.year
+    if ano is None:
+        ano = datetime.now().year
 
     results = []
     for campo in campos_list:
