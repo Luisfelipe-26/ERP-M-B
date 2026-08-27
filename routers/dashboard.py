@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, extract, desc, case, and_, Date
+from sqlalchemy import func, extract, desc, case, and_, Date, String as SaString
 from database import get_db
 import models, schemas, auth
 from datetime import datetime, timedelta, date
@@ -241,6 +241,62 @@ def nomina_detalle_trabajador(
             "costo_hora": float(r[0].costo_hora or 0), "costo_mo": float(r[0].costo_mo or 0),
             "campo_id": r[1], "actividad_id": r[2], "supervisor": r[3],
             "estado_ot": r[4], "fecha_ot": r[5].isoformat() if r[5] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/nomina-horas-diarias")
+def nomina_horas_diarias(
+    desde: str = Query(...), hasta: str = Query(...),
+    trabajador: str = Query(None),
+    db: Session = Depends(get_db), _=Depends(auth.get_current_user)
+):
+    q = db.query(
+        func.cast(models.OTManoObra.fecha, Date).label("dia"),
+        models.OTManoObra.trabajador_id,
+        models.Trabajador.nombre,
+        models.Trabajador.cargo,
+        func.coalesce(func.sum(models.OTManoObra.horas_netas), 0).label("horas"),
+        func.coalesce(func.sum(models.OTManoObra.costo_mo), 0).label("costo"),
+        func.count(models.OTManoObra.id).label("jornadas"),
+        func.string_agg(
+            func.cast(models.OTManoObra.ot_id, SaString),
+            func.cast(',', SaString)
+        ).label("ots"),
+    ).join(
+        models.Trabajador,
+        models.OTManoObra.trabajador_id == models.Trabajador.id_trab
+    ).filter(
+        models.OTManoObra.fecha.isnot(None),
+        func.cast(models.OTManoObra.fecha, Date) >= desde,
+        func.cast(models.OTManoObra.fecha, Date) <= hasta,
+    )
+
+    if trabajador:
+        q = q.filter(
+            models.Trabajador.nombre.ilike(f"%{trabajador}%") |
+            models.Trabajador.id_trab.ilike(f"%{trabajador}%")
+        )
+
+    rows = q.group_by(
+        func.cast(models.OTManoObra.fecha, Date),
+        models.OTManoObra.trabajador_id,
+        models.Trabajador.nombre,
+        models.Trabajador.cargo,
+    ).order_by(
+        func.cast(models.OTManoObra.fecha, Date).desc(),
+        models.Trabajador.nombre,
+    ).all()
+
+    return [
+        {
+            "fecha": str(r[0]),
+            "id_trab": r[1], "nombre": r[2], "cargo": r[3],
+            "horas": round(float(r[4]), 2),
+            "costo": round(float(r[5]), 2),
+            "jornadas": int(r[6]),
+            "ots": r[7] or "",
         }
         for r in rows
     ]
