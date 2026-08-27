@@ -609,3 +609,139 @@ def tendencia_costos(
         })
 
     return {"meses": meses, "tendencia": results}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. Rendimiento por hectárea (actividades + insumos)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/rendimiento-por-ha")
+def rendimiento_por_ha(
+    ano: Optional[int] = None,
+    mes: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _=Depends(auth.get_current_user),
+):
+    if ano is None:
+        ano = datetime.now().year
+
+    campos_list = db.query(models.Campo).filter(models.Campo.activo == True).all()
+    campos_map = {c.id_campo: {"nombre": c.nombre, "area_ha": c.area_ha or 1} for c in campos_list}
+    actividades_map = {a.id_act: a.actividad for a in db.query(models.Actividad).all()}
+
+    # Date filters for OTs
+    date_filters = [
+        models.OrdenTrabajo.fecha_ejecucion.isnot(None),
+        extract("year", models.OrdenTrabajo.fecha_ejecucion) == ano,
+    ]
+    if mes:
+        date_filters.append(extract("month", models.OrdenTrabajo.fecha_ejecucion) == mes)
+
+    # ── Query 1: Costo por actividad por campo ──
+    q_act = (
+        db.query(
+            models.OrdenTrabajo.campo_id,
+            models.OrdenTrabajo.actividad_id,
+            func.coalesce(func.sum(models.OrdenTrabajo.costo_mano_obra), 0).label("mo"),
+            func.coalesce(func.sum(models.OrdenTrabajo.costo_insumos), 0).label("ins"),
+            func.coalesce(func.sum(models.OrdenTrabajo.costo_equipo), 0).label("eq"),
+            func.coalesce(func.sum(models.OrdenTrabajo.costo_total), 0).label("total"),
+            func.count(models.OrdenTrabajo.id).label("num_ots"),
+        )
+        .filter(*date_filters)
+        .group_by(models.OrdenTrabajo.campo_id, models.OrdenTrabajo.actividad_id)
+    )
+
+    actividades_rows = []
+    for r in q_act.all():
+        area = campos_map.get(r.campo_id, {}).get("area_ha", 1)
+        total = float(r.total or 0)
+        actividades_rows.append({
+            "campo_id": r.campo_id,
+            "campo": campos_map.get(r.campo_id, {}).get("nombre", r.campo_id),
+            "area_ha": area,
+            "actividad_id": r.actividad_id,
+            "actividad": actividades_map.get(r.actividad_id, r.actividad_id),
+            "costo_mo": round(float(r.mo), 2),
+            "costo_insumos": round(float(r.ins), 2),
+            "costo_equipo": round(float(r.eq), 2),
+            "costo_total": round(total, 2),
+            "costo_total_ha": round(total / area, 2) if area > 0 else 0,
+            "costo_mo_ha": round(float(r.mo) / area, 2) if area > 0 else 0,
+            "costo_insumos_ha": round(float(r.ins) / area, 2) if area > 0 else 0,
+            "num_ots": int(r.num_ots),
+        })
+
+    actividades_rows.sort(key=lambda x: x["costo_total_ha"], reverse=True)
+
+    # ── Query 2: Insumos por campo ──
+    q_ins = (
+        db.query(
+            models.OrdenTrabajo.campo_id,
+            models.OTDetalle.producto_id,
+            models.Producto.producto.label("nombre_producto"),
+            models.Producto.unidad,
+            func.coalesce(func.sum(models.OTDetalle.cantidad_usada), 0).label("qty"),
+            func.coalesce(func.sum(models.OTDetalle.costo_real), 0).label("costo"),
+            func.count(distinct(models.OTDetalle.ot_id)).label("num_apps"),
+        )
+        .join(models.OrdenTrabajo, models.OTDetalle.ot_id == models.OrdenTrabajo.ot_id)
+        .join(models.Producto, models.OTDetalle.producto_id == models.Producto.id_prod)
+        .filter(*date_filters)
+        .group_by(
+            models.OrdenTrabajo.campo_id,
+            models.OTDetalle.producto_id,
+            models.Producto.producto,
+            models.Producto.unidad,
+        )
+    )
+
+    insumos_rows = []
+    for r in q_ins.all():
+        area = campos_map.get(r.campo_id, {}).get("area_ha", 1)
+        costo = float(r.costo or 0)
+        qty = float(r.qty or 0)
+        insumos_rows.append({
+            "campo_id": r.campo_id,
+            "campo": campos_map.get(r.campo_id, {}).get("nombre", r.campo_id),
+            "area_ha": area,
+            "producto_id": r.producto_id,
+            "producto": r.nombre_producto,
+            "unidad": r.unidad,
+            "cantidad_total": round(qty, 2),
+            "costo_total": round(costo, 2),
+            "cantidad_ha": round(qty / area, 4) if area > 0 else 0,
+            "costo_ha": round(costo / area, 2) if area > 0 else 0,
+            "num_aplicaciones": int(r.num_apps),
+        })
+
+    insumos_rows.sort(key=lambda x: x["costo_ha"], reverse=True)
+
+    # ── Resumen por campo ──
+    resumen = []
+    for cid, info in campos_map.items():
+        acts = [a for a in actividades_rows if a["campo_id"] == cid]
+        ins = [i for i in insumos_rows if i["campo_id"] == cid]
+        total_act = sum(a["costo_total"] for a in acts)
+        total_ins = sum(i["costo_total"] for i in ins)
+        area = info["area_ha"]
+        resumen.append({
+            "campo_id": cid,
+            "campo": info["nombre"],
+            "area_ha": area,
+            "costo_actividades": round(total_act, 2),
+            "costo_actividades_ha": round(total_act / area, 2) if area > 0 else 0,
+            "costo_insumos": round(total_ins, 2),
+            "costo_insumos_ha": round(total_ins / area, 2) if area > 0 else 0,
+            "num_actividades": len(acts),
+            "num_insumos": len(ins),
+        })
+    resumen.sort(key=lambda x: x["costo_actividades_ha"], reverse=True)
+
+    return {
+        "ano": ano,
+        "mes": mes,
+        "por_actividad": actividades_rows,
+        "por_insumo": insumos_rows,
+        "resumen_campos": resumen,
+    }
