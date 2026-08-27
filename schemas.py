@@ -229,6 +229,7 @@ class GRCreate(BaseModel):
     fecha: Optional[datetime] = None
     observacion: Optional[str] = None
     orden_compra_id: Optional[str] = None  # OC-0001
+    almacen_id: Optional[int] = None
 
 class GICreate(BaseModel):
     """Goods Issue — Salida de Mercancía"""
@@ -239,6 +240,7 @@ class GICreate(BaseModel):
     fecha: Optional[datetime] = None
     observacion: Optional[str] = None
     ot_id: Optional[int] = None  # Orden de trabajo vinculada
+    almacen_id: Optional[int] = None
 
 class AjusteCreate(BaseModel):
     """Ajuste de Inventario — Recuento Físico"""
@@ -246,6 +248,7 @@ class AjusteCreate(BaseModel):
     cantidad_contada: float            # lo que se contó físicamente
     observacion: Optional[str] = None
     fecha: Optional[datetime] = None
+    almacen_id: Optional[int] = None
 
 # Dashboard
 class DashboardStats(BaseModel):

@@ -48,6 +48,7 @@ def _mov_out(m: models.MovimientoInventario) -> dict:
         "producto_nombre": m.producto.producto if m.producto else None,
         "producto_unidad": m.producto.unidad if m.producto else None,
         "asiento_id": getattr(m, "asiento_id", None),
+        "almacen_id": m.almacen_id,
     }
 
 
@@ -195,6 +196,7 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
         observacion=data.observacion,
         fecha=data.fecha or datetime.now(),
         usuario_id=current_user.id,
+        almacen_id=data.almacen_id,
     )
     db.add(mov)
 
@@ -303,6 +305,7 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
         observacion=data.observacion,
         fecha=data.fecha or datetime.now(),
         usuario_id=current_user.id,
+        almacen_id=data.almacen_id,
     )
     db.add(mov)
     p.stock_actual = nuevo_stock
@@ -380,6 +383,7 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
         observacion=data.observacion or f"Stock sistema: {p.stock_actual} → Conteo físico: {data.cantidad_contada}",
         fecha=data.fecha or datetime.now(),
         usuario_id=current_user.id,
+        almacen_id=data.almacen_id,
     )
     db.add(mov)
 
@@ -411,8 +415,10 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
                     {"cuenta_id": p.cuenta_inventario_id, "debe": 0, "haber": monto_ajuste,
                      "descripcion_linea": f"Inventario ajuste {num_doc}"},
                 ]
+            fecha_aj = data.fecha or datetime.now()
+            fecha_asiento_aj = fecha_aj.date() if hasattr(fecha_aj, 'date') else fecha_aj
             asiento = _crear_asiento_auto(
-                db, datetime.now().date(), "AJ", num_doc,
+                db, fecha_asiento_aj, "AJ", num_doc,
                 f"Ajuste inventario {num_doc} — {p.producto} (dif: {diferencia:+.2f})",
                 lineas, current_user.nombre, origen_id=mov.id
             )
@@ -524,4 +530,43 @@ def valoracion_inventario(db: Session = Depends(get_db), _=Depends(auth.get_curr
         "bajo_minimo": bajo_minimo,
         "sin_stock": sin_stock,
         "items": items_sorted,
+    }
+
+
+# ─── Alertas de Vencimiento ────────────────────────────────────────────────
+
+@router.get("/alertas-vencimiento")
+def alertas_vencimiento(dias: int = Query(60, ge=1, le=365),
+                        db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
+    from datetime import timedelta
+    hoy = datetime.now().date()
+    limite = hoy + timedelta(days=dias)
+
+    movs = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.tipo_doc == "GR",
+        models.MovimientoInventario.vencimiento != None,
+        models.MovimientoInventario.vencimiento <= limite,
+    ).order_by(models.MovimientoInventario.vencimiento.asc()).all()
+
+    alertas = []
+    for m in movs:
+        venc = m.vencimiento.date() if hasattr(m.vencimiento, 'date') else m.vencimiento
+        dias_restantes = (venc - hoy).days
+        alertas.append({
+            "id": m.id,
+            "producto_id": m.producto_id,
+            "producto_nombre": m.producto.producto if m.producto else None,
+            "lote": m.lote,
+            "vencimiento": venc.isoformat(),
+            "dias_restantes": dias_restantes,
+            "estado": "vencido" if dias_restantes < 0 else "critico" if dias_restantes <= 15 else "proximo",
+            "cantidad": m.cantidad,
+            "num_documento": m.num_documento,
+        })
+    return {
+        "total": len(alertas),
+        "vencidos": len([a for a in alertas if a["estado"] == "vencido"]),
+        "criticos": len([a for a in alertas if a["estado"] == "critico"]),
+        "proximos": len([a for a in alertas if a["estado"] == "proximo"]),
+        "alertas": alertas,
     }
