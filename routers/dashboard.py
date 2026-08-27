@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, extract, desc, case, and_
+from sqlalchemy import func, extract, desc, case, and_, Date
 from database import get_db
 import models, schemas, auth
 from datetime import datetime, timedelta, date
@@ -138,13 +138,13 @@ def costos_por_actividad(
 @router.get("/nomina-mensual")
 def nomina_mensual(
     mes: int = Query(None), ano: int = Query(None),
+    desde: str = Query(None), hasta: str = Query(None),
+    trabajador: str = Query(None),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
     now = datetime.now()
-    filtro_mes = mes or now.month
-    filtro_ano = ano or now.year
 
-    rows = db.query(
+    q = db.query(
         models.Trabajador.id_trab,
         models.Trabajador.nombre,
         models.Trabajador.cargo,
@@ -155,14 +155,36 @@ def nomina_mensual(
         models.Trabajador.id_trab == models.OTManoObra.trabajador_id
     ).filter(
         models.Trabajador.activo == True
-    ).filter(
-        (models.OTManoObra.id.is_(None)) |
-        (
-            models.OTManoObra.fecha.isnot(None) &
-            (extract('month', models.OTManoObra.fecha) == filtro_mes) &
-            (extract('year', models.OTManoObra.fecha) == filtro_ano)
+    )
+
+    if trabajador:
+        q = q.filter(
+            models.Trabajador.nombre.ilike(f"%{trabajador}%") |
+            models.Trabajador.id_trab.ilike(f"%{trabajador}%")
         )
-    ).group_by(
+
+    if desde and hasta:
+        q = q.filter(
+            (models.OTManoObra.id.is_(None)) |
+            (
+                models.OTManoObra.fecha.isnot(None) &
+                (func.cast(models.OTManoObra.fecha, Date) >= desde) &
+                (func.cast(models.OTManoObra.fecha, Date) <= hasta)
+            )
+        )
+    else:
+        filtro_mes = mes or now.month
+        filtro_ano = ano or now.year
+        q = q.filter(
+            (models.OTManoObra.id.is_(None)) |
+            (
+                models.OTManoObra.fecha.isnot(None) &
+                (extract('month', models.OTManoObra.fecha) == filtro_mes) &
+                (extract('year', models.OTManoObra.fecha) == filtro_ano)
+            )
+        )
+
+    rows = q.group_by(
         models.Trabajador.id_trab, models.Trabajador.nombre, models.Trabajador.cargo
     ).all()
 
@@ -175,10 +197,11 @@ def nomina_mensual(
 
 @router.get("/nomina-detalle/{id_trab}")
 def nomina_detalle_trabajador(
-    id_trab: str, mes: int = Query(...), ano: int = Query(...),
+    id_trab: str, mes: int = Query(None), ano: int = Query(None),
+    desde: str = Query(None), hasta: str = Query(None),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
-    rows = db.query(
+    q = db.query(
         models.OTManoObra,
         models.OrdenTrabajo.campo_id,
         models.OrdenTrabajo.actividad_id,
@@ -191,9 +214,20 @@ def nomina_detalle_trabajador(
     ).filter(
         models.OTManoObra.trabajador_id == id_trab,
         models.OTManoObra.fecha.isnot(None),
-        extract('month', models.OTManoObra.fecha) == mes,
-        extract('year', models.OTManoObra.fecha) == ano,
-    ).order_by(models.OTManoObra.fecha.desc()).all()
+    )
+
+    if desde and hasta:
+        q = q.filter(
+            func.cast(models.OTManoObra.fecha, Date) >= desde,
+            func.cast(models.OTManoObra.fecha, Date) <= hasta,
+        )
+    elif mes and ano:
+        q = q.filter(
+            extract('month', models.OTManoObra.fecha) == mes,
+            extract('year', models.OTManoObra.fecha) == ano,
+        )
+
+    rows = q.order_by(models.OTManoObra.fecha.desc()).all()
 
     return [
         {
