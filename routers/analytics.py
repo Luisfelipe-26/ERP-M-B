@@ -675,19 +675,26 @@ def rendimiento_por_ha(
     actividades_rows.sort(key=lambda x: x["costo_total_ha"], reverse=True)
 
     # ── Query 2: Insumos por campo ──
+    ins_date_filters = [
+        models.OrdenTrabajo.fecha_ejecucion.isnot(None),
+        extract("year", models.OrdenTrabajo.fecha_ejecucion) == ano,
+    ]
+    if mes:
+        ins_date_filters.append(extract("month", models.OrdenTrabajo.fecha_ejecucion) == mes)
+
     q_ins = (
         db.query(
-            models.OrdenTrabajo.campo_id,
             models.OTDetalle.producto_id,
             models.Producto.producto.label("nombre_producto"),
             models.Producto.unidad,
+            models.OrdenTrabajo.campo_id,
             func.coalesce(func.sum(models.OTDetalle.cantidad_usada), 0).label("qty"),
             func.coalesce(func.sum(models.OTDetalle.costo_real), 0).label("costo"),
             func.count(distinct(models.OTDetalle.ot_id)).label("num_apps"),
         )
-        .join(models.OrdenTrabajo, models.OTDetalle.ot_id == models.OrdenTrabajo.ot_id)
         .join(models.Producto, models.OTDetalle.producto_id == models.Producto.id_prod)
-        .filter(*date_filters)
+        .join(models.OrdenTrabajo, models.OTDetalle.ot_id == models.OrdenTrabajo.ot_id)
+        .filter(*ins_date_filters)
         .group_by(
             models.OrdenTrabajo.campo_id,
             models.OTDetalle.producto_id,
