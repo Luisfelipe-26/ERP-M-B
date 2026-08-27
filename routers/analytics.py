@@ -612,7 +612,7 @@ def tendencia_costos(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 8. Rendimiento por hectárea (actividades + insumos)
+# 8. Rendimiento por hectárea — horas/hombre y costo por actividad por campo
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/rendimiento-por-ha")
@@ -625,62 +625,68 @@ def rendimiento_por_ha(
     if ano is None:
         ano = datetime.now().year
 
-    campos_list = db.query(models.Campo).filter(models.Campo.activo == True).all()
-    campos_map = {c.id_campo: {"nombre": c.nombre, "area_ha": c.area_ha or 1} for c in campos_list}
+    campos_map = {c.id_campo: {"nombre": c.nombre, "area_ha": c.area_ha or 1}
+                  for c in db.query(models.Campo).filter(models.Campo.activo == True).all()}
     actividades_map = {a.id_act: a.actividad for a in db.query(models.Actividad).all()}
 
-    # Date filters for OTs
-    date_filters = [
+    ot_filters = [
         models.OrdenTrabajo.fecha_ejecucion.isnot(None),
         extract("year", models.OrdenTrabajo.fecha_ejecucion) == ano,
     ]
     if mes:
-        date_filters.append(extract("month", models.OrdenTrabajo.fecha_ejecucion) == mes)
+        ot_filters.append(extract("month", models.OrdenTrabajo.fecha_ejecucion) == mes)
 
-    # ── Query 1: Costo por actividad por campo ──
-    q_act = (
+    # Horas y costo de mano de obra agrupado por campo + actividad
+    q = (
         db.query(
             models.OrdenTrabajo.campo_id,
             models.OrdenTrabajo.actividad_id,
-            func.coalesce(func.sum(models.OrdenTrabajo.costo_mano_obra), 0).label("mo"),
-            func.coalesce(func.sum(models.OrdenTrabajo.costo_insumos), 0).label("ins"),
-            func.coalesce(func.sum(models.OrdenTrabajo.costo_equipo), 0).label("eq"),
-            func.coalesce(func.sum(models.OrdenTrabajo.costo_total), 0).label("total"),
-            func.count(models.OrdenTrabajo.id).label("num_ots"),
+            func.coalesce(func.sum(models.OTManoObra.horas_netas), 0).label("total_horas"),
+            func.coalesce(func.sum(models.OTManoObra.costo_mo), 0).label("total_costo"),
+            func.count(distinct(models.OTManoObra.trabajador_id)).label("num_trabajadores"),
+            func.count(distinct(models.OrdenTrabajo.ot_id)).label("num_jornadas"),
         )
-        .filter(*date_filters)
+        .join(models.OTManoObra, models.OTManoObra.ot_id == models.OrdenTrabajo.ot_id)
+        .filter(*ot_filters)
         .group_by(models.OrdenTrabajo.campo_id, models.OrdenTrabajo.actividad_id)
     )
 
-    actividades_rows = []
-    for r in q_act.all():
+    rows = []
+    for r in q.all():
         area = campos_map.get(r.campo_id, {}).get("area_ha", 1)
-        total = float(r.total or 0)
-        actividades_rows.append({
+        horas = float(r.total_horas or 0)
+        costo = float(r.total_costo or 0)
+        trabajadores = int(r.num_trabajadores or 0)
+        jornadas = int(r.num_jornadas or 0)
+
+        horas_ha = round(horas / area, 2) if area > 0 else 0
+        costo_ha = round(costo / area, 2) if area > 0 else 0
+        prom_horas_hombre = round(horas / trabajadores, 2) if trabajadores > 0 else 0
+
+        rows.append({
             "campo_id": r.campo_id,
             "campo": campos_map.get(r.campo_id, {}).get("nombre", r.campo_id),
             "area_ha": area,
             "actividad_id": r.actividad_id,
             "actividad": actividades_map.get(r.actividad_id, r.actividad_id),
-            "costo_mo": round(float(r.mo), 2),
-            "costo_insumos": round(float(r.ins), 2),
-            "costo_equipo": round(float(r.eq), 2),
-            "costo_total": round(total, 2),
-            "costo_total_ha": round(total / area, 2) if area > 0 else 0,
-            "costo_mo_ha": round(float(r.mo) / area, 2) if area > 0 else 0,
-            "costo_insumos_ha": round(float(r.ins) / area, 2) if area > 0 else 0,
-            "num_ots": int(r.num_ots),
+            "total_horas": round(horas, 2),
+            "total_costo": round(costo, 2),
+            "num_trabajadores": trabajadores,
+            "num_jornadas": jornadas,
+            "horas_ha": horas_ha,
+            "costo_ha": costo_ha,
+            "prom_horas_hombre": prom_horas_hombre,
         })
 
-    actividades_rows.sort(key=lambda x: x["costo_total_ha"], reverse=True)
+    rows.sort(key=lambda x: x["horas_ha"], reverse=True)
 
-    # ── Query 2: Insumos por campo ──
-    ins_date_filters = [
+    # Insumos por campo + producto
+    ins_filters = [
         models.OrdenTrabajo.fecha_ejecucion.isnot(None),
         extract("year", models.OrdenTrabajo.fecha_ejecucion) == ano,
     ]
     if mes:
-        ins_date_filters.append(extract("month", models.OrdenTrabajo.fecha_ejecucion) == mes)
+        ins_filters.append(extract("month", models.OrdenTrabajo.fecha_ejecucion) == mes)
 
     q_ins = (
         db.query(
@@ -694,7 +700,7 @@ def rendimiento_por_ha(
         )
         .join(models.Producto, models.OTDetalle.producto_id == models.Producto.id_prod)
         .join(models.OrdenTrabajo, models.OTDetalle.ot_id == models.OrdenTrabajo.ot_id)
-        .filter(*ins_date_filters)
+        .filter(*ins_filters)
         .group_by(
             models.OrdenTrabajo.campo_id,
             models.OTDetalle.producto_id,
@@ -724,31 +730,9 @@ def rendimiento_por_ha(
 
     insumos_rows.sort(key=lambda x: x["costo_ha"], reverse=True)
 
-    # ── Resumen por campo ──
-    resumen = []
-    for cid, info in campos_map.items():
-        acts = [a for a in actividades_rows if a["campo_id"] == cid]
-        ins = [i for i in insumos_rows if i["campo_id"] == cid]
-        total_act = sum(a["costo_total"] for a in acts)
-        total_ins = sum(i["costo_total"] for i in ins)
-        area = info["area_ha"]
-        resumen.append({
-            "campo_id": cid,
-            "campo": info["nombre"],
-            "area_ha": area,
-            "costo_actividades": round(total_act, 2),
-            "costo_actividades_ha": round(total_act / area, 2) if area > 0 else 0,
-            "costo_insumos": round(total_ins, 2),
-            "costo_insumos_ha": round(total_ins / area, 2) if area > 0 else 0,
-            "num_actividades": len(acts),
-            "num_insumos": len(ins),
-        })
-    resumen.sort(key=lambda x: x["costo_actividades_ha"], reverse=True)
-
     return {
         "ano": ano,
         "mes": mes,
-        "por_actividad": actividades_rows,
-        "por_insumo": insumos_rows,
-        "resumen_campos": resumen,
+        "rendimiento": rows,
+        "insumos": insumos_rows,
     }
