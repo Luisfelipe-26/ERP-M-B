@@ -646,3 +646,35 @@ def corregir_fecha_movimientos(
         "asientos_corregidos": asientos_corregidos,
         "detalle": actualizados,
     }
+
+
+@router.put("/movimientos/marcar-inventario-inicial")
+def marcar_inventario_inicial(
+    fecha: str = Query(..., description="Fecha de los movimientos YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    from datetime import timedelta
+    fd = datetime.strptime(fecha, "%Y-%m-%d")
+    movs = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.fecha >= fd,
+        models.MovimientoInventario.fecha < fd + timedelta(days=1),
+    ).all()
+    if not movs:
+        raise HTTPException(404, f"No se encontraron movimientos en {fecha}")
+
+    for m in movs:
+        m.motivo = "Inventario Inicial"
+        m.observacion = "Carga de inventario inicial"
+
+    audit.log(db, current_user, "MARCAR_INV_INICIAL", "INV", fecha,
+              f"Marcados {len(movs)} movimientos del {fecha} como Inventario Inicial",
+              {"ids": [m.id for m in movs]})
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al marcar movimientos")
+
+    return {"ok": True, "movimientos_actualizados": len(movs)}
