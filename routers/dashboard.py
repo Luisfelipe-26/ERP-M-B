@@ -149,7 +149,8 @@ def nomina_mensual(
         models.Trabajador.nombre,
         models.Trabajador.cargo,
         func.coalesce(func.sum(models.OTManoObra.costo_mo), 0).label("total_ganado"),
-        func.count(models.OTManoObra.id).label("num_jornadas")
+        func.count(models.OTManoObra.id).label("num_jornadas"),
+        func.coalesce(func.sum(models.OTManoObra.horas_netas), 0).label("total_horas"),
     ).outerjoin(
         models.OTManoObra,
         models.Trabajador.id_trab == models.OTManoObra.trabajador_id
@@ -190,7 +191,8 @@ def nomina_mensual(
 
     return [
         {"id_trab": r[0], "nombre": r[1], "cargo": r[2],
-         "total_ganado": float(r[3]), "num_jornadas": int(r[4])}
+         "total_ganado": float(r[3]), "num_jornadas": int(r[4]),
+         "total_horas": round(float(r[5]), 2)}
         for r in rows
     ]
 
