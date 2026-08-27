@@ -250,6 +250,7 @@ def nomina_detalle_trabajador(
 def nomina_horas_diarias(
     desde: str = Query(...), hasta: str = Query(...),
     trabajador: str = Query(None),
+    modalidad: str = Query(None),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
     q = db.query(
@@ -278,6 +279,9 @@ def nomina_horas_diarias(
             models.Trabajador.nombre.ilike(f"%{trabajador}%") |
             models.Trabajador.id_trab.ilike(f"%{trabajador}%")
         )
+
+    if modalidad:
+        q = q.filter(models.OTManoObra.modalidad == modalidad)
 
     rows = q.group_by(
         func.cast(models.OTManoObra.fecha, Date),
