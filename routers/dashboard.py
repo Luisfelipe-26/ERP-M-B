@@ -140,6 +140,7 @@ def nomina_mensual(
     mes: int = Query(None), ano: int = Query(None),
     desde: str = Query(None), hasta: str = Query(None),
     trabajador: str = Query(None),
+    modalidad: str = Query(None),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
     now = datetime.now()
@@ -184,6 +185,9 @@ def nomina_mensual(
                 (extract('year', models.OTManoObra.fecha) == filtro_ano)
             )
         )
+
+    if modalidad:
+        q = q.filter(models.OTManoObra.modalidad == modalidad)
 
     rows = q.group_by(
         models.Trabajador.id_trab, models.Trabajador.nombre, models.Trabajador.cargo
