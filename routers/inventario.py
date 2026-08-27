@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from database import get_db
 import models, schemas, auth
@@ -121,8 +121,12 @@ def create_articulo(data: schemas.ProductoCreate, db: Session = Depends(get_db),
         d["costo_promedio"] = d["costo_unitario"]
     p = models.Producto(**d)
     db.add(p)
-    db.commit()
-    db.refresh(p)
+    try:
+        db.commit()
+        db.refresh(p)
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al crear artículo")
     return p
 
 
@@ -154,7 +158,11 @@ def delete_articulo(id_prod: str, db: Session = Depends(get_db), _=Depends(auth.
     if not p:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     p.activo = False
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al desactivar artículo")
     return {"ok": True}
 
 
@@ -243,7 +251,7 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
                 f"Entrada inventario {num_doc} — {p.producto}",
                 [
                     {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
-                     "almacen_id": getattr(data, 'almacen_id', None) or mov.almacen_id,
+                     "almacen_id": data.almacen_id,
                      "descripcion_linea": f"Inventario entrada {p.producto}"},
                     {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
                      "descripcion_linea": f"Contrapartida GR {num_doc}"},
@@ -404,6 +412,7 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
             if diferencia > 0:
                 lineas = [
                     {"cuenta_id": p.cuenta_inventario_id, "debe": monto_ajuste, "haber": 0,
+                     "almacen_id": mov.almacen_id,
                      "descripcion_linea": f"Ajuste positivo inventario {p.producto}"},
                     {"cuenta_id": cta_ajuste, "debe": 0, "haber": monto_ajuste,
                      "descripcion_linea": f"Contrapartida ajuste {num_doc}"},
@@ -413,6 +422,7 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
                     {"cuenta_id": cta_ajuste, "debe": monto_ajuste, "haber": 0,
                      "descripcion_linea": f"Ajuste negativo inventario {p.producto}"},
                     {"cuenta_id": p.cuenta_inventario_id, "debe": 0, "haber": monto_ajuste,
+                     "almacen_id": mov.almacen_id,
                      "descripcion_linea": f"Inventario ajuste {num_doc}"},
                 ]
             fecha_aj = data.fecha or datetime.now()
@@ -473,7 +483,7 @@ def list_movimientos(
     limit: int = Query(500, le=1000),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
-    q = db.query(models.MovimientoInventario)
+    q = db.query(models.MovimientoInventario).options(joinedload(models.MovimientoInventario.producto))
     if producto_id:
         q = q.filter(models.MovimientoInventario.producto_id == producto_id)
     if tipo_doc:
@@ -481,7 +491,12 @@ def list_movimientos(
     if fecha_desde:
         q = q.filter(models.MovimientoInventario.fecha >= fecha_desde)
     if fecha_hasta:
-        q = q.filter(models.MovimientoInventario.fecha <= fecha_hasta + "T23:59:59")
+        from datetime import timedelta
+        try:
+            dt_hasta = datetime.strptime(fecha_hasta, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            dt_hasta = datetime.fromisoformat(fecha_hasta)
+        q = q.filter(models.MovimientoInventario.fecha < dt_hasta)
     movs = q.order_by(models.MovimientoInventario.fecha.desc()).limit(limit).all()
     return [_mov_out(m) for m in movs]
 
