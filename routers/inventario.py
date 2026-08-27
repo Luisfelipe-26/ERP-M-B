@@ -570,3 +570,64 @@ def alertas_vencimiento(dias: int = Query(60, ge=1, le=365),
         "proximos": len([a for a in alertas if a["estado"] == "proximo"]),
         "alertas": alertas,
     }
+
+
+# ─── Corrección masiva de fecha en movimientos ─────────────────────────────
+
+@router.put("/movimientos/corregir-fecha")
+def corregir_fecha_movimientos(
+    fecha_incorrecta: str = Query(..., description="Fecha actual incorrecta YYYY-MM-DD"),
+    fecha_correcta: str = Query(..., description="Fecha correcta YYYY-MM-DD"),
+    tipo_doc: Optional[str] = Query(None, description="Filtrar por tipo doc (GR, GI, AJ)"),
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    from datetime import timedelta
+    fi = datetime.strptime(fecha_incorrecta, "%Y-%m-%d")
+    fc = datetime.strptime(fecha_correcta, "%Y-%m-%d")
+    fi_inicio = fi
+    fi_fin = fi + timedelta(days=1)
+
+    q = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.fecha >= fi_inicio,
+        models.MovimientoInventario.fecha < fi_fin,
+    )
+    if tipo_doc:
+        q = q.filter(models.MovimientoInventario.tipo_doc == tipo_doc)
+
+    movs = q.all()
+    if not movs:
+        raise HTTPException(404, f"No se encontraron movimientos en {fecha_incorrecta}")
+
+    asiento_ids = set()
+    actualizados = []
+    for m in movs:
+        hora = m.fecha.time() if hasattr(m.fecha, 'time') else None
+        m.fecha = fc.replace(hour=hora.hour, minute=hora.minute, second=hora.second) if hora else fc
+        actualizados.append({"id": m.id, "num_documento": m.num_documento, "producto_id": m.producto_id})
+        if m.asiento_id:
+            asiento_ids.add(m.asiento_id)
+
+    asientos_corregidos = 0
+    for aid in asiento_ids:
+        asiento = db.query(models.AsientoContable).filter(models.AsientoContable.id == aid).first()
+        if asiento:
+            asiento.fecha = fc.date() if hasattr(fc, 'date') else fc
+            asientos_corregidos += 1
+
+    audit.log(db, current_user, "CORREGIR_FECHA", "INV", fecha_incorrecta,
+              f"Corregir fecha: {fecha_incorrecta} → {fecha_correcta} ({len(actualizados)} movs, {asientos_corregidos} asientos)",
+              {"movimientos": [m["num_documento"] for m in actualizados]})
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al corregir fechas")
+
+    return {
+        "ok": True,
+        "movimientos_actualizados": len(actualizados),
+        "asientos_corregidos": asientos_corregidos,
+        "detalle": actualizados,
+    }
