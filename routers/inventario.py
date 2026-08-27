@@ -138,8 +138,12 @@ def update_articulo(id_prod: str, data: schemas.ProductoCreate, db: Session = De
         raise HTTPException(status_code=400, detail="Stock mínimo no puede ser negativo")
     for k, v in payload.items():
         setattr(p, k, v)
-    db.commit()
-    db.refresh(p)
+    try:
+        db.commit()
+        db.refresh(p)
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al actualizar artículo")
     return p
 
 
@@ -313,8 +317,10 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
         r_inv = _get_regla_cuentas(db, "inventario", "salida")
         cta_debe = r_inv[0] if r_inv else p.cuenta_costo_id
         cta_haber = p.cuenta_inventario_id
+        fecha_gi = data.fecha or datetime.now()
+        fecha_asiento = fecha_gi.date() if hasattr(fecha_gi, 'date') else fecha_gi
         asiento = _crear_asiento_auto(
-            db, datetime.now().date(), "GI", num_doc,
+            db, fecha_asiento, "GI", num_doc,
             f"Salida inventario {num_doc} — {p.producto} ({data.motivo})",
             [
                 {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
