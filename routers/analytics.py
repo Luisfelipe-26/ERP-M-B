@@ -285,7 +285,7 @@ def balance_hidrico_resumen(
             func.coalesce(func.sum(models.DailyWaterBalance.irrigation_mm), 0).label("total_irrigation"),
             func.coalesce(func.sum(models.DailyWaterBalance.balance_mm), 0).label("net_balance"),
         )
-        .filter(extract("year", models.DailyWaterBalance.fecha) == ano)
+        .filter(extract("year", models.DailyWaterBalance.date) == ano)
         .group_by(models.DailyWaterBalance.campo_id)
     )
 
