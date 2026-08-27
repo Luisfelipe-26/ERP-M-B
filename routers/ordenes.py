@@ -349,22 +349,22 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
     if not actividad:
         raise HTTPException(status_code=400, detail=f"Actividad '{data.actividad_id}' no existe")
 
-    # Reverse existing inventory movements for this OT
+    # Restore stock from old detalles (no reversion movement — edit, not delete)
     old_detalles = db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all()
     for det in old_detalles:
         if det.producto_id and det.cantidad_usada and det.cantidad_usada > 0:
             prod = db.query(models.Producto).filter(models.Producto.id_prod == det.producto_id).first()
             if prod:
-                _crear_movimiento_reversion_ot(db, ot_id, prod, det.cantidad_usada, current_user.id)
+                prod.stock_actual = (prod.stock_actual or 0) + det.cantidad_usada
 
     # Delete old MO and detalles
     db.query(models.OTManoObra).filter(models.OTManoObra.ot_id == ot_id).delete()
     db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).delete()
-    # Delete old OT inventory movements
+    # Delete ALL old OT inventory movements (consumos + any orphaned reversions)
     db.query(models.MovimientoInventario).filter(
-        models.MovimientoInventario.num_documento == f"OT-{ot_id}",
+        models.MovimientoInventario.num_documento.in_([f"OT-{ot_id}", f"OT-{ot_id}-REV"]),
         models.MovimientoInventario.tipo_doc == "OT"
-    ).delete()
+    ).delete(synchronize_session="fetch")
 
     # Update header fields
     orden.fecha_ejecucion = data.fecha_ejecucion
@@ -594,7 +594,13 @@ def delete_orden(ot_id: int, db: Session = Depends(get_db),
     if not orden:
         raise HTTPException(status_code=404, detail="Orden no encontrada")
 
-    # H-2 FIX: Restaurar stock CON movimiento de reversión auditable
+    # Delete old consumo + orphaned reversion movements before creating clean reversions
+    db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.num_documento.in_([f"OT-{ot_id}", f"OT-{ot_id}-REV"]),
+        models.MovimientoInventario.tipo_doc == "OT"
+    ).delete(synchronize_session="fetch")
+
+    # Restaurar stock CON movimiento de reversión auditable
     detalles = db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all()
     for det in detalles:
         if det.producto_id and det.cantidad_usada and det.cantidad_usada > 0:
