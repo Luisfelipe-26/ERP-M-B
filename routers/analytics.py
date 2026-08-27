@@ -505,7 +505,7 @@ def comparativo_campos(
                     soil_status = "critico"
 
         # Pest pressure — last 90 days
-        fd90 = now - timedelta(days=90)
+        fd90 = datetime.now() - timedelta(days=90)
         visit_cnt = (
             db.query(func.count(models.ScoutingVisit.id))
             .filter(models.ScoutingVisit.campo_id == cid, models.ScoutingVisit.visit_date >= fd90)
