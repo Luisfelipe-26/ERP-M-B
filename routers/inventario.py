@@ -47,6 +47,7 @@ def _mov_out(m: models.MovimientoInventario) -> dict:
         "usuario_id": m.usuario_id,
         "producto_nombre": m.producto.producto if m.producto else None,
         "producto_unidad": m.producto.unidad if m.producto else None,
+        "asiento_id": getattr(m, "asiento_id", None),
     }
 
 
@@ -246,8 +247,14 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
             if asiento:
                 mov.asiento_id = asiento.id
 
-    db.commit()
-    db.refresh(mov)
+    try:
+        db.commit()
+        db.refresh(mov)
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("Error en entrada inventario %s", num_doc)
+        raise HTTPException(500, "Error al registrar entrada de inventario")
     return _mov_out(mov)
 
 
@@ -321,8 +328,14 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
         if asiento:
             mov.asiento_id = asiento.id
 
-    db.commit()
-    db.refresh(mov)
+    try:
+        db.commit()
+        db.refresh(mov)
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("Error en salida inventario %s", num_doc)
+        raise HTTPException(500, "Error al registrar salida de inventario")
     return _mov_out(mov)
 
 
@@ -400,8 +413,14 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
             if asiento:
                 mov.asiento_id = asiento.id
 
-    db.commit()
-    db.refresh(mov)
+    try:
+        db.commit()
+        db.refresh(mov)
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("Error en ajuste inventario %s", num_doc)
+        raise HTTPException(500, "Error al registrar ajuste de inventario")
     return _mov_out(mov)
 
 

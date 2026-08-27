@@ -118,9 +118,21 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
             "subtotal": l.subtotal,
         })
 
+    asiento_info = None
+    if oc.estado in ("Recibida", "Parcial"):
+        asiento = db.query(models.AsientoContable).filter(
+            models.AsientoContable.origen == "GR",
+            models.AsientoContable.referencia_id == oc_id,
+        ).order_by(models.AsientoContable.fecha.desc()).first()
+        if asiento:
+            asiento_info = {"numero": asiento.numero, "fecha": str(asiento.fecha),
+                            "total_debe": float(asiento.total_debe or 0),
+                            "estado": asiento.estado}
+
     return {
         "orden": schemas.OrdenCompraOut.model_validate(oc),
         "lineas": lineas_out,
+        "asiento_contable": asiento_info,
     }
 
 
@@ -161,87 +173,90 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
 
     from routers.inventario import _recalc_avg_cost
     from routers.sequences import get_next
+    import logging as _logging
 
-    total_recibido_now = 0.0
-    for item in data.lineas:
-        if item.cantidad_recibida <= 0:
-            continue
-        linea = db.query(models.OrdenCompraLinea).filter(
-            models.OrdenCompraLinea.id == item.linea_id,
-            models.OrdenCompraLinea.oc_id == oc_id
-        ).first()
-        if not linea:
-            continue
+    try:
+        total_recibido_now = 0.0
+        for item in data.lineas:
+            if item.cantidad_recibida <= 0:
+                continue
+            linea = db.query(models.OrdenCompraLinea).filter(
+                models.OrdenCompraLinea.id == item.linea_id,
+                models.OrdenCompraLinea.oc_id == oc_id
+            ).first()
+            if not linea:
+                continue
 
-        # Update received quantity
-        linea.cantidad_recibida = (linea.cantidad_recibida or 0) + item.cantidad_recibida
-        total_recibido_now += item.cantidad_recibida * linea.precio_unitario
+            linea.cantidad_recibida = (linea.cantidad_recibida or 0) + item.cantidad_recibida
+            total_recibido_now += item.cantidad_recibida * linea.precio_unitario
 
-        # Generate GR for inventariable products
-        prod = db.query(models.Producto).filter(
-            models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
-        ).first()
-        if prod and prod.es_inventariable:
-            nuevo_costo = _recalc_avg_cost(prod, item.cantidad_recibida, linea.precio_unitario)
-            nuevo_stock = (prod.stock_actual or 0) + item.cantidad_recibida
-            num_doc = get_next("GR", db)
+            prod = db.query(models.Producto).filter(
+                models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
+            ).first()
+            if prod and prod.es_inventariable:
+                nuevo_costo = _recalc_avg_cost(prod, item.cantidad_recibida, linea.precio_unitario)
+                nuevo_stock = (prod.stock_actual or 0) + item.cantidad_recibida
+                num_doc = get_next("GR", db)
 
-            mov = models.MovimientoInventario(
-                num_documento=num_doc,
-                producto_id=linea.producto_id,
-                tipo_doc="GR",
-                tipo="entrada",
-                motivo="Compra",
-                cantidad=item.cantidad_recibida,
-                costo_unitario=linea.precio_unitario,
-                costo_promedio_post=round(nuevo_costo, 4),
-                stock_post=round(nuevo_stock, 4),
-                proveedor=oc.proveedor,
-                fecha=datetime.now(),
-                oc_referencia=oc_id,
-                usuario_id=current_user.id,
-            )
-            db.add(mov)
-            prod.stock_actual = round(nuevo_stock, 4)
-            prod.costo_promedio = round(nuevo_costo, 4)
+                mov = models.MovimientoInventario(
+                    num_documento=num_doc,
+                    producto_id=linea.producto_id,
+                    tipo_doc="GR",
+                    tipo="entrada",
+                    motivo="Compra",
+                    cantidad=item.cantidad_recibida,
+                    costo_unitario=linea.precio_unitario,
+                    costo_promedio_post=round(nuevo_costo, 4),
+                    stock_post=round(nuevo_stock, 4),
+                    proveedor=oc.proveedor,
+                    fecha=datetime.now(),
+                    oc_referencia=oc_id,
+                    usuario_id=current_user.id,
+                )
+                db.add(mov)
+                prod.stock_actual = round(nuevo_stock, 4)
+                prod.costo_promedio = round(nuevo_costo, 4)
 
-    # Update OC totals
-    oc.total_recibido = (oc.total_recibido or 0) + total_recibido_now
-    oc.fecha_recepcion = datetime.now()
-    if data.num_factura:
-        oc.num_factura = data.num_factura
+        oc.total_recibido = (oc.total_recibido or 0) + total_recibido_now
+        oc.fecha_recepcion = datetime.now()
+        if data.num_factura:
+            oc.num_factura = data.num_factura
 
-    # Auto-determine estado
-    lineas_all = db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).all()
-    all_received = all((l.cantidad_recibida or 0) >= l.cantidad for l in lineas_all)
-    any_received = any((l.cantidad_recibida or 0) > 0 for l in lineas_all)
+        lineas_all = db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).all()
+        all_received = all((l.cantidad_recibida or 0) >= l.cantidad for l in lineas_all)
+        any_received = any((l.cantidad_recibida or 0) > 0 for l in lineas_all)
 
-    if all_received:
-        oc.estado = "Recibida"
-    elif any_received:
-        oc.estado = "Parcial"
+        if all_received:
+            oc.estado = "Recibida"
+        elif any_received:
+            oc.estado = "Parcial"
 
-    asiento_num = None
-    if total_recibido_now > 0:
-        monto = Decimal(str(round(total_recibido_now, 2)))
-        r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
-        if r_compra:
-            asiento = _crear_asiento_auto(
-                db, datetime.now().date(), "GR", oc_id,
-                f"Recepción OC {oc_id} — {oc.proveedor or 'Proveedor'}",
-                [
-                    {"cuenta_id": r_compra[0], "debe": monto, "haber": 0,
-                     "descripcion_linea": f"Entrada inventario OC {oc_id}"},
-                    {"cuenta_id": r_compra[1], "debe": 0, "haber": monto,
-                     "descripcion_linea": f"CxP recepción OC {oc_id}"},
-                ],
-                current_user.nombre
-            )
-            if asiento:
-                asiento_num = asiento.numero
+        asiento_num = None
+        if total_recibido_now > 0:
+            monto = Decimal(str(round(total_recibido_now, 2)))
+            r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
+            if r_compra:
+                asiento = _crear_asiento_auto(
+                    db, datetime.now().date(), "GR", oc_id,
+                    f"Recepción OC {oc_id} — {oc.proveedor or 'Proveedor'}",
+                    [
+                        {"cuenta_id": r_compra[0], "debe": monto, "haber": 0,
+                         "campo_id": oc.campo_id,
+                         "descripcion_linea": f"Entrada inventario OC {oc_id}"},
+                        {"cuenta_id": r_compra[1], "debe": 0, "haber": monto,
+                         "descripcion_linea": f"CxP recepción OC {oc_id}"},
+                    ],
+                    current_user.nombre
+                )
+                if asiento:
+                    asiento_num = asiento.numero
 
-    db.commit()
-    db.refresh(oc)
+        db.commit()
+        db.refresh(oc)
+    except Exception:
+        db.rollback()
+        _logging.getLogger(__name__).exception("Error en recepción OC %s", oc_id)
+        raise HTTPException(500, "Error al procesar la recepción")
     return {"ok": True, "estado": oc.estado, "total_recibido": oc.total_recibido,
             "num_factura": oc.num_factura, "asiento": asiento_num}
 

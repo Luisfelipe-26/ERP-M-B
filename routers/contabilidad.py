@@ -175,16 +175,22 @@ def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: st
     Returns the AsientoContable or None if periodo missing/closed.
     """
     periodo = find_periodo(db, fecha)
-    if not periodo or periodo.estado == "cerrado":
+    if not periodo:
+        logger.warning("Asiento auto %s/%s omitido: no existe período para %s", origen, referencia_id, fecha)
+        return None
+    if periodo.estado == "cerrado":
+        logger.warning("Asiento auto %s/%s omitido: período %s-%s cerrado", origen, referencia_id, periodo.anio, periodo.mes)
         return None
 
     lineas_data = [l for l in lineas_data
                    if Decimal(str(l.get("debe") or 0)) > 0 or Decimal(str(l.get("haber") or 0)) > 0]
     if not lineas_data:
+        logger.warning("Asiento auto %s/%s omitido: todas las líneas tienen monto 0", origen, referencia_id)
         return None
 
     ctrl = _verificar_presupuesto(db, lineas_data, fecha)
     if ctrl["bloqueado"]:
+        logger.warning("Asiento auto %s/%s omitido: presupuesto excedido — %s", origen, referencia_id, ctrl["alertas"])
         return None
 
     total_debe = sum(Decimal(str(l.get("debe") or 0)) for l in lineas_data)
@@ -3714,11 +3720,21 @@ def procesar_nomina(data: schemas.NominaProcesar, db: Session = Depends(get_db),
     periodo.total_neto = total_neto
     periodo.total_tss_empleador = total_tss
 
+    campo_ids_nom = db.query(models.OrdenTrabajo.campo_id).join(
+        models.OTManoObra, models.OrdenTrabajo.ot_id == models.OTManoObra.ot_id
+    ).filter(
+        extract('month', models.OTManoObra.fecha) == mes,
+        extract('year', models.OTManoObra.fecha) == ano,
+        models.OrdenTrabajo.campo_id.isnot(None)
+    ).distinct().all()
+    nom_campo = campo_ids_nom[0][0] if len(campo_ids_nom) == 1 else None
+
     asiento = None
     r_nom = _get_regla_cuentas(db, "NOM", "nomina")
     if r_nom and total_bruto > 0:
         lineas = [
             {"cuenta_id": r_nom[0], "debe": float(total_bruto), "haber": 0,
+             "campo_id": nom_campo,
              "descripcion_linea": f"Gasto nómina {data.fecha_inicio} — {data.fecha_fin}"},
             {"cuenta_id": r_nom[1], "debe": 0, "haber": float(total_neto),
              "descripcion_linea": f"Nómina por pagar {data.fecha_inicio} — {data.fecha_fin}"},

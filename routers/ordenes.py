@@ -311,14 +311,19 @@ def create_orden(data: schemas.OrdenTrabajoCreate, db: Session = Depends(get_db)
     orden.costo_ha = round(costo_total / area, 2)
     orden.horas_mo = round(sum(max(0, float(m.horas_netas or 8)) for m in (data.mano_obra or []) if m.trabajador_id), 2)
 
-    # Audit trail
     audit.log(db, current_user, "CREAR", "OT", str(ot_id),
               f"OT #{ot_id} creada: {campo_nombre} / {actividad.actividad} — Total: RD$ {costo_total:,.2f}",
               {"campo": data.campo_id, "actividad": data.actividad_id, "costo_total": costo_total,
                "costo_mo": costo_mo_total, "costo_insumos": costo_insumos_total, "costo_equipo": costo_equipo})
 
-    db.commit()
-    db.refresh(orden)
+    try:
+        db.commit()
+        db.refresh(orden)
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("Error creando OT %s", ot_id)
+        raise HTTPException(500, "Error al crear la orden de trabajo")
     result = schemas.OrdenTrabajoOut.model_validate(orden).model_dump()
     if warnings:
         result["warnings"] = warnings
@@ -457,10 +462,23 @@ def get_orden_detalle(ot_id: int, db: Session = Depends(get_db), _=Depends(auth.
         raise HTTPException(status_code=404, detail="Orden no encontrada")
     mano_obra = db.query(models.OTManoObra).filter(models.OTManoObra.ot_id == ot_id).all()
     detalles = db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all()
+
+    asiento_info = None
+    if orden.estado == "Cerrada":
+        asiento = db.query(models.AsientoContable).filter(
+            models.AsientoContable.origen == "OT",
+            models.AsientoContable.referencia_id == str(ot_id),
+        ).first()
+        if asiento:
+            asiento_info = {"numero": asiento.numero, "fecha": str(asiento.fecha),
+                            "total_debe": float(asiento.total_debe or 0),
+                            "estado": asiento.estado}
+
     return {
         "orden": schemas.OrdenTrabajoOut.model_validate(orden),
         "mano_obra": [schemas.OTManoObraOut.model_validate(m) for m in mano_obra],
         "detalles": [schemas.OTDetalleOut.model_validate(d) for d in detalles],
+        "asiento_contable": asiento_info,
     }
 
 
@@ -503,59 +521,68 @@ def update_estado(ot_id: int, estado: str = Query(...), hora_cierre: Optional[st
     estado_anterior = orden.estado
     orden.estado = estado
     asiento_num = None
-    if estado == "Cerrada":
-        orden.fecha_cierre = datetime.now()
-        orden.hora_cierre = hora_cierre or datetime.now().strftime("%H:%M")
-        _recalc_orden(orden, db)
+    try:
+        if estado == "Cerrada":
+            orden.fecha_cierre = datetime.now()
+            orden.hora_cierre = hora_cierre or datetime.now().strftime("%H:%M")
+            _recalc_orden(orden, db)
 
-        fecha_ot = (orden.fecha_ejecucion.date() if isinstance(orden.fecha_ejecucion, datetime)
-                    else orden.fecha_ejecucion) if orden.fecha_ejecucion else datetime.now().date()
-        lineas = []
-        costo_mo = Decimal(str(orden.costo_mano_obra or 0))
-        costo_ins = Decimal(str(orden.costo_insumos or 0))
-        costo_eq = Decimal(str(orden.costo_equipo or 0))
+            fecha_ot = (orden.fecha_ejecucion.date() if isinstance(orden.fecha_ejecucion, datetime)
+                        else orden.fecha_ejecucion) if orden.fecha_ejecucion else datetime.now().date()
+            lineas = []
+            costo_mo = Decimal(str(orden.costo_mano_obra or 0))
+            costo_ins = Decimal(str(orden.costo_insumos or 0))
+            costo_eq = Decimal(str(orden.costo_equipo or 0))
 
-        r_mo = _get_regla_cuentas(db, "nomina", "salario_jornada")
-        if r_mo and costo_mo > 0:
-            lineas.append({"cuenta_id": r_mo[0], "debe": costo_mo, "haber": 0,
-                           "campo_id": orden.campo_id,
-                           "descripcion_linea": f"MO directa OT #{ot_id}"})
-            lineas.append({"cuenta_id": r_mo[1], "debe": 0, "haber": costo_mo,
-                           "descripcion_linea": f"Nóminas por pagar OT #{ot_id}"})
+            un_id = getattr(orden, "unidad_negocio_id", None)
+            dep_id = getattr(orden, "departamento_id", None)
 
-        r_ins = _get_regla_cuentas(db, "consumo_ot", "salida_insumo")
-        if r_ins and costo_ins > 0:
-            lineas.append({"cuenta_id": r_ins[0], "debe": costo_ins, "haber": 0,
-                           "campo_id": orden.campo_id,
-                           "descripcion_linea": f"Insumos OT #{ot_id}"})
-            lineas.append({"cuenta_id": r_ins[1], "debe": 0, "haber": costo_ins,
-                           "descripcion_linea": f"Salida inventario OT #{ot_id}"})
+            r_mo = _get_regla_cuentas(db, "nomina", "salario_jornada")
+            if r_mo and costo_mo > 0:
+                lineas.append({"cuenta_id": r_mo[0], "debe": costo_mo, "haber": 0,
+                               "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
+                               "descripcion_linea": f"MO directa OT #{ot_id}"})
+                lineas.append({"cuenta_id": r_mo[1], "debe": 0, "haber": costo_mo,
+                               "descripcion_linea": f"Nóminas por pagar OT #{ot_id}"})
 
-        if costo_eq > 0:
-            cta_eq = db.query(models.CuentaContable).filter(
-                models.CuentaContable.codigo == "5.2.02").first()
-            cta_cxp = db.query(models.CuentaContable).filter(
-                models.CuentaContable.codigo == "2.1.01.01").first()
-            if cta_eq and cta_cxp:
-                lineas.append({"cuenta_id": cta_eq.id, "debe": costo_eq, "haber": 0,
-                               "campo_id": orden.campo_id,
-                               "descripcion_linea": f"Equipo OT #{ot_id}"})
-                lineas.append({"cuenta_id": cta_cxp.id, "debe": 0, "haber": costo_eq,
-                               "descripcion_linea": f"CxP equipo OT #{ot_id}"})
+            r_ins = _get_regla_cuentas(db, "consumo_ot", "salida_insumo")
+            if r_ins and costo_ins > 0:
+                lineas.append({"cuenta_id": r_ins[0], "debe": costo_ins, "haber": 0,
+                               "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
+                               "descripcion_linea": f"Insumos OT #{ot_id}"})
+                lineas.append({"cuenta_id": r_ins[1], "debe": 0, "haber": costo_ins,
+                               "descripcion_linea": f"Salida inventario OT #{ot_id}"})
 
-        if lineas:
-            asiento = _crear_asiento_auto(
-                db, fecha_ot, "OT", str(ot_id),
-                f"Cierre OT #{ot_id} — {orden.actividad_id} / {orden.campo_id or 'General'}",
-                lineas, current_user.nombre
-            )
-            if asiento:
-                asiento_num = asiento.numero
+            if costo_eq > 0:
+                cta_eq = db.query(models.CuentaContable).filter(
+                    models.CuentaContable.codigo == "5.2.02").first()
+                cta_cxp = db.query(models.CuentaContable).filter(
+                    models.CuentaContable.codigo == "2.1.01.01").first()
+                if cta_eq and cta_cxp:
+                    lineas.append({"cuenta_id": cta_eq.id, "debe": costo_eq, "haber": 0,
+                                   "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
+                                   "descripcion_linea": f"Equipo OT #{ot_id}"})
+                    lineas.append({"cuenta_id": cta_cxp.id, "debe": 0, "haber": costo_eq,
+                                   "descripcion_linea": f"CxP equipo OT #{ot_id}"})
 
-    audit.log(db, current_user, "ESTADO", "OT", str(ot_id),
-              f"OT #{ot_id}: {estado_anterior} → {estado}",
-              {"estado_anterior": estado_anterior, "estado_nuevo": estado})
-    db.commit()
+            if lineas:
+                asiento = _crear_asiento_auto(
+                    db, fecha_ot, "OT", str(ot_id),
+                    f"Cierre OT #{ot_id} — {orden.actividad_id} / {orden.campo_id or 'General'}",
+                    lineas, current_user.nombre
+                )
+                if asiento:
+                    asiento_num = asiento.numero
+
+        audit.log(db, current_user, "ESTADO", "OT", str(ot_id),
+                  f"OT #{ot_id}: {estado_anterior} → {estado}",
+                  {"estado_anterior": estado_anterior, "estado_nuevo": estado})
+        db.commit()
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("Error cambiando estado OT %s", ot_id)
+        raise HTTPException(500, "Error al cambiar estado de la orden")
     return {"ok": True, "estado": estado, "hora_cierre": orden.hora_cierre,
             "asiento": asiento_num}
 
