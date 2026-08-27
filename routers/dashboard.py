@@ -312,10 +312,14 @@ def nomina_horas_diarias(
 
 @router.get("/export/nomina-csv")
 def export_nomina_csv(
-    mes: int = Query(...), ano: int = Query(...),
+    mes: int = Query(None), ano: int = Query(None),
+    desde: str = Query(None), hasta: str = Query(None),
+    trabajador: str = Query(None),
+    modalidad: str = Query(None),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
-    rows = db.query(
+    now = datetime.now()
+    q = db.query(
         models.Trabajador.id_trab,
         models.Trabajador.nombre,
         models.Trabajador.cargo,
@@ -328,14 +332,39 @@ def export_nomina_csv(
         models.Trabajador.id_trab == models.OTManoObra.trabajador_id
     ).filter(
         models.Trabajador.activo == True
-    ).filter(
-        (models.OTManoObra.id.is_(None)) |
-        (
-            models.OTManoObra.fecha.isnot(None) &
-            (extract('month', models.OTManoObra.fecha) == mes) &
-            (extract('year', models.OTManoObra.fecha) == ano)
+    )
+
+    if trabajador:
+        q = q.filter(
+            models.Trabajador.nombre.ilike(f"%{trabajador}%") |
+            models.Trabajador.id_trab.ilike(f"%{trabajador}%")
         )
-    ).group_by(
+
+    if desde and hasta:
+        q = q.filter(
+            (models.OTManoObra.id.is_(None)) |
+            (
+                models.OTManoObra.fecha.isnot(None) &
+                (func.cast(models.OTManoObra.fecha, Date) >= desde) &
+                (func.cast(models.OTManoObra.fecha, Date) <= hasta)
+            )
+        )
+    else:
+        filtro_mes = mes or now.month
+        filtro_ano = ano or now.year
+        q = q.filter(
+            (models.OTManoObra.id.is_(None)) |
+            (
+                models.OTManoObra.fecha.isnot(None) &
+                (extract('month', models.OTManoObra.fecha) == filtro_mes) &
+                (extract('year', models.OTManoObra.fecha) == filtro_ano)
+            )
+        )
+
+    if modalidad:
+        q = q.filter(models.OTManoObra.modalidad == modalidad)
+
+    rows = q.group_by(
         models.Trabajador.id_trab, models.Trabajador.nombre,
         models.Trabajador.cargo, models.Trabajador.costo_hora
     ).all()
@@ -352,7 +381,9 @@ def export_nomina_csv(
     writer.writerow(["", "", "", "", "", "TOTAL", round(total, 2)])
 
     output.seek(0)
-    filename = f"nomina_{mes:02d}_{ano}.csv"
+    periodo = f"{desde}_a_{hasta}" if desde and hasta else f"{(mes or now.month):02d}_{(ano or now.year)}"
+    mod_suffix = f"_{modalidad}" if modalidad else ""
+    filename = f"nomina_{periodo}{mod_suffix}.csv"
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
