@@ -907,11 +907,18 @@ def conciliacion_ot(
     detalles = q_det.all()
     movimientos = q_mov.all()
 
+    # Cache de productos (evita N+1) con flag es_inventariable
+    prod_ids = {d.producto_id for d in detalles} | {m.producto_id for m in movimientos}
+    prod_map = {}
+    if prod_ids:
+        for p in db.query(models.Producto).filter(models.Producto.id_prod.in_(prod_ids)).all():
+            prod_map[p.id_prod] = p
+
     ot_consumos = {}
     for d in detalles:
         key = (d.ot_id, d.producto_id)
         if key not in ot_consumos:
-            prod = db.query(models.Producto).filter(models.Producto.id_prod == d.producto_id).first()
+            prod = prod_map.get(d.producto_id)
             ot_consumos[key] = {
                 "ot_id": d.ot_id,
                 "producto_id": d.producto_id,
@@ -947,10 +954,13 @@ def conciliacion_ot(
     diferencias_qty = 0
     solo_ot = 0
     solo_inv = 0
+    no_inventariable = 0
 
     for key in sorted(all_keys, key=lambda k: (k[0], k[1])):
         ot = ot_consumos.get(key, {})
         inv = inv_consumos.get(key, {})
+        prod = prod_map.get(key[1])
+        es_inv = prod.es_inventariable if prod else True
         q_ot = round(ot.get("cantidad_ot", 0), 4)
         q_inv = round(inv.get("cantidad_inv", 0), 4)
         v_ot = round(ot.get("valor_ot", 0), 2)
@@ -958,7 +968,11 @@ def conciliacion_ot(
         dif_qty = round(q_ot - q_inv, 4)
         dif_val = round(v_ot - v_inv, 2)
 
-        if q_ot > 0 and q_inv == 0:
+        if q_ot > 0 and q_inv == 0 and not es_inv:
+            # Insumo no inventariable: está en la OT pero no pasa por inventario (correcto)
+            estado = "no_inventariable"
+            no_inventariable += 1
+        elif q_ot > 0 and q_inv == 0:
             estado = "solo_ot"
             solo_ot += 1
         elif q_inv > 0 and q_ot == 0:
@@ -976,6 +990,7 @@ def conciliacion_ot(
             "producto_id": key[1],
             "producto_nombre": ot.get("producto_nombre") or inv.get("producto_nombre", ""),
             "unidad": ot.get("unidad") or inv.get("unidad", ""),
+            "es_inventariable": es_inv,
             "cantidad_ot": q_ot,
             "cantidad_inv": q_inv,
             "diferencia_qty": dif_qty,
@@ -985,13 +1000,23 @@ def conciliacion_ot(
             "estado": estado,
         })
 
+    valor_total_ot = round(sum(i["valor_ot"] for i in items), 2)
+    valor_no_inv = round(sum(i["valor_ot"] for i in items if i["estado"] == "no_inventariable"), 2)
+    # Diferencia real a explicar (excluye lo no inventariable, que nunca pasa por inventario)
+    valor_conciliable_ot = round(valor_total_ot - valor_no_inv, 2)
+    valor_total_inv = round(sum(i["valor_inv"] for i in items), 2)
+
     return {
         "total": len(items),
         "conciliados": conciliados,
         "diferencias": diferencias_qty,
         "solo_ot": solo_ot,
         "solo_inv": solo_inv,
-        "valor_total_ot": round(sum(i["valor_ot"] for i in items), 2),
-        "valor_total_inv": round(sum(i["valor_inv"] for i in items), 2),
+        "no_inventariable": no_inventariable,
+        "valor_total_ot": valor_total_ot,
+        "valor_no_inventariable": valor_no_inv,
+        "valor_conciliable_ot": valor_conciliable_ot,
+        "valor_total_inv": valor_total_inv,
+        "diferencia_neta": round(valor_conciliable_ot - valor_total_inv, 2),
         "items": items,
     }
