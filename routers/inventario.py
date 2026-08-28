@@ -723,6 +723,8 @@ def reconciliar_ot(
             continue
 
         cp = prod.costo_promedio or prod.costo_unitario or 0
+        # Valuar al costo real que registró la OTDetalle (no al costo_promedio) para reconciliar
+        costo_mov = round(info["costo_total"] / cantidad, 4) if cantidad > 0 and info["costo_total"] else cp
         nuevo_stock = round(max(0.0, (prod.stock_actual or 0) - cantidad), 4)
 
         mov = models.MovimientoInventario(
@@ -732,7 +734,7 @@ def reconciliar_ot(
             tipo="salida",
             motivo="Consumo OT",
             cantidad=cantidad,
-            costo_unitario=round(cp, 4),
+            costo_unitario=costo_mov,
             costo_promedio_post=round(cp, 4),
             stock_post=nuevo_stock,
             ot_referencia=info["ot_id"],
@@ -759,6 +761,64 @@ def reconciliar_ot(
         "ok": True,
         "movimientos_creados": len(creados),
         "detalle": creados,
+    }
+
+
+# ─── Re-sincronizar costos de movimientos OT existentes ─────────────────────
+
+@router.post("/resincronizar-costos-ot")
+def resincronizar_costos_ot(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    """Re-valúa los movimientos de consumo OT existentes al costo que registró la
+    OTDetalle, para que el total de salidas OT en inventario cuadre con el módulo OT."""
+    detalles = db.query(models.OTDetalle).all()
+    detalle_map = {}
+    for d in detalles:
+        key = (d.ot_id, d.producto_id)
+        if key not in detalle_map:
+            detalle_map[key] = {"cantidad": 0, "valor": 0}
+        detalle_map[key]["cantidad"] += d.cantidad_usada or 0
+        detalle_map[key]["valor"] += d.costo_real or 0
+
+    movs = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.tipo_doc == "OT",
+        models.MovimientoInventario.tipo == "salida",
+    ).all()
+
+    mov_groups = {}
+    for m in movs:
+        key = (m.ot_referencia, m.producto_id)
+        mov_groups.setdefault(key, []).append(m)
+
+    ajustados = 0
+    sin_detalle = 0
+    for key, grupo in mov_groups.items():
+        det = detalle_map.get(key)
+        if not det or det["cantidad"] <= 0:
+            sin_detalle += len(grupo)
+            continue
+        costo_obj = round(det["valor"] / det["cantidad"], 4)
+        for m in grupo:
+            if round(m.costo_unitario or 0, 4) != costo_obj:
+                m.costo_unitario = costo_obj
+                ajustados += 1
+
+    if ajustados:
+        audit.log(db, current_user, "RESYNC_COSTOS_OT", "INV", f"{ajustados} movimientos",
+                  f"Re-sincronización de costos OT: {ajustados} movimientos re-valuados",
+                  {"ajustados": ajustados})
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "Error al re-sincronizar costos")
+
+    return {
+        "ok": True,
+        "movimientos_ajustados": ajustados,
+        "movimientos_sin_detalle_ot": sin_detalle,
     }
 
 
