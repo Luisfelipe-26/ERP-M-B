@@ -1135,3 +1135,77 @@ def conciliacion_ot(
         "diferencia_neta": round(valor_conciliable_ot - valor_total_inv, 2),
         "items": items,
     }
+
+
+# ─── Conciliación Mayor ↔ Submayor de inventario (tie-out contable) ──────────
+
+@router.get("/reconciliacion-gl")
+def reconciliacion_gl(db: Session = Depends(get_db), _=Depends(auth.require_admin)):
+    """Conciliación contable del inventario (solo lectura):
+      submayor (kardex) ↔ valuación física ↔ cuenta de inventario en el mayor.
+    Revela al centavo dónde no cuadra: productos sin cuenta contable, movimientos
+    sin asiento, y deriva rounding entre valuación y mayor."""
+    # 1) Valuación física (submayor): Σ stock × costo_promedio por producto inventariable
+    productos = db.query(models.Producto).filter(models.Producto.es_inventariable == True).all()
+    val_con_cuenta = 0.0
+    val_sin_cuenta = 0.0
+    prods_sin_cuenta = []
+    cuentas_inv = set()
+    for p in productos:
+        cp = p.costo_promedio or p.costo_unitario or 0
+        v = round((p.stock_actual or 0) * cp, 2)
+        if p.cuenta_inventario_id:
+            val_con_cuenta += v
+            cuentas_inv.add(p.cuenta_inventario_id)
+        else:
+            val_sin_cuenta += v
+            if abs(v) > 0.005:
+                prods_sin_cuenta.append({"id_prod": p.id_prod, "producto": p.producto, "valor": v})
+    val_con_cuenta = round(val_con_cuenta, 2)
+    val_sin_cuenta = round(val_sin_cuenta, 2)
+    valuacion_total = round(val_con_cuenta + val_sin_cuenta, 2)
+
+    # 2) Saldo del mayor en las cuentas de inventario (Σ debe − haber), asientos no anulados
+    gl_inventario = 0.0
+    if cuentas_inv:
+        lineas = db.query(models.LineaAsiento).join(
+            models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
+        ).filter(
+            models.LineaAsiento.cuenta_id.in_(cuentas_inv),
+            models.AsientoContable.estado != "anulado",
+        ).all()
+        gl_inventario = round(sum(float(l.debe or 0) - float(l.haber or 0) for l in lineas), 2)
+
+    # 3) Movimientos sin asiento (cambian el kardex pero no el mayor)
+    movs = db.query(models.MovimientoInventario).all()
+    sin_asiento_valor = 0.0
+    sin_asiento_por_tipo = {}
+    for m in movs:
+        if m.asiento_id is None:
+            signo = 1 if m.tipo == "entrada" else -1
+            v = signo * (m.cantidad or 0) * (m.costo_unitario or 0)
+            sin_asiento_valor += v
+            k = m.tipo_doc or "?"
+            sin_asiento_por_tipo[k] = round(sin_asiento_por_tipo.get(k, 0) + v, 2)
+    sin_asiento_valor = round(sin_asiento_valor, 2)
+
+    # Conciliación: el mayor debería igualar la valuación de productos CON cuenta
+    dif_gl = round(val_con_cuenta - gl_inventario, 2)
+
+    return {
+        "valuacion_fisica": {
+            "total": valuacion_total,
+            "con_cuenta_contable": val_con_cuenta,
+            "sin_cuenta_contable": val_sin_cuenta,
+        },
+        "mayor_inventario": gl_inventario,
+        "diferencia_mayor_vs_valuacion": dif_gl,
+        "cuadra_al_centavo": abs(dif_gl) < 0.01 and abs(val_sin_cuenta) < 0.01,
+        "fugas_detectadas": {
+            "productos_sin_cuenta_contable": len(prods_sin_cuenta),
+            "valor_sin_cuenta_contable": val_sin_cuenta,
+            "movimientos_sin_asiento_valor_neto": sin_asiento_valor,
+            "movimientos_sin_asiento_por_tipo": sin_asiento_por_tipo,
+        },
+        "detalle_productos_sin_cuenta": prods_sin_cuenta[:50],
+    }
