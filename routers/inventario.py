@@ -723,8 +723,8 @@ def reconciliar_ot(
             continue
 
         cp = prod.costo_promedio or prod.costo_unitario or 0
-        # Valuar al costo real que registró la OTDetalle (no al costo_promedio) para reconciliar
-        costo_mov = round(info["costo_total"] / cantidad, 4) if cantidad > 0 and info["costo_total"] else cp
+        # Inventario manda: valuar el backfill al costo promedio actual (mejor
+        # aproximación disponible; luego resincronizar alinea la OTDetalle).
         nuevo_stock = round(max(0.0, (prod.stock_actual or 0) - cantidad), 4)
 
         mov = models.MovimientoInventario(
@@ -734,7 +734,7 @@ def reconciliar_ot(
             tipo="salida",
             motivo="Consumo OT",
             cantidad=cantidad,
-            costo_unitario=costo_mov,
+            costo_unitario=round(cp, 4),
             costo_promedio_post=round(cp, 4),
             stock_post=nuevo_stock,
             ot_referencia=info["ot_id"],
@@ -771,44 +771,59 @@ def resincronizar_costos_ot(
     db: Session = Depends(get_db),
     current_user: models.Usuario = Depends(auth.require_admin),
 ):
-    """Re-valúa los movimientos de consumo OT existentes al costo que registró la
-    OTDetalle, para que el total de salidas OT en inventario cuadre con el módulo OT."""
-    detalles = db.query(models.OTDetalle).all()
-    detalle_map = {}
-    for d in detalles:
-        key = (d.ot_id, d.producto_id)
-        if key not in detalle_map:
-            detalle_map[key] = {"cantidad": 0, "valor": 0}
-        detalle_map[key]["cantidad"] += d.cantidad_usada or 0
-        detalle_map[key]["valor"] += d.costo_real or 0
-
+    """Inventario manda (Valor INV): re-valúa OTDetalle.costo_real al costo de sus
+    movimientos de inventario y recalcula los totales de cada OT afectada.
+    Así el consumo de insumos del módulo OT refleja el costo promedio real del
+    inventario, no un costo tecleado. NO modifica asientos contables (ver nota)."""
+    # Costo del inventario por (ot, producto) desde las salidas OT
     movs = db.query(models.MovimientoInventario).filter(
         models.MovimientoInventario.tipo_doc == "OT",
         models.MovimientoInventario.tipo == "salida",
     ).all()
-
-    mov_groups = {}
+    inv_cost = {}
     for m in movs:
         key = (m.ot_referencia, m.producto_id)
-        mov_groups.setdefault(key, []).append(m)
+        if key not in inv_cost:
+            inv_cost[key] = {"cantidad": 0, "valor": 0}
+        inv_cost[key]["cantidad"] += m.cantidad or 0
+        inv_cost[key]["valor"] += (m.cantidad or 0) * (m.costo_unitario or 0)
 
+    detalles = db.query(models.OTDetalle).all()
     ajustados = 0
-    sin_detalle = 0
-    for key, grupo in mov_groups.items():
-        det = detalle_map.get(key)
-        if not det or det["cantidad"] <= 0:
-            sin_detalle += len(grupo)
+    sin_movimiento = 0
+    ots_afectadas = set()
+    for d in detalles:
+        inv = inv_cost.get((d.ot_id, d.producto_id))
+        if not inv or inv["cantidad"] <= 0:
+            sin_movimiento += 1  # no inventariable o sin movimiento -> no se toca
             continue
-        costo_obj = round(det["valor"] / det["cantidad"], 4)
-        for m in grupo:
-            if round(m.costo_unitario or 0, 4) != costo_obj:
-                m.costo_unitario = costo_obj
-                ajustados += 1
+        costo_unit_inv = round(inv["valor"] / inv["cantidad"], 4)
+        nuevo_real = round((d.cantidad_usada or 0) * costo_unit_inv, 2)
+        if round(d.costo_unitario or 0, 4) != costo_unit_inv or round(d.costo_real or 0, 2) != nuevo_real:
+            d.costo_unitario = costo_unit_inv
+            d.costo_real = nuevo_real
+            ajustados += 1
+            ots_afectadas.add(d.ot_id)
+
+    # Recalcular totales de las OTs afectadas
+    ots_recalc = 0
+    for ot_id in ots_afectadas:
+        orden = db.query(models.OrdenTrabajo).filter(models.OrdenTrabajo.ot_id == ot_id).first()
+        if not orden:
+            continue
+        dets = db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all()
+        costo_insumos = round(sum(x.costo_real or 0 for x in dets), 2)
+        orden.costo_insumos = costo_insumos
+        orden.costo_total = round((orden.costo_mano_obra or 0) + costo_insumos + (orden.costo_equipo or 0), 2)
+        campo = db.query(models.Campo).filter(models.Campo.id_campo == orden.campo_id).first() if orden.campo_id else None
+        area = campo.area_ha if campo and campo.area_ha and campo.area_ha > 0 else 1
+        orden.costo_ha = round(orden.costo_total / area, 2)
+        ots_recalc += 1
 
     if ajustados:
-        audit.log(db, current_user, "RESYNC_COSTOS_OT", "INV", f"{ajustados} movimientos",
-                  f"Re-sincronización de costos OT: {ajustados} movimientos re-valuados",
-                  {"ajustados": ajustados})
+        audit.log(db, current_user, "RESYNC_COSTOS_OT", "OT", f"{ajustados} líneas",
+                  f"Re-valuación OTDetalle desde inventario: {ajustados} líneas, {ots_recalc} OTs recalculadas",
+                  {"lineas": ajustados, "ots": ots_recalc})
         try:
             db.commit()
         except Exception:
@@ -817,8 +832,9 @@ def resincronizar_costos_ot(
 
     return {
         "ok": True,
-        "movimientos_ajustados": ajustados,
-        "movimientos_sin_detalle_ot": sin_detalle,
+        "lineas_ajustadas": ajustados,
+        "ots_recalculadas": ots_recalc,
+        "lineas_sin_movimiento": sin_movimiento,
     }
 
 

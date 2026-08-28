@@ -46,10 +46,9 @@ def _crear_movimiento_consumo_ot(db: Session, ot_id: int, producto: models.Produ
     Esto garantiza trazabilidad completa en el kardex.
     """
     nuevo_stock = max(0.0, (producto.stock_actual or 0) - cantidad)
+    # Inventario manda: el consumo sale valuado al costo promedio ponderado del
+    # producto (Valor INV). La OTDetalle se alinea a este mismo valor.
     cp = producto.costo_promedio or producto.costo_unitario or 0
-    # Valuar el movimiento al MISMO costo que registró la OT (OTDetalle.costo_unitario),
-    # no al costo_promedio del momento — así inventario y el módulo OT reconcilian.
-    costo_mov = costo_unitario if costo_unitario else cp
 
     mov = models.MovimientoInventario(
         num_documento=f"OT-{ot_id}",
@@ -58,7 +57,7 @@ def _crear_movimiento_consumo_ot(db: Session, ot_id: int, producto: models.Produ
         tipo="salida",
         motivo="Consumo OT",
         cantidad=cantidad,
-        costo_unitario=round(costo_mov, 4),
+        costo_unitario=round(cp, 4),
         costo_promedio_post=round(cp, 4),
         stock_post=nuevo_stock,
         ot_referencia=ot_id,
@@ -272,12 +271,14 @@ def create_orden(data: schemas.OrdenTrabajoCreate, db: Session = Depends(get_db)
                 detail=f"Stock insuficiente para '{prod.producto}'. "
                        f"Disponible: {prod.stock_actual} {prod.unidad}, Requerido: {cantidad} {prod.unidad}")
 
-        # H-5 FIX: Usar costo_promedio (no costo_unitario/lista) para valorar consumos
-        costo_unit = det_data.costo_unitario if det_data.costo_unitario is not None else (
-            prod.costo_promedio or prod.costo_unitario or 0
-        )
-        costo_real = det_data.costo_real if det_data.costo_real is not None else (cantidad * costo_unit)
-        costo_real = max(0.0, float(costo_real))
+        # Inventario manda (Valor INV): los consumos inventariables se valúan al costo
+        # promedio del inventario, no al costo tecleado. Los no inventariables no pasan
+        # por inventario, así que usan el costo tecleado o el de lista.
+        if prod.es_inventariable:
+            costo_unit = prod.costo_promedio or prod.costo_unitario or 0
+        else:
+            costo_unit = det_data.costo_unitario if det_data.costo_unitario is not None else (prod.costo_unitario or 0)
+        costo_real = max(0.0, round(cantidad * costo_unit, 2))
 
         det = models.OTDetalle(
             ot_id=ot_id,
@@ -418,10 +419,13 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
         if cantidad > 0 and prod.es_inventariable and (prod.stock_actual or 0) < cantidad:
             raise HTTPException(status_code=400,
                 detail=f"Stock insuficiente para '{prod.producto}'. Disponible: {prod.stock_actual}")
-        costo_unit = det_data.costo_unitario if det_data.costo_unitario is not None else (
-            prod.costo_promedio or prod.costo_unitario or 0)
-        costo_real = det_data.costo_real if det_data.costo_real is not None else (cantidad * costo_unit)
-        costo_real = max(0.0, float(costo_real))
+        # Inventario manda (Valor INV): inventariables al costo promedio; no
+        # inventariables al costo tecleado o de lista.
+        if prod.es_inventariable:
+            costo_unit = prod.costo_promedio or prod.costo_unitario or 0
+        else:
+            costo_unit = det_data.costo_unitario if det_data.costo_unitario is not None else (prod.costo_unitario or 0)
+        costo_real = max(0.0, round(cantidad * costo_unit, 2))
 
         det = models.OTDetalle(
             ot_id=ot_id, producto_id=det_data.producto_id,
