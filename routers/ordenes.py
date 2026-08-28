@@ -47,6 +47,9 @@ def _crear_movimiento_consumo_ot(db: Session, ot_id: int, producto: models.Produ
     """
     nuevo_stock = max(0.0, (producto.stock_actual or 0) - cantidad)
     cp = producto.costo_promedio or producto.costo_unitario or 0
+    # Valuar el movimiento al MISMO costo que registró la OT (OTDetalle.costo_unitario),
+    # no al costo_promedio del momento — así inventario y el módulo OT reconcilian.
+    costo_mov = costo_unitario if costo_unitario else cp
 
     mov = models.MovimientoInventario(
         num_documento=f"OT-{ot_id}",
@@ -55,7 +58,7 @@ def _crear_movimiento_consumo_ot(db: Session, ot_id: int, producto: models.Produ
         tipo="salida",
         motivo="Consumo OT",
         cantidad=cantidad,
-        costo_unitario=round(cp, 4),
+        costo_unitario=round(costo_mov, 4),
         costo_promedio_post=round(cp, 4),
         stock_post=nuevo_stock,
         ot_referencia=ot_id,
@@ -69,13 +72,15 @@ def _crear_movimiento_consumo_ot(db: Session, ot_id: int, producto: models.Produ
 
 
 def _crear_movimiento_reversion_ot(db: Session, ot_id: int, producto: models.Producto,
-                                    cantidad: float, usuario_id: int):
+                                    cantidad: float, usuario_id: int, costo_unitario: float = None):
     """
     H-2 FIX: Genera un MovimientoInventario de reversión al eliminar una OT.
     Restaura stock con documento auditable.
+    Valúa al mismo costo que la salida original (costo_unitario) para netear a cero.
     """
     nuevo_stock = (producto.stock_actual or 0) + cantidad
     cp = producto.costo_promedio or producto.costo_unitario or 0
+    costo_mov = costo_unitario if costo_unitario else cp
 
     mov = models.MovimientoInventario(
         num_documento=f"OT-{ot_id}-REV",
@@ -84,7 +89,7 @@ def _crear_movimiento_reversion_ot(db: Session, ot_id: int, producto: models.Pro
         tipo="entrada",
         motivo="Reversión OT eliminada",
         cantidad=cantidad,
-        costo_unitario=round(cp, 4),
+        costo_unitario=round(costo_mov, 4),
         costo_promedio_post=round(cp, 4),
         stock_post=nuevo_stock,
         ot_referencia=ot_id,
@@ -594,19 +599,21 @@ def delete_orden(ot_id: int, db: Session = Depends(get_db),
     if not orden:
         raise HTTPException(status_code=404, detail="Orden no encontrada")
 
-    # Delete old consumo + orphaned reversion movements before creating clean reversions
+    # Solo limpiar reversiones huérfanas previas (no la salida original: se conserva
+    # para que quede el par salida(−) + reversión(+) = neto cero, con historial completo).
     db.query(models.MovimientoInventario).filter(
-        models.MovimientoInventario.num_documento.in_([f"OT-{ot_id}", f"OT-{ot_id}-REV"]),
+        models.MovimientoInventario.num_documento == f"OT-{ot_id}-REV",
         models.MovimientoInventario.tipo_doc == "OT"
     ).delete(synchronize_session="fetch")
 
-    # Restaurar stock CON movimiento de reversión auditable
+    # Restaurar stock CON movimiento de reversión auditable (la salida original se mantiene)
     detalles = db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all()
     for det in detalles:
         if det.producto_id and det.cantidad_usada and det.cantidad_usada > 0:
             prod = db.query(models.Producto).filter(models.Producto.id_prod == det.producto_id).first()
             if prod:
-                _crear_movimiento_reversion_ot(db, ot_id, prod, det.cantidad_usada, current_user.id)
+                _crear_movimiento_reversion_ot(db, ot_id, prod, det.cantidad_usada, current_user.id,
+                                               costo_unitario=det.costo_unitario)
 
     db.query(models.OTManoObra).filter(models.OTManoObra.ot_id == ot_id).delete()
     db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).delete()
