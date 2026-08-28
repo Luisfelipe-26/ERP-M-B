@@ -678,3 +678,209 @@ def marcar_inventario_inicial(
         raise HTTPException(500, "Error al marcar movimientos")
 
     return {"ok": True, "movimientos_actualizados": len(movs)}
+
+
+# ─── Reconciliar OTs sin movimiento de inventario ───────────────────────────
+
+@router.post("/reconciliar-ot")
+def reconciliar_ot(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    detalles = db.query(models.OTDetalle).all()
+
+    existentes = set()
+    movs_existentes = db.query(
+        models.MovimientoInventario.ot_referencia,
+        models.MovimientoInventario.producto_id,
+    ).filter(
+        models.MovimientoInventario.tipo_doc == "OT",
+        models.MovimientoInventario.tipo == "salida",
+    ).all()
+    for ot_ref, prod_id in movs_existentes:
+        existentes.add((ot_ref, prod_id))
+
+    agrupados = {}
+    for d in detalles:
+        key = (d.ot_id, d.producto_id)
+        if key in existentes:
+            continue
+        if key not in agrupados:
+            agrupados[key] = {"ot_id": d.ot_id, "producto_id": d.producto_id,
+                              "cantidad": 0, "costo_total": 0, "fecha": d.fecha}
+        agrupados[key]["cantidad"] += d.cantidad_usada or 0
+        agrupados[key]["costo_total"] += d.costo_real or 0
+        if d.fecha and (not agrupados[key]["fecha"] or d.fecha > agrupados[key]["fecha"]):
+            agrupados[key]["fecha"] = d.fecha
+
+    creados = []
+    for key, info in sorted(agrupados.items(), key=lambda x: x[1].get("fecha") or datetime.min):
+        prod = db.query(models.Producto).filter(models.Producto.id_prod == info["producto_id"]).first()
+        if not prod or not prod.es_inventariable:
+            continue
+        cantidad = round(info["cantidad"], 4)
+        if cantidad <= 0:
+            continue
+
+        cp = prod.costo_promedio or prod.costo_unitario or 0
+        nuevo_stock = round(max(0.0, (prod.stock_actual or 0) - cantidad), 4)
+
+        mov = models.MovimientoInventario(
+            num_documento=f"OT-{info['ot_id']}",
+            producto_id=info["producto_id"],
+            tipo_doc="OT",
+            tipo="salida",
+            motivo="Consumo OT",
+            cantidad=cantidad,
+            costo_unitario=round(cp, 4),
+            costo_promedio_post=round(cp, 4),
+            stock_post=nuevo_stock,
+            ot_referencia=info["ot_id"],
+            observacion=f"Reconciliación retroactiva — OT #{info['ot_id']}",
+            fecha=info["fecha"] or datetime.now(),
+            usuario_id=current_user.id,
+        )
+        db.add(mov)
+        prod.stock_actual = nuevo_stock
+        creados.append({"ot_id": info["ot_id"], "producto_id": info["producto_id"],
+                        "cantidad": cantidad, "stock_post": nuevo_stock})
+
+    if creados:
+        audit.log(db, current_user, "RECONCILIAR_OT", "INV", f"{len(creados)} movimientos",
+                  f"Reconciliación OT: {len(creados)} movimientos de inventario creados retroactivamente",
+                  {"movimientos": len(creados)})
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "Error al reconciliar")
+
+    return {
+        "ok": True,
+        "movimientos_creados": len(creados),
+        "detalle": creados,
+    }
+
+
+# ─── Conciliación Consumos OT vs Inventario ─────────────────────────────────
+
+@router.get("/conciliacion-ot")
+def conciliacion_ot(
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _=Depends(auth.get_current_user),
+):
+    from datetime import timedelta
+    from sqlalchemy import case
+
+    q_det = db.query(models.OTDetalle).join(
+        models.OrdenTrabajo, models.OTDetalle.ot_id == models.OrdenTrabajo.ot_id
+    )
+    q_mov = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.tipo_doc == "OT",
+        models.MovimientoInventario.tipo == "salida",
+    )
+
+    if fecha_desde:
+        q_det = q_det.filter(models.OrdenTrabajo.fecha_ejecucion >= fecha_desde)
+        q_mov = q_mov.filter(models.MovimientoInventario.fecha >= fecha_desde)
+    if fecha_hasta:
+        try:
+            dt_h = datetime.strptime(fecha_hasta, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            dt_h = datetime.fromisoformat(fecha_hasta)
+        q_det = q_det.filter(models.OrdenTrabajo.fecha_ejecucion < dt_h)
+        q_mov = q_mov.filter(models.MovimientoInventario.fecha < dt_h)
+
+    detalles = q_det.all()
+    movimientos = q_mov.all()
+
+    ot_consumos = {}
+    for d in detalles:
+        key = (d.ot_id, d.producto_id)
+        if key not in ot_consumos:
+            prod = db.query(models.Producto).filter(models.Producto.id_prod == d.producto_id).first()
+            ot_consumos[key] = {
+                "ot_id": d.ot_id,
+                "producto_id": d.producto_id,
+                "producto_nombre": prod.producto if prod else d.producto_id,
+                "unidad": d.unidad or (prod.unidad if prod else ""),
+                "cantidad_ot": 0,
+                "valor_ot": 0,
+            }
+        ot_consumos[key]["cantidad_ot"] += d.cantidad_usada or 0
+        ot_consumos[key]["valor_ot"] += d.costo_real or 0
+
+    inv_consumos = {}
+    for m in movimientos:
+        ot_ref = m.ot_referencia
+        if not ot_ref:
+            continue
+        key = (ot_ref, m.producto_id)
+        if key not in inv_consumos:
+            inv_consumos[key] = {
+                "ot_id": ot_ref,
+                "producto_id": m.producto_id,
+                "producto_nombre": m.producto.producto if m.producto else m.producto_id,
+                "unidad": m.producto.unidad if m.producto else "",
+                "cantidad_inv": 0,
+                "valor_inv": 0,
+            }
+        inv_consumos[key]["cantidad_inv"] += m.cantidad or 0
+        inv_consumos[key]["valor_inv"] += round((m.cantidad or 0) * (m.costo_unitario or 0), 2)
+
+    all_keys = set(ot_consumos.keys()) | set(inv_consumos.keys())
+    items = []
+    conciliados = 0
+    diferencias_qty = 0
+    solo_ot = 0
+    solo_inv = 0
+
+    for key in sorted(all_keys, key=lambda k: (k[0], k[1])):
+        ot = ot_consumos.get(key, {})
+        inv = inv_consumos.get(key, {})
+        q_ot = round(ot.get("cantidad_ot", 0), 4)
+        q_inv = round(inv.get("cantidad_inv", 0), 4)
+        v_ot = round(ot.get("valor_ot", 0), 2)
+        v_inv = round(inv.get("valor_inv", 0), 2)
+        dif_qty = round(q_ot - q_inv, 4)
+        dif_val = round(v_ot - v_inv, 2)
+
+        if q_ot > 0 and q_inv == 0:
+            estado = "solo_ot"
+            solo_ot += 1
+        elif q_inv > 0 and q_ot == 0:
+            estado = "solo_inv"
+            solo_inv += 1
+        elif abs(dif_qty) < 0.001 and abs(dif_val) < 0.01:
+            estado = "conciliado"
+            conciliados += 1
+        else:
+            estado = "diferencia"
+            diferencias_qty += 1
+
+        items.append({
+            "ot_id": key[0],
+            "producto_id": key[1],
+            "producto_nombre": ot.get("producto_nombre") or inv.get("producto_nombre", ""),
+            "unidad": ot.get("unidad") or inv.get("unidad", ""),
+            "cantidad_ot": q_ot,
+            "cantidad_inv": q_inv,
+            "diferencia_qty": dif_qty,
+            "valor_ot": v_ot,
+            "valor_inv": v_inv,
+            "diferencia_val": dif_val,
+            "estado": estado,
+        })
+
+    return {
+        "total": len(items),
+        "conciliados": conciliados,
+        "diferencias": diferencias_qty,
+        "solo_ot": solo_ot,
+        "solo_inv": solo_inv,
+        "valor_total_ot": round(sum(i["valor_ot"] for i in items), 2),
+        "valor_total_inv": round(sum(i["valor_inv"] for i in items), 2),
+        "items": items,
+    }
