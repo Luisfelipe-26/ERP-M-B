@@ -805,8 +805,10 @@ def resincronizar_costos_ot(
             ajustados += 1
             ots_afectadas.add(d.ot_id)
 
-    # Recalcular totales de las OTs afectadas
+    # Recalcular totales de las OTs afectadas y re-valuar sus asientos en borrador
     ots_recalc = 0
+    asientos_actualizados = 0
+    asientos_contabilizados_pendientes = []
     for ot_id in ots_afectadas:
         orden = db.query(models.OrdenTrabajo).filter(models.OrdenTrabajo.ot_id == ot_id).first()
         if not orden:
@@ -820,10 +822,35 @@ def resincronizar_costos_ot(
         orden.costo_ha = round(orden.costo_total / area, 2)
         ots_recalc += 1
 
+        # Asiento de cierre de la OT: re-valuar líneas de insumo al nuevo costo.
+        asiento = db.query(models.AsientoContable).filter(
+            models.AsientoContable.origen == "OT",
+            models.AsientoContable.referencia_id == str(ot_id),
+            models.AsientoContable.estado != "anulado",
+        ).first()
+        if asiento:
+            if asiento.estado == "contabilizado":
+                # No se edita un asiento contabilizado en sitio: requiere ajuste manual.
+                asientos_contabilizados_pendientes.append({"ot_id": ot_id, "asiento": asiento.numero,
+                                                            "costo_insumos_nuevo": costo_insumos})
+            else:
+                for ln in asiento.lineas:
+                    desc = ln.descripcion_linea or ""
+                    if desc == f"Insumos OT #{ot_id}":
+                        ln.debe = costo_insumos
+                    elif desc == f"Salida inventario OT #{ot_id}":
+                        ln.haber = costo_insumos
+                asiento.total_debe = round(sum(float(l.debe or 0) for l in asiento.lineas), 2)
+                asiento.total_haber = round(sum(float(l.haber or 0) for l in asiento.lineas), 2)
+                asientos_actualizados += 1
+
     if ajustados:
         audit.log(db, current_user, "RESYNC_COSTOS_OT", "OT", f"{ajustados} líneas",
-                  f"Re-valuación OTDetalle desde inventario: {ajustados} líneas, {ots_recalc} OTs recalculadas",
-                  {"lineas": ajustados, "ots": ots_recalc})
+                  f"Re-valuación OTDetalle desde inventario: {ajustados} líneas, {ots_recalc} OTs, "
+                  f"{asientos_actualizados} asientos borrador actualizados, "
+                  f"{len(asientos_contabilizados_pendientes)} contabilizados pendientes de ajuste",
+                  {"lineas": ajustados, "ots": ots_recalc, "asientos_borrador": asientos_actualizados,
+                   "asientos_contabilizados": asientos_contabilizados_pendientes})
         try:
             db.commit()
         except Exception:
@@ -835,6 +862,78 @@ def resincronizar_costos_ot(
         "lineas_ajustadas": ajustados,
         "ots_recalculadas": ots_recalc,
         "lineas_sin_movimiento": sin_movimiento,
+        "asientos_borrador_actualizados": asientos_actualizados,
+        "asientos_contabilizados_pendientes": asientos_contabilizados_pendientes,
+    }
+
+
+# ─── Verificación integral de cuadre (solo lectura) ─────────────────────────
+
+@router.get("/verificacion-cuadre")
+def verificacion_cuadre(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
+    """Chequeo de un vistazo del cuadre en las 3 capas: Inventario ↔ OT ↔ Asientos.
+    No modifica nada."""
+    # Capa 1: Inventario (movimientos OT)
+    movs = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.tipo_doc == "OT",
+    ).all()
+    inv_salidas = round(sum((m.cantidad or 0) * (m.costo_unitario or 0)
+                            for m in movs if m.tipo == "salida"), 2)
+    inv_reversiones = round(sum((m.cantidad or 0) * (m.costo_unitario or 0)
+                                for m in movs if m.tipo == "entrada"), 2)
+    inv_neto = round(inv_salidas - inv_reversiones, 2)
+
+    # Capa 2: OT (OTDetalle), separando inventariable de no inventariable
+    detalles = db.query(models.OTDetalle).all()
+    prod_ids = {d.producto_id for d in detalles}
+    prod_map = {}
+    if prod_ids:
+        for p in db.query(models.Producto).filter(models.Producto.id_prod.in_(prod_ids)).all():
+            prod_map[p.id_prod] = p
+    ot_inventariable = 0.0
+    ot_no_inventariable = 0.0
+    for d in detalles:
+        prod = prod_map.get(d.producto_id)
+        es_inv = prod.es_inventariable if prod else True
+        if es_inv:
+            ot_inventariable += d.costo_real or 0
+        else:
+            ot_no_inventariable += d.costo_real or 0
+    ot_inventariable = round(ot_inventariable, 2)
+    ot_no_inventariable = round(ot_no_inventariable, 2)
+
+    # Capa 3: Asientos (crédito a inventario por salida de insumos OT)
+    lineas = db.query(models.LineaAsiento).join(
+        models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
+    ).filter(
+        models.AsientoContable.origen == "OT",
+        models.AsientoContable.estado != "anulado",
+        models.LineaAsiento.descripcion_linea.like("Salida inventario OT #%"),
+    ).all()
+    asientos_inv = round(sum(float(l.haber or 0) for l in lineas), 2)
+
+    dif_inv_ot = round(inv_salidas - ot_inventariable, 2)
+    dif_ot_asiento = round(ot_inventariable - asientos_inv, 2)
+
+    return {
+        "capa_inventario": {
+            "salidas_ot": inv_salidas,
+            "reversiones_ot": inv_reversiones,
+            "neto_ot": inv_neto,
+        },
+        "capa_ot": {
+            "consumo_inventariable": ot_inventariable,
+            "consumo_no_inventariable": ot_no_inventariable,
+            "consumo_total": round(ot_inventariable + ot_no_inventariable, 2),
+        },
+        "capa_asientos": {
+            "credito_inventario_ot": asientos_inv,
+        },
+        "cuadre": {
+            "inventario_vs_ot": {"diferencia": dif_inv_ot, "cuadra": abs(dif_inv_ot) < 1},
+            "ot_vs_asientos": {"diferencia": dif_ot_asiento, "cuadra": abs(dif_ot_asiento) < 1},
+            "todo_cuadra": abs(dif_inv_ot) < 1 and abs(dif_ot_asiento) < 1,
+        },
     }
 
 
