@@ -822,6 +822,57 @@ def resincronizar_costos_ot(
     }
 
 
+# ─── Limpiar reversiones OT huérfanas (de OTs borradas con código viejo) ────
+
+@router.post("/limpiar-reversiones-huerfanas")
+def limpiar_reversiones_huerfanas(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    """Elimina reversiones OT (entradas) que NO tienen una salida OT pareja para el
+    mismo (ot, producto). Son artefactos de OTs eliminadas con el código viejo, que
+    borraba la salida y dejaba la entrada huérfana, inflando el neto de movimientos OT.
+    Borrar el registro NO altera stock_actual (valor almacenado aparte)."""
+    salidas = db.query(
+        models.MovimientoInventario.ot_referencia,
+        models.MovimientoInventario.producto_id,
+    ).filter(
+        models.MovimientoInventario.tipo_doc == "OT",
+        models.MovimientoInventario.tipo == "salida",
+    ).all()
+    salida_keys = {(ot, pid) for ot, pid in salidas}
+
+    reversiones = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.tipo_doc == "OT",
+        models.MovimientoInventario.tipo == "entrada",
+        models.MovimientoInventario.motivo == "Reversión OT eliminada",
+    ).all()
+
+    huerfanas = [r for r in reversiones if (r.ot_referencia, r.producto_id) not in salida_keys]
+    valor_eliminado = round(sum((r.cantidad or 0) * (r.costo_unitario or 0) for r in huerfanas), 2)
+    detalle = [{"id": r.id, "ot_id": r.ot_referencia, "producto_id": r.producto_id,
+                "cantidad": r.cantidad, "costo_unitario": r.costo_unitario} for r in huerfanas]
+
+    for r in huerfanas:
+        db.delete(r)
+
+    if huerfanas:
+        audit.log(db, current_user, "LIMPIAR_REV_HUERFANAS", "INV", f"{len(huerfanas)} reversiones",
+                  f"Eliminadas {len(huerfanas)} reversiones OT huérfanas (valor RD$ {valor_eliminado:,.2f})",
+                  {"eliminadas": detalle})
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "Error al limpiar reversiones")
+
+    return {
+        "ok": True,
+        "reversiones_eliminadas": len(huerfanas),
+        "valor_eliminado": valor_eliminado,
+    }
+
+
 # ─── Conciliación Consumos OT vs Inventario ─────────────────────────────────
 
 @router.get("/conciliacion-ot")
