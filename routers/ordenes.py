@@ -6,7 +6,7 @@ from database import get_db
 import models, schemas, auth
 from models import ESTADOS_OT
 from routers.sequences import get_next, peek_next
-from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
+from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas, _actualizar_saldos
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -99,6 +99,97 @@ def _crear_movimiento_reversion_ot(db: Session, ot_id: int, producto: models.Pro
     db.add(mov)
     producto.stock_actual = nuevo_stock
     return mov
+
+
+def _lineas_cierre_ot(db: Session, orden: models.OrdenTrabajo) -> list:
+    """Construye las líneas del asiento de cierre de una OT desde sus costos actuales.
+    Única fuente para el cierre y la re-valuación, así ambos generan lo mismo."""
+    ot_id = orden.ot_id
+    lineas = []
+    costo_mo = Decimal(str(orden.costo_mano_obra or 0))
+    costo_ins = Decimal(str(orden.costo_insumos or 0))
+    costo_eq = Decimal(str(orden.costo_equipo or 0))
+    un_id = getattr(orden, "unidad_negocio_id", None)
+    dep_id = getattr(orden, "departamento_id", None)
+
+    r_mo = _get_regla_cuentas(db, "nomina", "salario_jornada")
+    if r_mo and costo_mo > 0:
+        lineas.append({"cuenta_id": r_mo[0], "debe": costo_mo, "haber": 0,
+                       "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
+                       "descripcion_linea": f"MO directa OT #{ot_id}"})
+        lineas.append({"cuenta_id": r_mo[1], "debe": 0, "haber": costo_mo,
+                       "descripcion_linea": f"Nóminas por pagar OT #{ot_id}"})
+
+    r_ins = _get_regla_cuentas(db, "consumo_ot", "salida_insumo")
+    if r_ins and costo_ins > 0:
+        lineas.append({"cuenta_id": r_ins[0], "debe": costo_ins, "haber": 0,
+                       "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
+                       "descripcion_linea": f"Insumos OT #{ot_id}"})
+        lineas.append({"cuenta_id": r_ins[1], "debe": 0, "haber": costo_ins,
+                       "descripcion_linea": f"Salida inventario OT #{ot_id}"})
+
+    if costo_eq > 0:
+        cta_eq = db.query(models.CuentaContable).filter(
+            models.CuentaContable.codigo == "5.2.02").first()
+        cta_cxp = db.query(models.CuentaContable).filter(
+            models.CuentaContable.codigo == "2.1.01.01").first()
+        if cta_eq and cta_cxp:
+            lineas.append({"cuenta_id": cta_eq.id, "debe": costo_eq, "haber": 0,
+                           "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
+                           "descripcion_linea": f"Equipo OT #{ot_id}"})
+            lineas.append({"cuenta_id": cta_cxp.id, "debe": 0, "haber": costo_eq,
+                           "descripcion_linea": f"CxP equipo OT #{ot_id}"})
+    return lineas
+
+
+def _revaluar_asiento_ot(db: Session, orden: models.OrdenTrabajo):
+    """Re-valúa el asiento de cierre de una OT a los costos actuales de la orden:
+    reconstruye las líneas con _lineas_cierre_ot y ajusta saldos mensuales en ambas
+    direcciones (los asientos automáticos son gestionados por el sistema).
+    Devuelve None si no hay asiento vigente; {"duplicados": [...]} si hay más de uno
+    (no se toca ninguno); {"asiento": num, "anulado": bool} si se actualizó."""
+    asientos = db.query(models.AsientoContable).filter(
+        models.AsientoContable.origen == "OT",
+        models.AsientoContable.referencia_id == str(orden.ot_id),
+        models.AsientoContable.estado != "anulado",
+    ).order_by(models.AsientoContable.id.asc()).all()
+    if not asientos:
+        return None
+    if len(asientos) > 1:
+        return {"duplicados": [a.numero for a in asientos]}
+    asiento = asientos[0]
+
+    lineas_data = [l for l in _lineas_cierre_ot(db, orden)
+                   if Decimal(str(l.get("debe") or 0)) > 0 or Decimal(str(l.get("haber") or 0)) > 0]
+
+    _actualizar_saldos(db, asiento, -1)
+    db.query(models.LineaAsiento).filter(
+        models.LineaAsiento.asiento_id == asiento.id
+    ).delete(synchronize_session="fetch")
+
+    if not lineas_data:
+        asiento.total_debe = 0
+        asiento.total_haber = 0
+        asiento.estado = "anulado"
+        return {"asiento": asiento.numero, "anulado": True}
+
+    for l in lineas_data:
+        db.add(models.LineaAsiento(
+            asiento_id=asiento.id, cuenta_id=l["cuenta_id"],
+            debe=Decimal(str(l.get("debe") or 0)),
+            haber=Decimal(str(l.get("haber") or 0)),
+            campo_id=l.get("campo_id"), tercero_id=l.get("tercero_id"),
+            descripcion_linea=l.get("descripcion_linea"),
+            unidad_negocio_id=l.get("unidad_negocio_id"),
+            departamento_id=l.get("departamento_id"),
+            almacen_id=l.get("almacen_id"),
+        ))
+    asiento.total_debe = sum(Decimal(str(l.get("debe") or 0)) for l in lineas_data)
+    asiento.total_haber = sum(Decimal(str(l.get("haber") or 0)) for l in lineas_data)
+    db.flush()
+    db.expire(asiento, ["lineas"])
+    _actualizar_saldos(db, asiento, 1)
+    return {"asiento": asiento.numero, "anulado": False}
 
 
 # ─── Preview next OT ID (must be BEFORE /{ot_id} to avoid route conflict) ────
@@ -356,11 +447,13 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
         raise HTTPException(status_code=400, detail=f"Actividad '{data.actividad_id}' no existe")
 
     # Restore stock from old detalles (no reversion movement — edit, not delete)
+    # Solo inventariables: a los servicios nunca se les descontó stock, restaurarlo
+    # aquí inflaba stock fantasma en cada edición.
     old_detalles = db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all()
     for det in old_detalles:
         if det.producto_id and det.cantidad_usada and det.cantidad_usada > 0:
             prod = db.query(models.Producto).filter(models.Producto.id_prod == det.producto_id).first()
-            if prod:
+            if prod and prod.es_inventariable:
                 prod.stock_actual = (prod.stock_actual or 0) + det.cantidad_usada
 
     # Delete old MO and detalles
@@ -448,10 +541,21 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
     orden.costo_total = round(costo_mo_total + costo_insumos_total + costo_equipo, 2)
     orden.costo_ha = round(orden.costo_total / area, 2)
 
-    audit.log(db, current_user, "EDITAR", "OT", str(ot_id),
-              f"OT #{ot_id} editada — Total: RD$ {orden.costo_total:,.2f}")
+    # Si la OT ya tiene asiento de cierre, re-valuarlo a los nuevos costos para
+    # que OT ↔ Asientos no diverja al editar una orden cerrada.
+    res_asiento = _revaluar_asiento_ot(db, orden)
 
-    db.commit()
+    audit.log(db, current_user, "EDITAR", "OT", str(ot_id),
+              f"OT #{ot_id} editada — Total: RD$ {orden.costo_total:,.2f}",
+              {"asiento_revaluado": res_asiento} if res_asiento else None)
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("Error editando OT %s", ot_id)
+        raise HTTPException(500, "Error al editar la orden de trabajo")
     db.refresh(orden)
     return orden
 
@@ -538,50 +642,27 @@ def update_estado(ot_id: int, estado: str = Query(...), hora_cierre: Optional[st
 
             fecha_ot = (orden.fecha_ejecucion.date() if isinstance(orden.fecha_ejecucion, datetime)
                         else orden.fecha_ejecucion) if orden.fecha_ejecucion else datetime.now().date()
-            lineas = []
-            costo_mo = Decimal(str(orden.costo_mano_obra or 0))
-            costo_ins = Decimal(str(orden.costo_insumos or 0))
-            costo_eq = Decimal(str(orden.costo_equipo or 0))
 
-            un_id = getattr(orden, "unidad_negocio_id", None)
-            dep_id = getattr(orden, "departamento_id", None)
-
-            r_mo = _get_regla_cuentas(db, "nomina", "salario_jornada")
-            if r_mo and costo_mo > 0:
-                lineas.append({"cuenta_id": r_mo[0], "debe": costo_mo, "haber": 0,
-                               "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
-                               "descripcion_linea": f"MO directa OT #{ot_id}"})
-                lineas.append({"cuenta_id": r_mo[1], "debe": 0, "haber": costo_mo,
-                               "descripcion_linea": f"Nóminas por pagar OT #{ot_id}"})
-
-            r_ins = _get_regla_cuentas(db, "consumo_ot", "salida_insumo")
-            if r_ins and costo_ins > 0:
-                lineas.append({"cuenta_id": r_ins[0], "debe": costo_ins, "haber": 0,
-                               "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
-                               "descripcion_linea": f"Insumos OT #{ot_id}"})
-                lineas.append({"cuenta_id": r_ins[1], "debe": 0, "haber": costo_ins,
-                               "descripcion_linea": f"Salida inventario OT #{ot_id}"})
-
-            if costo_eq > 0:
-                cta_eq = db.query(models.CuentaContable).filter(
-                    models.CuentaContable.codigo == "5.2.02").first()
-                cta_cxp = db.query(models.CuentaContable).filter(
-                    models.CuentaContable.codigo == "2.1.01.01").first()
-                if cta_eq and cta_cxp:
-                    lineas.append({"cuenta_id": cta_eq.id, "debe": costo_eq, "haber": 0,
-                                   "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
-                                   "descripcion_linea": f"Equipo OT #{ot_id}"})
-                    lineas.append({"cuenta_id": cta_cxp.id, "debe": 0, "haber": costo_eq,
-                                   "descripcion_linea": f"CxP equipo OT #{ot_id}"})
-
-            if lineas:
-                asiento = _crear_asiento_auto(
-                    db, fecha_ot, "OT", str(ot_id),
-                    f"Cierre OT #{ot_id} — {orden.actividad_id} / {orden.campo_id or 'General'}",
-                    lineas, current_user.nombre
-                )
-                if asiento:
-                    asiento_num = asiento.numero
+            # Guard anti-duplicado: si la OT ya tiene asiento de cierre vigente
+            # (re-cierre o reapertura+cierre), se re-valúa en lugar de crear otro.
+            existente = db.query(models.AsientoContable).filter(
+                models.AsientoContable.origen == "OT",
+                models.AsientoContable.referencia_id == str(ot_id),
+                models.AsientoContable.estado != "anulado",
+            ).first()
+            if existente:
+                _revaluar_asiento_ot(db, orden)
+                asiento_num = existente.numero
+            else:
+                lineas = _lineas_cierre_ot(db, orden)
+                if lineas:
+                    asiento = _crear_asiento_auto(
+                        db, fecha_ot, "OT", str(ot_id),
+                        f"Cierre OT #{ot_id} — {orden.actividad_id} / {orden.campo_id or 'General'}",
+                        lineas, current_user.nombre
+                    )
+                    if asiento:
+                        asiento_num = asiento.numero
 
         audit.log(db, current_user, "ESTADO", "OT", str(ot_id),
                   f"OT #{ot_id}: {estado_anterior} → {estado}",
@@ -610,24 +691,45 @@ def delete_orden(ot_id: int, db: Session = Depends(get_db),
         models.MovimientoInventario.tipo_doc == "OT"
     ).delete(synchronize_session="fetch")
 
-    # Restaurar stock CON movimiento de reversión auditable (la salida original se mantiene)
+    # Restaurar stock CON movimiento de reversión auditable (la salida original se mantiene).
+    # Solo inventariables: los servicios nunca generaron salida — una reversión aquí
+    # nacía huérfana e inflaba stock fantasma.
     detalles = db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all()
     for det in detalles:
         if det.producto_id and det.cantidad_usada and det.cantidad_usada > 0:
             prod = db.query(models.Producto).filter(models.Producto.id_prod == det.producto_id).first()
-            if prod:
+            if prod and prod.es_inventariable:
                 _crear_movimiento_reversion_ot(db, ot_id, prod, det.cantidad_usada, current_user.id,
                                                costo_unitario=det.costo_unitario)
 
     db.query(models.OTManoObra).filter(models.OTManoObra.ot_id == ot_id).delete()
     db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).delete()
 
+    # Anular el asiento de cierre: el mayor no debe conservar costos de una OT borrada.
+    # Se revierte su efecto en saldos mensuales y queda excluido de consultas (estado).
+    asientos_ot = db.query(models.AsientoContable).filter(
+        models.AsientoContable.origen == "OT",
+        models.AsientoContable.referencia_id == str(ot_id),
+        models.AsientoContable.estado != "anulado",
+    ).all()
+    for a in asientos_ot:
+        _actualizar_saldos(db, a, -1)
+        a.estado = "anulado"
+        a.anulado_por = current_user.nombre
+
     audit.log(db, current_user, "ELIMINAR", "OT", str(ot_id),
               f"OT #{ot_id} eliminada: {orden.campo_id} / {orden.actividad_id} — Total era: RD$ {orden.costo_total or 0:,.2f}",
-              {"campo": orden.campo_id, "actividad": orden.actividad_id, "costo_total": orden.costo_total})
+              {"campo": orden.campo_id, "actividad": orden.actividad_id, "costo_total": orden.costo_total,
+               "asientos_anulados": [a.numero for a in asientos_ot]})
 
     db.delete(orden)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("Error eliminando OT %s", ot_id)
+        raise HTTPException(500, "Error al eliminar la orden de trabajo")
 
 
 # ── Plantilla y Carga Masiva ──

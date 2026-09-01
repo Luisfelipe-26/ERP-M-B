@@ -5,13 +5,17 @@ from database import get_db
 import models, schemas, auth
 from routers.sequences import get_next, peek_next
 from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
+from routers.ordenes import _revaluar_asiento_ot
 from typing import List, Optional
 from datetime import datetime
 import audit
 
 router = APIRouter(prefix="/api/inventario", tags=["inventario"])
 
-MOTIVOS_GI = ["Merma", "Vencimiento", "Devolucion Proveedor", "Muestra", "Uso No Productivo", "Consumo OT", "Otro"]
+# "Consumo OT" NO es motivo de GI: el consumo por OT se registra desde el módulo de
+# órdenes (crea OTDetalle + movimiento OT); una GI con ese motivo descontaría
+# inventario sin llegar jamás al costo de la OT → divergencia silenciosa.
+MOTIVOS_GI = ["Merma", "Vencimiento", "Devolucion Proveedor", "Muestra", "Uso No Productivo", "Otro"]
 
 
 def _recalc_avg_cost(producto: models.Producto, qty_in: float, precio_compra: float) -> float:
@@ -224,7 +228,7 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
             if oc:
                 all_lines = db.query(models.OrdenCompraLinea).filter(
                     models.OrdenCompraLinea.oc_id == data.orden_compra_id).all()
-                all_complete = all(l.cantidad_recibida >= l.cantidad for l in all_lines)
+                all_complete = all((l.cantidad_recibida or 0) >= (l.cantidad or 0) for l in all_lines)
                 any_received = any((l.cantidad_recibida or 0) > 0 for l in all_lines)
                 if all_complete:
                     oc.estado = "Recibida"
@@ -281,6 +285,10 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail="La cantidad debe ser mayor a 0")
 
     # H-3 FIX: Validar motivo contra lista permitida
+    if data.motivo == "Consumo OT":
+        raise HTTPException(status_code=400,
+            detail="El consumo por OT se registra desde el módulo de Órdenes de Trabajo "
+                   "(agregando el insumo a la OT). Así el costo llega a la OT y el cuadre se conserva.")
     if data.motivo not in MOTIVOS_GI:
         raise HTTPException(status_code=400,
             detail=f"Motivo '{data.motivo}' no válido. Permitidos: {', '.join(MOTIVOS_GI)}")
@@ -513,6 +521,9 @@ def valoracion_inventario(db: Session = Depends(get_db), _=Depends(auth.get_curr
 
     items = []
     for p in productos:
+        # Los servicios (no inventariables) no forman parte del valor de inventario
+        if p.es_inventariable is False:
+            continue
         cp = p.costo_promedio or p.costo_unitario or 0
         stock = p.stock_actual or 0
         valor = round(stock * cp, 2)
@@ -540,7 +551,7 @@ def valoracion_inventario(db: Session = Depends(get_db), _=Depends(auth.get_curr
 
     return {
         "total_valor": round(total_valor, 2),
-        "total_articulos": len(productos),
+        "total_articulos": len(items),
         "por_tipo": [{"tipo": k, "valor": round(v, 2)} for k, v in sorted(por_tipo.items(), key=lambda x: -x[1])],
         "bajo_minimo": bajo_minimo,
         "sin_stock": sin_stock,
@@ -805,10 +816,12 @@ def resincronizar_costos_ot(
             ajustados += 1
             ots_afectadas.add(d.ot_id)
 
-    # Recalcular totales de las OTs afectadas y re-valuar sus asientos en borrador
+    # Recalcular totales de las OTs afectadas y re-valuar su asiento de cierre
+    # (los asientos automáticos son gestionados por el sistema: se reconstruyen
+    # con los nuevos costos y se ajustan los saldos mensuales en ambas direcciones).
     ots_recalc = 0
     asientos_actualizados = 0
-    asientos_contabilizados_pendientes = []
+    asientos_duplicados = []
     for ot_id in ots_afectadas:
         orden = db.query(models.OrdenTrabajo).filter(models.OrdenTrabajo.ot_id == ot_id).first()
         if not orden:
@@ -822,35 +835,20 @@ def resincronizar_costos_ot(
         orden.costo_ha = round(orden.costo_total / area, 2)
         ots_recalc += 1
 
-        # Asiento de cierre de la OT: re-valuar líneas de insumo al nuevo costo.
-        asiento = db.query(models.AsientoContable).filter(
-            models.AsientoContable.origen == "OT",
-            models.AsientoContable.referencia_id == str(ot_id),
-            models.AsientoContable.estado != "anulado",
-        ).first()
-        if asiento:
-            if asiento.estado == "contabilizado":
-                # No se edita un asiento contabilizado en sitio: requiere ajuste manual.
-                asientos_contabilizados_pendientes.append({"ot_id": ot_id, "asiento": asiento.numero,
-                                                            "costo_insumos_nuevo": costo_insumos})
+        res = _revaluar_asiento_ot(db, orden)
+        if res:
+            if res.get("duplicados"):
+                asientos_duplicados.append({"ot_id": ot_id, "asientos": res["duplicados"]})
             else:
-                for ln in asiento.lineas:
-                    desc = ln.descripcion_linea or ""
-                    if desc == f"Insumos OT #{ot_id}":
-                        ln.debe = costo_insumos
-                    elif desc == f"Salida inventario OT #{ot_id}":
-                        ln.haber = costo_insumos
-                asiento.total_debe = round(sum(float(l.debe or 0) for l in asiento.lineas), 2)
-                asiento.total_haber = round(sum(float(l.haber or 0) for l in asiento.lineas), 2)
                 asientos_actualizados += 1
 
     if ajustados:
         audit.log(db, current_user, "RESYNC_COSTOS_OT", "OT", f"{ajustados} líneas",
                   f"Re-valuación OTDetalle desde inventario: {ajustados} líneas, {ots_recalc} OTs, "
-                  f"{asientos_actualizados} asientos borrador actualizados, "
-                  f"{len(asientos_contabilizados_pendientes)} contabilizados pendientes de ajuste",
-                  {"lineas": ajustados, "ots": ots_recalc, "asientos_borrador": asientos_actualizados,
-                   "asientos_contabilizados": asientos_contabilizados_pendientes})
+                  f"{asientos_actualizados} asientos re-valuados, "
+                  f"{len(asientos_duplicados)} OTs con asientos duplicados (revisar)",
+                  {"lineas": ajustados, "ots": ots_recalc, "asientos": asientos_actualizados,
+                   "duplicados": asientos_duplicados})
         try:
             db.commit()
         except Exception:
@@ -862,8 +860,8 @@ def resincronizar_costos_ot(
         "lineas_ajustadas": ajustados,
         "ots_recalculadas": ots_recalc,
         "lineas_sin_movimiento": sin_movimiento,
-        "asientos_borrador_actualizados": asientos_actualizados,
-        "asientos_contabilizados_pendientes": asientos_contabilizados_pendientes,
+        "asientos_actualizados": asientos_actualizados,
+        "asientos_duplicados": asientos_duplicados,
     }
 
 
@@ -912,7 +910,9 @@ def verificacion_cuadre(db: Session = Depends(get_db), _=Depends(auth.get_curren
     ).all()
     asientos_inv = round(sum(float(l.haber or 0) for l in lineas), 2)
 
-    dif_inv_ot = round(inv_salidas - ot_inventariable, 2)
+    # Neto (salidas − reversiones): una OT borrada deja el par salida+reversión que
+    # netea a cero; comparar solo salidas marcaría diferencia falsa para siempre.
+    dif_inv_ot = round(inv_neto - ot_inventariable, 2)
     dif_ot_asiento = round(ot_inventariable - asientos_inv, 2)
 
     return {
@@ -988,6 +988,40 @@ def limpiar_reversiones_huerfanas(
     }
 
 
+# ─── Normalizar stock de productos no inventariables (servicios) ────────────
+
+@router.post("/normalizar-no-inventariables")
+def normalizar_no_inventariables(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    """Pone en 0 el stock de productos no inventariables (servicios). Ese stock es
+    fantasma: lo inflaron ediciones/borrados de OT con el código anterior, que
+    restauraban stock nunca descontado. No genera movimientos porque los servicios
+    no transaccionan en inventario."""
+    prods = db.query(models.Producto).filter(
+        models.Producto.es_inventariable == False,
+        models.Producto.stock_actual != None,
+        models.Producto.stock_actual != 0,
+    ).all()
+    detalle = [{"id_prod": p.id_prod, "producto": p.producto, "stock_anterior": p.stock_actual}
+               for p in prods]
+    for p in prods:
+        p.stock_actual = 0
+
+    if prods:
+        audit.log(db, current_user, "NORMALIZAR_NO_INV", "INV", f"{len(prods)} productos",
+                  f"Stock fantasma de {len(prods)} productos no inventariables puesto en 0",
+                  {"productos": detalle})
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "Error al normalizar productos no inventariables")
+
+    return {"ok": True, "productos_corregidos": len(detalle), "detalle": detalle}
+
+
 # ─── Conciliación Consumos OT vs Inventario ─────────────────────────────────
 
 @router.get("/conciliacion-ot")
@@ -1003,9 +1037,9 @@ def conciliacion_ot(
     q_det = db.query(models.OTDetalle).join(
         models.OrdenTrabajo, models.OTDetalle.ot_id == models.OrdenTrabajo.ot_id
     )
+    # Salidas Y reversiones (entradas): las reversiones netean con su salida par.
     q_mov = db.query(models.MovimientoInventario).filter(
         models.MovimientoInventario.tipo_doc == "OT",
-        models.MovimientoInventario.tipo == "salida",
     )
 
     if fecha_desde:
@@ -1060,8 +1094,9 @@ def conciliacion_ot(
                 "cantidad_inv": 0,
                 "valor_inv": 0,
             }
-        inv_consumos[key]["cantidad_inv"] += m.cantidad or 0
-        inv_consumos[key]["valor_inv"] += round((m.cantidad or 0) * (m.costo_unitario or 0), 2)
+        signo = 1 if m.tipo == "salida" else -1  # reversiones netean la salida
+        inv_consumos[key]["cantidad_inv"] += signo * (m.cantidad or 0)
+        inv_consumos[key]["valor_inv"] += signo * round((m.cantidad or 0) * (m.costo_unitario or 0), 2)
 
     all_keys = set(ot_consumos.keys()) | set(inv_consumos.keys())
     items = []
@@ -1082,6 +1117,10 @@ def conciliacion_ot(
         v_inv = round(inv.get("valor_inv", 0), 2)
         dif_qty = round(q_ot - q_inv, 4)
         dif_val = round(v_ot - v_inv, 2)
+
+        # OT borrada: salida + reversión netean a cero y no hay detalle → no es diferencia
+        if key not in ot_consumos and abs(q_inv) < 0.001 and abs(v_inv) < 0.01:
+            continue
 
         if q_ot > 0 and q_inv == 0 and not es_inv:
             # Insumo no inventariable: está en la OT pero no pasa por inventario (correcto)
