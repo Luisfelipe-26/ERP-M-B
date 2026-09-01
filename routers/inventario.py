@@ -506,7 +506,19 @@ def list_movimientos(
             dt_hasta = datetime.fromisoformat(fecha_hasta)
         q = q.filter(models.MovimientoInventario.fecha < dt_hasta)
     movs = q.order_by(models.MovimientoInventario.fecha.desc()).limit(limit).all()
-    return [_mov_out(m) for m in movs]
+    out = [_mov_out(m) for m in movs]
+
+    # Actividad de la OT para consumos (columna Actividad en el reporte)
+    ot_ids = {m.ot_referencia for m in movs if m.ot_referencia}
+    if ot_ids:
+        filas = db.query(models.OrdenTrabajo.ot_id, models.Actividad.actividad).join(
+            models.Actividad, models.OrdenTrabajo.actividad_id == models.Actividad.id_act
+        ).filter(models.OrdenTrabajo.ot_id.in_(ot_ids)).all()
+        act_map = {ot: act for ot, act in filas}
+        for o in out:
+            if o.get("ot_referencia"):
+                o["actividad"] = act_map.get(o["ot_referencia"])
+    return out
 
 
 # ─── Valoración de Inventario ────────────────────────────────────────────────
