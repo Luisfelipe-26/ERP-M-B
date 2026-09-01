@@ -171,6 +171,7 @@ class OrdenTrabajoOut(BaseModel):
     hora_inicio: Optional[str]
     campo_id: Optional[str]
     actividad_id: Optional[str]
+    actividad_nombre: Optional[str] = None
     supervisor: Optional[str]
     estado: str
     equipo: Optional[str]

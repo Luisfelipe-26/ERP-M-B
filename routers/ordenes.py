@@ -256,7 +256,19 @@ def list_ordenes(
         )
     if buscar:
         q = q.filter(models.OrdenTrabajo.supervisor.ilike(f"%{buscar}%"))
-    return q.order_by(models.OrdenTrabajo.ot_id.asc()).offset(skip).limit(limit).all()
+    ordenes = q.order_by(models.OrdenTrabajo.ot_id.asc()).offset(skip).limit(limit).all()
+    act_ids = {o.actividad_id for o in ordenes if o.actividad_id}
+    act_map = {}
+    if act_ids:
+        filas = db.query(models.Actividad.id_act, models.Actividad.actividad).filter(
+            models.Actividad.id_act.in_(act_ids)).all()
+        act_map = {r.id_act: r.actividad for r in filas}
+    out = []
+    for o in ordenes:
+        d = schemas.OrdenTrabajoOut.from_orm(o)
+        d.actividad_nombre = act_map.get(o.actividad_id)
+        out.append(d)
+    return out
 
 
 @router.post("", response_model=schemas.OrdenTrabajoOut)
