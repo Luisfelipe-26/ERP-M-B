@@ -988,6 +988,104 @@ def limpiar_reversiones_huerfanas(
     }
 
 
+# ─── Reconstruir movimientos OT rotos (reparación de datos) ─────────────────
+
+@router.post("/reconstruir-movimientos-ot")
+def reconstruir_movimientos_ot(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    """Repara claves (ot, producto) de OTs VIVAS cuyos movimientos quedaron rotos por
+    ciclos borrar/recrear con código viejo: reversiones sin su salida par, salidas
+    faltantes (consumo sin movimiento) o cantidades que no calzan.
+
+    Para cada clave con reversiones o con brecha |consumo − neto| > 0.001:
+      elimina TODOS sus movimientos OT y crea UNA salida limpia por el consumo real,
+      valuada al costo promedio (Inventario manda).
+
+    NO toca stock_actual: el efecto histórico neto sobre el stock ya se aplicó en su
+    momento; aquí solo se reconstruye el registro documental (kardex/conciliación).
+    Las reversiones de OTs realmente borradas (par salida+reversión) no se tocan."""
+    detalles = db.query(models.OTDetalle).all()
+
+    consumo = {}
+    fechas = {}
+    for d in detalles:
+        key = (d.ot_id, d.producto_id)
+        consumo[key] = consumo.get(key, 0) + (d.cantidad_usada or 0)
+        if d.fecha and (key not in fechas or d.fecha > fechas[key]):
+            fechas[key] = d.fecha
+
+    movs = db.query(models.MovimientoInventario).filter(
+        models.MovimientoInventario.tipo_doc == "OT",
+    ).all()
+    por_clave = {}
+    for m in movs:
+        key = (m.ot_referencia, m.producto_id)
+        if key not in por_clave:
+            por_clave[key] = {"salidas": 0.0, "revs": 0.0, "n_revs": 0, "movs": []}
+        por_clave[key]["movs"].append(m)
+        if m.tipo == "salida":
+            por_clave[key]["salidas"] += m.cantidad or 0
+        else:
+            por_clave[key]["revs"] += m.cantidad or 0
+            por_clave[key]["n_revs"] += 1
+
+    prod_map = {}
+    ids = {k[1] for k in consumo}
+    if ids:
+        for p in db.query(models.Producto).filter(models.Producto.id_prod.in_(ids)).all():
+            prod_map[p.id_prod] = p
+
+    reconstruidas = []
+    for key, cant in sorted(consumo.items(), key=lambda x: (x[0][0], x[0][1])):
+        prod = prod_map.get(key[1])
+        if not prod or not prod.es_inventariable or cant <= 0:
+            continue
+        info = por_clave.get(key, {"salidas": 0.0, "revs": 0.0, "n_revs": 0, "movs": []})
+        neto = info["salidas"] - info["revs"]
+        if info["n_revs"] == 0 and abs(cant - neto) <= 0.001:
+            continue  # clave sana
+
+        for m in info["movs"]:
+            db.delete(m)
+
+        cp = prod.costo_promedio or prod.costo_unitario or 0
+        mov = models.MovimientoInventario(
+            num_documento=f"OT-{key[0]}",
+            producto_id=key[1],
+            tipo_doc="OT",
+            tipo="salida",
+            motivo="Consumo OT",
+            cantidad=round(cant, 4),
+            costo_unitario=round(cp, 4),
+            costo_promedio_post=round(cp, 4),
+            stock_post=prod.stock_actual or 0,
+            ot_referencia=key[0],
+            observacion=f"Reconstrucción conciliación — OT #{key[0]}",
+            fecha=fechas.get(key) or datetime.now(),
+            usuario_id=current_user.id,
+        )
+        db.add(mov)
+        reconstruidas.append({"ot_id": key[0], "producto_id": key[1],
+                              "movs_eliminados": len(info["movs"]),
+                              "cantidad": round(cant, 4),
+                              "valor": round(cant * cp, 2)})
+
+    if reconstruidas:
+        audit.log(db, current_user, "RECONSTRUIR_MOV_OT", "INV", f"{len(reconstruidas)} claves",
+                  f"Reconstrucción de movimientos OT: {len(reconstruidas)} claves (ot, producto) "
+                  f"reconstruidas a una salida limpia al costo promedio",
+                  {"claves": reconstruidas})
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "Error al reconstruir movimientos")
+
+    return {"ok": True, "claves_reconstruidas": len(reconstruidas), "detalle": reconstruidas}
+
+
 # ─── Normalizar stock de productos no inventariables (servicios) ────────────
 
 @router.post("/normalizar-no-inventariables")
