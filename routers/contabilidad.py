@@ -2763,7 +2763,7 @@ def listar_presupuestos_documento(anio: int = Query(None),
         ), 0)).filter(models.Presupuesto.documento_id == d.id).scalar()
         usr = db.query(models.Usuario.nombre).filter(models.Usuario.id == d.usuario_id).scalar() if d.usuario_id else None
         result.append({
-            "id": d.id, "nombre": d.nombre, "descripcion": d.descripcion,
+            "id": d.id, "numero": d.numero, "nombre": d.nombre, "descripcion": d.descripcion,
             "anio": d.anio, "periodo_inicio": d.periodo_inicio, "periodo_fin": d.periodo_fin,
             "clase_cuentas": d.clase_cuentas, "estado": d.estado,
             "lineas": lineas_count, "total": float(total or 0),
@@ -2776,15 +2776,15 @@ def listar_presupuestos_documento(anio: int = Query(None),
 def crear_presupuesto_documento(data: schemas.PresupuestoDocumentoCreate,
                                  db: Session = Depends(get_db),
                                  user=Depends(get_current_user)):
+    numero = get_next("PRES", db)
     doc = models.PresupuestoDocumento(
-        nombre=data.nombre, descripcion=data.descripcion, anio=data.anio,
-        periodo_inicio=data.periodo_inicio, periodo_fin=data.periodo_fin,
-        clase_cuentas=data.clase_cuentas, usuario_id=user.id,
+        numero=numero, nombre=data.nombre, descripcion=data.descripcion,
+        anio=data.anio, clase_cuentas=data.clase_cuentas, usuario_id=user.id,
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
-    return {"id": doc.id, "nombre": doc.nombre}
+    return {"id": doc.id, "numero": doc.numero, "nombre": doc.nombre}
 
 
 @router.get("/presupuestos-documento/{doc_id}")
@@ -2818,7 +2818,7 @@ def obtener_presupuesto_documento(doc_id: int, db: Session = Depends(get_db),
         })
     usr = db.query(models.Usuario.nombre).filter(models.Usuario.id == doc.usuario_id).scalar() if doc.usuario_id else None
     return {
-        "id": doc.id, "nombre": doc.nombre, "descripcion": doc.descripcion,
+        "id": doc.id, "numero": doc.numero, "nombre": doc.nombre, "descripcion": doc.descripcion,
         "anio": doc.anio, "periodo_inicio": doc.periodo_inicio, "periodo_fin": doc.periodo_fin,
         "clase_cuentas": doc.clase_cuentas, "estado": doc.estado,
         "usuario_nombre": usr, "created_at": str(doc.created_at) if doc.created_at else None,
@@ -2838,8 +2838,6 @@ def actualizar_presupuesto_documento(doc_id: int, data: schemas.PresupuestoDocum
     doc.nombre = data.nombre
     doc.descripcion = data.descripcion
     doc.anio = data.anio
-    doc.periodo_inicio = data.periodo_inicio
-    doc.periodo_fin = data.periodo_fin
     doc.clase_cuentas = data.clase_cuentas
     db.commit()
     return {"ok": True}

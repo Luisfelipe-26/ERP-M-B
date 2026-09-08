@@ -28,6 +28,7 @@ SEQUENCE_CONFIG = {
     'CXC':   ('CXC-', 4),
     'COB':   ('COB-', 4),
     'RP':    ('RP-',  4),
+    'PRES':  ('PRES-', 4),
 }
 
 SEQUENCE_TABLE_MAP = {

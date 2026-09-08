@@ -706,8 +706,6 @@ class PresupuestoDocumentoCreate(BaseModel):
     nombre: str
     descripcion: Optional[str] = None
     anio: int
-    periodo_inicio: int = 1
-    periodo_fin: int = 12
     clase_cuentas: str = "todas"
 
 class PresupuestoDocumentoLineaIn(BaseModel):

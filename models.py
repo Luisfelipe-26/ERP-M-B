@@ -957,6 +957,7 @@ class DepreciacionHistorial(Base):
 class PresupuestoDocumento(Base):
     __tablename__ = "presupuestos_documento"
     id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True)
     nombre = Column(String(200), nullable=False)
     descripcion = Column(Text)
     anio = Column(Integer, nullable=False)

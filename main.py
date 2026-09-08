@@ -145,6 +145,8 @@ def run_migrations():
             created_at TIMESTAMP DEFAULT NOW()
         )""",
         "CREATE INDEX IF NOT EXISTS ix_presupuestos_doc_anio ON presupuestos_documento(anio)",
+        "ALTER TABLE presupuestos_documento ADD COLUMN IF NOT EXISTS numero VARCHAR(20) UNIQUE",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_presupuestos_doc_numero ON presupuestos_documento(numero)",
         "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES presupuestos_documento(id)",
         "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS fecha DATE",
         "CREATE INDEX IF NOT EXISTS ix_presupuestos_documento ON presupuestos(documento_id)",
