@@ -2524,10 +2524,11 @@ def batch_update_presupuestos(items: list[schemas.PresupuestoBatchItem],
 def copiar_presupuesto_anio(data: schemas.CopiarPresupuestoIn,
                             db: Session = Depends(get_db), user=Depends(require_admin)):
     originales = db.query(models.Presupuesto).filter(
-        models.Presupuesto.anio == data.anio_origen
+        models.Presupuesto.anio == data.anio_origen,
+        models.Presupuesto.estado == "aprobado",
     ).all()
     if not originales:
-        raise HTTPException(404, f"No hay presupuestos para el año {data.anio_origen}")
+        raise HTTPException(404, f"No hay presupuestos aprobados para el año {data.anio_origen}")
     mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
            "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
     creados = 0
@@ -2536,7 +2537,9 @@ def copiar_presupuesto_anio(data: schemas.CopiarPresupuestoIn,
         dup = db.query(models.Presupuesto).filter(
             models.Presupuesto.anio == data.anio_destino,
             models.Presupuesto.cuenta_id == p.cuenta_id,
-            models.Presupuesto.campo_id == p.campo_id
+            models.Presupuesto.campo_id == p.campo_id,
+            models.Presupuesto.unidad_negocio_id == p.unidad_negocio_id,
+            models.Presupuesto.departamento_id == p.departamento_id,
         ).first()
         if dup:
             omitidos += 1
