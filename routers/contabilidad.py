@@ -79,7 +79,6 @@ _CLASES_PRESUPUESTABLES = {"4", "5", "6"}
 def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
     """Check budget availability for expense/cost/revenue lines.
     Returns dict with 'alertas' (warnings) and 'bloqueado' (bool).
-    Raises HTTPException(409) when control is enabled and budget is exceeded.
     """
     cfg = db.query(models.ConfigPresupuesto).first()
     if not cfg or not cfg.control_habilitado:
@@ -103,7 +102,9 @@ def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
             continue
 
         cta_id = cuenta.id
-        monto_linea = float(l.get("debe", 0) or getattr(l, "debe", 0) or 0)
+        es_acreedora = cuenta.naturaleza == "acreedora"
+        col_linea = "haber" if es_acreedora else "debe"
+        monto_linea = float(l.get(col_linea, 0) or getattr(l, col_linea, 0) or 0)
         if monto_linea <= 0:
             continue
 
@@ -111,9 +112,12 @@ def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
         un_id = l.get("unidad_negocio_id") or getattr(l, "unidad_negocio_id", None)
         dep_id = l.get("departamento_id") or getattr(l, "departamento_id", None)
 
-        pq = db.query(models.Presupuesto).filter(
+        pq = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(getattr(models.Presupuesto, mk)), 0)
+        ).filter(
             models.Presupuesto.anio == anio,
             models.Presupuesto.cuenta_id == cta_id,
+            models.Presupuesto.estado == "aprobado",
         )
         if cfg.dim_campo and campo_id:
             pq = pq.filter(models.Presupuesto.campo_id == campo_id)
@@ -122,16 +126,13 @@ def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
         if cfg.dim_departamento and dep_id:
             pq = pq.filter(models.Presupuesto.departamento_id == dep_id)
 
-        pres = pq.first()
-        if not pres:
-            continue
-
-        presupuesto_mes = float(getattr(pres, mk) or 0)
+        presupuesto_mes = float(pq.scalar() or 0)
         if presupuesto_mes <= 0:
             continue
 
+        col_real = models.LineaAsiento.haber if es_acreedora else models.LineaAsiento.debe
         lq = db.query(
-            sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.debe), 0)
+            sqlfunc.coalesce(sqlfunc.sum(col_real), 0)
         ).join(
             models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
         ).filter(
@@ -190,8 +191,7 @@ def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: st
 
     ctrl = _verificar_presupuesto(db, lineas_data, fecha)
     if ctrl["bloqueado"]:
-        logger.warning("Asiento auto %s/%s omitido: presupuesto excedido — %s", origen, referencia_id, ctrl["alertas"])
-        return None
+        logger.warning("Asiento auto %s/%s: presupuesto excedido — %s", origen, referencia_id, ctrl["alertas"])
 
     total_debe = sum(Decimal(str(l.get("debe") or 0)) for l in lineas_data)
     total_haber = sum(Decimal(str(l.get("haber") or 0)) for l in lineas_data)
@@ -2333,7 +2333,10 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
                         db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
-    q = db.query(models.Presupuesto).filter(models.Presupuesto.anio == anio)
+    q = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.estado == "aprobado",
+    )
     if campo_id:
         q = q.filter(models.Presupuesto.campo_id == campo_id)
     if unidad_negocio_id:
@@ -2344,7 +2347,18 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
     if not presupuestos:
         return []
 
-    cta_ids = {p.cuenta_id for p in presupuestos}
+    meses_keys = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+                  "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+
+    grouped: dict = {}
+    for p in presupuestos:
+        key = (p.cuenta_id, p.campo_id, p.unidad_negocio_id, p.departamento_id)
+        if key not in grouped:
+            grouped[key] = [0.0] * 12
+        for i, mk in enumerate(meses_keys):
+            grouped[key][i] += float(getattr(p, mk) or 0)
+
+    cta_ids = {k[0] for k in grouped}
     ctas = {c.id: c for c in db.query(models.CuentaContable).filter(models.CuentaContable.id.in_(cta_ids)).all()}
     periodos = {p.mes: p for p in db.query(models.PeriodoContable).filter(
         models.PeriodoContable.anio == anio).all()}
@@ -2386,46 +2400,45 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
         for sm in saldos_raw:
             saldos[(sm.cuenta_id, sm.periodo_id)] = sm
 
-    meses_keys = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
-                  "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
     result = []
-    for p in presupuestos:
-        cta = ctas.get(p.cuenta_id)
+    for (cta_id, c_id, un_id, dep_id), montos in grouped.items():
+        cta = ctas.get(cta_id)
         row = {
-            "cuenta_id": p.cuenta_id,
+            "cuenta_id": cta_id,
             "cuenta_codigo": cta.codigo if cta else None,
             "cuenta_nombre": cta.nombre if cta else None,
-            "campo_id": p.campo_id,
-            "unidad_negocio_id": p.unidad_negocio_id,
-            "departamento_id": p.departamento_id,
+            "campo_id": c_id,
+            "unidad_negocio_id": un_id,
+            "departamento_id": dep_id,
             "meses": [],
             "total_presupuesto": 0, "total_real": 0,
         }
         nat = cta.naturaleza if cta else "deudora"
-        for i, mk in enumerate(meses_keys, 1):
-            pres = float(getattr(p, mk) or 0)
+        for i in range(12):
+            pres = round(montos[i], 2)
             real = 0.0
             if reales_dim is not None:
-                debe, haber = reales_dim.get((p.cuenta_id, i), (0.0, 0.0))
+                debe, haber = reales_dim.get((cta_id, i + 1), (0.0, 0.0))
                 real = debe - haber
                 if nat == "acreedora":
                     real = -real
             else:
-                per = periodos.get(i)
+                per = periodos.get(i + 1)
                 if per:
-                    sm = saldos.get((p.cuenta_id, per.id))
+                    sm = saldos.get((cta_id, per.id))
                     if sm:
                         real = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
                         if nat == "acreedora":
                             real = -real
             desv = round(real - pres, 2) if pres else 0
-            row["meses"].append({"mes": i, "presupuesto": pres, "real": round(real, 2), "desviacion": desv})
+            row["meses"].append({"mes": i + 1, "presupuesto": pres, "real": round(real, 2), "desviacion": desv})
             row["total_presupuesto"] += pres
             row["total_real"] += real
         row["total_presupuesto"] = round(row["total_presupuesto"], 2)
         row["total_real"] = round(row["total_real"], 2)
         row["total_desviacion"] = round(row["total_real"] - row["total_presupuesto"], 2)
         result.append(row)
+    result.sort(key=lambda r: r.get("cuenta_codigo") or "")
     return result
 
 
