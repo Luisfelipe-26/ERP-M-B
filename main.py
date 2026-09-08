@@ -111,6 +111,26 @@ def run_migrations():
         "ALTER TABLE config_presupuesto ADD COLUMN IF NOT EXISTS dim_departamento BOOLEAN DEFAULT TRUE",
         "CREATE INDEX IF NOT EXISTS ix_registros_presup_anio ON registros_presupuestarios(anio)",
         "CREATE INDEX IF NOT EXISTS ix_lineas_reg_presup_registro ON lineas_registro_presupuestario(registro_id)",
+        # Escenarios de presupuesto
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS escenario VARCHAR(30) DEFAULT 'principal'",
+        "CREATE INDEX IF NOT EXISTS ix_presupuestos_escenario ON presupuestos(escenario)",
+        # Compromisos presupuestarios (encumbrance)
+        """CREATE TABLE IF NOT EXISTS compromisos_presupuestarios (
+            id SERIAL PRIMARY KEY,
+            anio INTEGER NOT NULL,
+            mes INTEGER NOT NULL,
+            cuenta_id INTEGER NOT NULL REFERENCES cuentas_contables(id),
+            campo_id VARCHAR(10) REFERENCES campos(id_campo),
+            unidad_negocio_id INTEGER REFERENCES unidades_negocio(id),
+            departamento_id INTEGER REFERENCES departamentos(id),
+            monto NUMERIC(14,2) NOT NULL,
+            origen_tipo VARCHAR(20),
+            origen_id VARCHAR(20),
+            estado VARCHAR(20) DEFAULT 'activo',
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_compromisos_origen ON compromisos_presupuestarios(origen_id)",
+        "CREATE INDEX IF NOT EXISTS ix_compromisos_cuenta_anio ON compromisos_presupuestarios(cuenta_id, anio)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

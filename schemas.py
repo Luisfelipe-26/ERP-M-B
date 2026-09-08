@@ -689,6 +689,7 @@ class PresupuestoCreate(BaseModel):
     descripcion: Optional[str] = None
     version: str = "original"
     estado: str = "borrador"
+    escenario: str = "principal"
 
 class PresupuestoOut(PresupuestoCreate):
     id: int

@@ -2,7 +2,7 @@
 Módulo Contabilidad — Núcleo contable: plan de cuentas, periodos, asientos, libro mayor, reportes.
 Contabilización automática integrada (CxP, Pagos, CxC, Cobros).
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func as sqlfunc, cast, Date as SqlDate, and_, extract
 from database import get_db
@@ -149,7 +149,24 @@ def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
             lq = lq.filter(models.LineaAsiento.departamento_id == dep_id)
 
         real_actual = float(lq.scalar() or 0)
-        real_proyectado = real_actual + monto_linea
+
+        cq = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(models.CompromisoPresupuestario.monto), 0)
+        ).filter(
+            models.CompromisoPresupuestario.anio == anio,
+            models.CompromisoPresupuestario.mes == fecha.month,
+            models.CompromisoPresupuestario.cuenta_id == cta_id,
+            models.CompromisoPresupuestario.estado == "activo",
+        )
+        if cfg.dim_campo and campo_id:
+            cq = cq.filter(models.CompromisoPresupuestario.campo_id == campo_id)
+        if cfg.dim_unidad_negocio and un_id:
+            cq = cq.filter(models.CompromisoPresupuestario.unidad_negocio_id == un_id)
+        if cfg.dim_departamento and dep_id:
+            cq = cq.filter(models.CompromisoPresupuestario.departamento_id == dep_id)
+        comprometido = float(cq.scalar() or 0)
+
+        real_proyectado = real_actual + comprometido + monto_linea
         pct = (real_proyectado / presupuesto_mes) * 100
 
         if pct >= (cfg.umbral_bloqueo or 100):
@@ -2330,12 +2347,14 @@ def eliminar_presupuesto(id: int, db: Session = Depends(get_db), user=Depends(re
 @router.get("/presupuesto-vs-real")
 def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
                         unidad_negocio_id: int = None, departamento_id: int = None,
+                        escenario: str = "principal",
                         db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
     q = db.query(models.Presupuesto).filter(
         models.Presupuesto.anio == anio,
         models.Presupuesto.estado == "aprobado",
+        models.Presupuesto.escenario == escenario,
     )
     if campo_id:
         q = q.filter(models.Presupuesto.campo_id == campo_id)
@@ -2400,6 +2419,21 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
         for sm in saldos_raw:
             saldos[(sm.cuenta_id, sm.periodo_id)] = sm
 
+    compromisos_raw = db.query(
+        models.CompromisoPresupuestario.cuenta_id,
+        models.CompromisoPresupuestario.mes,
+        func.coalesce(func.sum(models.CompromisoPresupuestario.monto), 0).label("total"),
+    ).filter(
+        models.CompromisoPresupuestario.anio == anio,
+        models.CompromisoPresupuestario.estado == "activo",
+    ).group_by(
+        models.CompromisoPresupuestario.cuenta_id,
+        models.CompromisoPresupuestario.mes,
+    ).all()
+    compromisos_map = {}
+    for cr in compromisos_raw:
+        compromisos_map[(cr.cuenta_id, cr.mes)] = float(cr.total)
+
     result = []
     for (cta_id, c_id, un_id, dep_id), montos in grouped.items():
         cta = ctas.get(cta_id)
@@ -2411,7 +2445,7 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
             "unidad_negocio_id": un_id,
             "departamento_id": dep_id,
             "meses": [],
-            "total_presupuesto": 0, "total_real": 0,
+            "total_presupuesto": 0, "total_real": 0, "total_comprometido": 0,
         }
         nat = cta.naturaleza if cta else "deudora"
         for i in range(12):
@@ -2430,15 +2464,52 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
                         real = float(sm.saldo_deudor or 0) - float(sm.saldo_acreedor or 0)
                         if nat == "acreedora":
                             real = -real
+            comp = compromisos_map.get((cta_id, i + 1), 0.0)
             desv = round(real - pres, 2) if pres else 0
-            row["meses"].append({"mes": i + 1, "presupuesto": pres, "real": round(real, 2), "desviacion": desv})
+            row["meses"].append({"mes": i + 1, "presupuesto": pres, "real": round(real, 2), "comprometido": round(comp, 2), "desviacion": desv})
             row["total_presupuesto"] += pres
             row["total_real"] += real
+            row["total_comprometido"] += comp
         row["total_presupuesto"] = round(row["total_presupuesto"], 2)
         row["total_real"] = round(row["total_real"], 2)
+        row["total_comprometido"] = round(row["total_comprometido"], 2)
         row["total_desviacion"] = round(row["total_real"] - row["total_presupuesto"], 2)
         result.append(row)
     result.sort(key=lambda r: r.get("cuenta_codigo") or "")
+    return result
+
+
+@router.get("/presupuesto-drill-down")
+def presupuesto_drill_down(
+    anio: int = Query(...), cuenta_id: int = Query(...),
+    db: Session = Depends(get_db), user=Depends(get_current_user)
+):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    from sqlalchemy import extract
+    lineas = (
+        db.query(models.LineaAsiento)
+        .join(models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id)
+        .filter(
+            models.LineaAsiento.cuenta_id == cuenta_id,
+            extract("year", models.AsientoContable.fecha) == anio,
+            models.AsientoContable.estado == "contabilizado",
+        )
+        .order_by(models.AsientoContable.fecha.desc())
+        .limit(300)
+        .all()
+    )
+    result = []
+    for l in lineas:
+        a = l.asiento
+        result.append({
+            "fecha": str(a.fecha) if a else None,
+            "asiento_numero": a.numero if a else None,
+            "descripcion": l.descripcion or (a.descripcion if a else ""),
+            "debe": float(l.debe or 0),
+            "haber": float(l.haber or 0),
+            "origen": a.origen if a else None,
+        })
     return result
 
 
@@ -2508,16 +2579,32 @@ def listar_transferencias(anio: int = Query(...), db: Session = Depends(get_db),
 @router.put("/presupuestos/batch")
 def batch_update_presupuestos(items: list[schemas.PresupuestoBatchItem],
                               db: Session = Depends(get_db), user=Depends(require_admin)):
-    ok = 0
+    MK_LIST = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+               "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    periodos_cerrados: set = set()
     for item in items:
         p = db.query(models.Presupuesto).get(item.id)
         if not p:
             continue
-        for k, v in item.model_dump(exclude={"id"}, exclude_none=True).items():
+        d = item.model_dump(exclude={"id"}, exclude_none=True)
+        for i, mk in enumerate(MK_LIST):
+            if mk in d:
+                per = db.query(models.PeriodoContable).filter(
+                    models.PeriodoContable.anio == p.anio,
+                    models.PeriodoContable.mes == i + 1,
+                    models.PeriodoContable.estado == "cerrado"
+                ).first()
+                if per:
+                    periodos_cerrados.add(f"{per.nombre or f'{p.anio}-{i+1:02d}'}")
+                    del d[mk]
+        for k, v in d.items():
             setattr(p, k, v)
-        ok += 1
+    if periodos_cerrados:
+        db.commit()
+        return {"ok": True, "actualizados": len(items),
+                "advertencia": f"Períodos cerrados no modificados: {', '.join(sorted(periodos_cerrados))}"}
     db.commit()
-    return {"ok": True, "actualizados": ok}
+    return {"ok": True, "actualizados": len(items)}
 
 
 @router.post("/presupuestos/copiar-anio")
@@ -2581,6 +2668,216 @@ def aprobar_lote(anio: int = Query(...), db: Session = Depends(get_db),
     n = q.update({"estado": "aprobado"})
     db.commit()
     return {"ok": True, "aprobados": n}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPROMISOS PRESUPUESTARIOS (Encumbrance)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/compromisos-presupuestarios")
+def listar_compromisos(anio: int = Query(...), estado: str = None,
+                       db: Session = Depends(get_db), user=Depends(get_current_user)):
+    q = db.query(models.CompromisoPresupuestario).filter(
+        models.CompromisoPresupuestario.anio == anio)
+    if estado:
+        q = q.filter(models.CompromisoPresupuestario.estado == estado)
+    items = q.order_by(models.CompromisoPresupuestario.created_at.desc()).all()
+    cta_ids = {c.cuenta_id for c in items}
+    ctas = {c.id: c for c in db.query(models.CuentaContable).filter(
+        models.CuentaContable.id.in_(cta_ids)).all()} if cta_ids else {}
+    result = []
+    for c in items:
+        cta = ctas.get(c.cuenta_id)
+        result.append({
+            "id": c.id, "anio": c.anio, "mes": c.mes,
+            "cuenta_id": c.cuenta_id,
+            "cuenta_codigo": cta.codigo if cta else None,
+            "cuenta_nombre": cta.nombre if cta else None,
+            "campo_id": c.campo_id,
+            "unidad_negocio_id": c.unidad_negocio_id,
+            "departamento_id": c.departamento_id,
+            "monto": float(c.monto), "origen_tipo": c.origen_tipo,
+            "origen_id": c.origen_id, "estado": c.estado,
+        })
+    return result
+
+
+@router.post("/compromisos-presupuestarios")
+def crear_compromiso(data: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
+    c = models.CompromisoPresupuestario(
+        anio=data["anio"], mes=data["mes"], cuenta_id=data["cuenta_id"],
+        campo_id=data.get("campo_id"), unidad_negocio_id=data.get("unidad_negocio_id"),
+        departamento_id=data.get("departamento_id"), monto=data["monto"],
+        origen_tipo=data.get("origen_tipo"), origen_id=data.get("origen_id"),
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return {"id": c.id, "ok": True}
+
+
+@router.put("/compromisos-presupuestarios/{id}/liberar")
+def liberar_compromiso(id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    c = db.query(models.CompromisoPresupuestario).get(id)
+    if not c:
+        raise HTTPException(404, "Compromiso no encontrado")
+    c.estado = "liberado"
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/compromisos-presupuestarios/por-origen/{origen_id}")
+def liberar_compromisos_por_origen(origen_id: str, db: Session = Depends(get_db),
+                                   user=Depends(require_admin)):
+    n = db.query(models.CompromisoPresupuestario).filter(
+        models.CompromisoPresupuestario.origen_id == origen_id,
+        models.CompromisoPresupuestario.estado == "activo"
+    ).update({"estado": "liberado"})
+    db.commit()
+    return {"ok": True, "liberados": n}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ESCENARIOS DE PRESUPUESTO
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/presupuestos/escenarios")
+def listar_escenarios(anio: int = Query(...), db: Session = Depends(get_db),
+                      user=Depends(get_current_user)):
+    rows = db.query(
+        models.Presupuesto.escenario,
+        func.count(models.Presupuesto.id).label("cantidad"),
+    ).filter(models.Presupuesto.anio == anio).group_by(
+        models.Presupuesto.escenario).all()
+    return [{"escenario": r.escenario, "cantidad": r.cantidad} for r in rows]
+
+
+@router.post("/presupuestos/duplicar-escenario")
+def duplicar_escenario(data: dict, db: Session = Depends(get_db),
+                       user=Depends(require_admin)):
+    anio = data["anio"]
+    origen = data.get("escenario_origen", "principal")
+    destino = data["escenario_destino"]
+    factor = float(data.get("factor", 1.0))
+    if not destino or destino == origen:
+        raise HTTPException(400, "El escenario destino debe ser diferente del origen")
+    existing = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.escenario == destino).count()
+    if existing:
+        raise HTTPException(400, f"Ya existen {existing} líneas en escenario '{destino}' para {anio}")
+    originales = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.escenario == origen).all()
+    if not originales:
+        raise HTTPException(404, f"No hay presupuestos en escenario '{origen}' para {anio}")
+    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+          "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    for p in originales:
+        nuevo = models.Presupuesto(
+            anio=p.anio, cuenta_id=p.cuenta_id, campo_id=p.campo_id,
+            unidad_negocio_id=p.unidad_negocio_id, departamento_id=p.departamento_id,
+            almacen_id=p.almacen_id, descripcion=p.descripcion,
+            version=p.version, estado="borrador", escenario=destino,
+        )
+        for m in mk:
+            setattr(nuevo, m, round(float(getattr(p, m) or 0) * factor, 2))
+        db.add(nuevo)
+    db.commit()
+    return {"ok": True, "creados": len(originales), "escenario": destino}
+
+
+@router.delete("/presupuestos/escenario/{escenario}")
+def eliminar_escenario(escenario: str, anio: int = Query(...),
+                       db: Session = Depends(get_db), user=Depends(require_admin)):
+    if escenario == "principal":
+        raise HTTPException(400, "No se puede eliminar el escenario principal")
+    n = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.escenario == escenario).delete()
+    db.commit()
+    return {"ok": True, "eliminados": n}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPORTACIÓN MASIVA DE PRESUPUESTO (Excel)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/presupuestos/importar-excel")
+def importar_presupuesto_excel(anio: int = Query(...),
+                               escenario: str = Query("principal"),
+                               file: UploadFile = File(...),
+                               db: Session = Depends(get_db),
+                               user=Depends(require_admin)):
+    import openpyxl
+    from io import BytesIO
+    content = file.file.read()
+    wb = openpyxl.load_workbook(BytesIO(content), read_only=True, data_only=True)
+    ws = wb.active
+    rows_data = list(ws.iter_rows(min_row=1, values_only=True))
+    if len(rows_data) < 2:
+        raise HTTPException(400, "El archivo debe tener al menos una fila de encabezado y una de datos")
+
+    header = [str(c or "").strip().lower() for c in rows_data[0]]
+    required = {"cuenta_codigo"}
+    if not required.issubset(set(header)):
+        raise HTTPException(400, f"Columnas requeridas: cuenta_codigo. Encontradas: {', '.join(header)}")
+
+    mk_names = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+                "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    alt_months = {"ene": "monto_ene", "feb": "monto_feb", "mar": "monto_mar", "abr": "monto_abr",
+                  "may": "monto_may", "jun": "monto_jun", "jul": "monto_jul", "ago": "monto_ago",
+                  "sep": "monto_sep", "oct": "monto_oct", "nov": "monto_nov", "dic": "monto_dic"}
+    col_map = {}
+    for i, h in enumerate(header):
+        if h in ("cuenta_codigo", "campo_id", "unidad_negocio_id", "departamento_id", "descripcion", "total"):
+            col_map[h] = i
+        elif h in mk_names:
+            col_map[h] = i
+        elif h in alt_months:
+            col_map[alt_months[h]] = i
+
+    ctas_map = {}
+    for c in db.query(models.CuentaContable).filter(models.CuentaContable.acepta_movimientos == True).all():
+        ctas_map[c.codigo] = c.id
+
+    creados, errores = 0, []
+    for row_idx, row in enumerate(rows_data[1:], start=2):
+        codigo = str(row[col_map.get("cuenta_codigo", 0)] or "").strip()
+        if not codigo:
+            continue
+        cta_id = ctas_map.get(codigo)
+        if not cta_id:
+            errores.append(f"Fila {row_idx}: cuenta '{codigo}' no encontrada")
+            continue
+
+        campo_id = str(row[col_map["campo_id"]] or "").strip() if "campo_id" in col_map else None
+        un_id = int(row[col_map["unidad_negocio_id"]]) if "unidad_negocio_id" in col_map and row[col_map["unidad_negocio_id"]] else None
+        dep_id = int(row[col_map["departamento_id"]]) if "departamento_id" in col_map and row[col_map["departamento_id"]] else None
+        desc = str(row[col_map["descripcion"]] or "").strip() if "descripcion" in col_map else None
+
+        p = models.Presupuesto(
+            anio=anio, cuenta_id=cta_id, campo_id=campo_id or None,
+            unidad_negocio_id=un_id, departamento_id=dep_id,
+            descripcion=desc, escenario=escenario, estado="borrador",
+        )
+
+        has_months = any(mk in col_map for mk in mk_names)
+        if has_months:
+            for mk in mk_names:
+                if mk in col_map:
+                    setattr(p, mk, float(row[col_map[mk]] or 0))
+        elif "total" in col_map:
+            total = float(row[col_map["total"]] or 0)
+            per_month = round(total / 12, 2)
+            for i, mk in enumerate(mk_names):
+                setattr(p, mk, per_month if i < 11 else round(total - per_month * 11, 2))
+
+        db.add(p)
+        creados += 1
+
+    db.commit()
+    return {"ok": True, "creados": creados, "errores": errores, "total_filas": len(rows_data) - 1}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

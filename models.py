@@ -978,6 +978,7 @@ class Presupuesto(Base):
     almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
     version = Column(String(30), default="original")
     estado = Column(String(20), default="borrador")
+    escenario = Column(String(30), default="principal")
 
 
 class TransferenciaPresupuesto(Base):
@@ -990,6 +991,22 @@ class TransferenciaPresupuesto(Base):
     monto = Column(Numeric(14, 2), nullable=False)
     motivo = Column(String(300))
     usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class CompromisoPresupuestario(Base):
+    __tablename__ = "compromisos_presupuestarios"
+    id = Column(Integer, primary_key=True, index=True)
+    anio = Column(Integer, nullable=False)
+    mes = Column(Integer, nullable=False)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"))
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"))
+    monto = Column(Numeric(14, 2), nullable=False)
+    origen_tipo = Column(String(20))
+    origen_id = Column(String(20), index=True)
+    estado = Column(String(20), default="activo")
     created_at = Column(DateTime, server_default=func.now())
 
 
