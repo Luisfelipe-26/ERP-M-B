@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from calendar import monthrange
 from decimal import Decimal
 import models, schemas, logging
-from routers.sequences import get_next
+from routers.sequences import get_next, peek_next
 
 logger = logging.getLogger(__name__)
 
@@ -2740,6 +2740,17 @@ def liberar_compromisos_por_origen(origen_id: str, db: Session = Depends(get_db)
 # ══════════════════════════════════════════════════════════════════════════════
 # PRESUPUESTO DOCUMENTO (maestro con nombre, período y estructura)
 # ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/presupuestos-documento/anios-fiscales")
+def anios_fiscales_disponibles(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    anios = db.query(models.PeriodoContable.anio).distinct().order_by(models.PeriodoContable.anio.desc()).all()
+    return [a[0] for a in anios]
+
+
+@router.get("/presupuestos-documento/next-numero")
+def peek_numero_presupuesto(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return {"numero": peek_next("PRES", db)}
+
 
 @router.get("/presupuestos-documento")
 def listar_presupuestos_documento(anio: int = Query(None),
