@@ -235,6 +235,9 @@ def recalcular_costos_ot(db: Session = Depends(get_db),
 def list_ordenes(
     estado: Optional[str] = None,
     campo_id: Optional[str] = None,
+    bloque: Optional[str] = None,
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
     mes: Optional[int] = None,
     ano: Optional[int] = None,
     buscar: Optional[str] = None,
@@ -248,6 +251,13 @@ def list_ordenes(
         q = q.filter(models.OrdenTrabajo.estado == estado)
     if campo_id:
         q = q.filter(models.OrdenTrabajo.campo_id == campo_id)
+    if bloque:
+        campos_bloque = db.query(models.Campo.id_campo).filter(models.Campo.bloque == bloque).subquery()
+        q = q.filter(models.OrdenTrabajo.campo_id.in_(campos_bloque))
+    if fecha_desde:
+        q = q.filter(models.OrdenTrabajo.fecha_ejecucion >= fecha_desde)
+    if fecha_hasta:
+        q = q.filter(models.OrdenTrabajo.fecha_ejecucion <= fecha_hasta + "T23:59:59")
     if mes and ano:
         q = q.filter(
             models.OrdenTrabajo.fecha_ejecucion.isnot(None),
