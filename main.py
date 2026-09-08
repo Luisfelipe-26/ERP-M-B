@@ -131,6 +131,23 @@ def run_migrations():
         )""",
         "CREATE INDEX IF NOT EXISTS ix_compromisos_origen ON compromisos_presupuestarios(origen_id)",
         "CREATE INDEX IF NOT EXISTS ix_compromisos_cuenta_anio ON compromisos_presupuestarios(cuenta_id, anio)",
+        # Presupuesto Documento (presupuesto maestro con nombre y período)
+        """CREATE TABLE IF NOT EXISTS presupuestos_documento (
+            id SERIAL PRIMARY KEY,
+            nombre VARCHAR(200) NOT NULL,
+            descripcion TEXT,
+            anio INTEGER NOT NULL,
+            periodo_inicio INTEGER DEFAULT 1,
+            periodo_fin INTEGER DEFAULT 12,
+            clase_cuentas VARCHAR(50) DEFAULT 'todas',
+            estado VARCHAR(20) DEFAULT 'borrador',
+            usuario_id INTEGER REFERENCES usuarios(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_presupuestos_doc_anio ON presupuestos_documento(anio)",
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES presupuestos_documento(id)",
+        "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS fecha DATE",
+        "CREATE INDEX IF NOT EXISTS ix_presupuestos_documento ON presupuestos(documento_id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

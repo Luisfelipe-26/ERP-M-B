@@ -954,12 +954,28 @@ class DepreciacionHistorial(Base):
     asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
 
 
+class PresupuestoDocumento(Base):
+    __tablename__ = "presupuestos_documento"
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(200), nullable=False)
+    descripcion = Column(Text)
+    anio = Column(Integer, nullable=False)
+    periodo_inicio = Column(Integer, default=1)
+    periodo_fin = Column(Integer, default=12)
+    clase_cuentas = Column(String(50), default="todas")
+    estado = Column(String(20), default="borrador")
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class Presupuesto(Base):
     __tablename__ = "presupuestos"
     id = Column(Integer, primary_key=True, index=True)
     anio = Column(Integer, nullable=False)
     cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
     campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    documento_id = Column(Integer, ForeignKey("presupuestos_documento.id"), index=True)
+    fecha = Column(Date)
     monto_ene = Column(Numeric(14, 2), default=0)
     monto_feb = Column(Numeric(14, 2), default=0)
     monto_mar = Column(Numeric(14, 2), default=0)

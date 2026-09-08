@@ -702,6 +702,23 @@ class PresupuestoOut(PresupuestoCreate):
     class Config:
         from_attributes = True
 
+class PresupuestoDocumentoCreate(BaseModel):
+    nombre: str
+    descripcion: Optional[str] = None
+    anio: int
+    periodo_inicio: int = 1
+    periodo_fin: int = 12
+    clase_cuentas: str = "todas"
+
+class PresupuestoDocumentoLineaIn(BaseModel):
+    cuenta_id: int
+    fecha: date
+    monto: float
+    campo_id: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    descripcion: Optional[str] = None
+
 class TransferenciaPresupuestoIn(BaseModel):
     origen_id: int
     destino_id: int

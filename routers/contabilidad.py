@@ -2738,6 +2738,218 @@ def liberar_compromisos_por_origen(origen_id: str, db: Session = Depends(get_db)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PRESUPUESTO DOCUMENTO (maestro con nombre, período y estructura)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/presupuestos-documento")
+def listar_presupuestos_documento(anio: int = Query(None),
+                                   db: Session = Depends(get_db),
+                                   user=Depends(get_current_user)):
+    q = db.query(models.PresupuestoDocumento)
+    if anio:
+        q = q.filter(models.PresupuestoDocumento.anio == anio)
+    docs = q.order_by(models.PresupuestoDocumento.created_at.desc()).all()
+    result = []
+    for d in docs:
+        lineas_count = db.query(sqlfunc.count(models.Presupuesto.id)).filter(
+            models.Presupuesto.documento_id == d.id).scalar() or 0
+        total = db.query(sqlfunc.coalesce(sqlfunc.sum(
+            models.Presupuesto.monto_ene + models.Presupuesto.monto_feb +
+            models.Presupuesto.monto_mar + models.Presupuesto.monto_abr +
+            models.Presupuesto.monto_may + models.Presupuesto.monto_jun +
+            models.Presupuesto.monto_jul + models.Presupuesto.monto_ago +
+            models.Presupuesto.monto_sep + models.Presupuesto.monto_oct +
+            models.Presupuesto.monto_nov + models.Presupuesto.monto_dic
+        ), 0)).filter(models.Presupuesto.documento_id == d.id).scalar()
+        usr = db.query(models.Usuario.nombre).filter(models.Usuario.id == d.usuario_id).scalar() if d.usuario_id else None
+        result.append({
+            "id": d.id, "nombre": d.nombre, "descripcion": d.descripcion,
+            "anio": d.anio, "periodo_inicio": d.periodo_inicio, "periodo_fin": d.periodo_fin,
+            "clase_cuentas": d.clase_cuentas, "estado": d.estado,
+            "lineas": lineas_count, "total": float(total or 0),
+            "usuario_nombre": usr, "created_at": str(d.created_at) if d.created_at else None,
+        })
+    return result
+
+
+@router.post("/presupuestos-documento")
+def crear_presupuesto_documento(data: schemas.PresupuestoDocumentoCreate,
+                                 db: Session = Depends(get_db),
+                                 user=Depends(get_current_user)):
+    doc = models.PresupuestoDocumento(
+        nombre=data.nombre, descripcion=data.descripcion, anio=data.anio,
+        periodo_inicio=data.periodo_inicio, periodo_fin=data.periodo_fin,
+        clase_cuentas=data.clase_cuentas, usuario_id=user.id,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return {"id": doc.id, "nombre": doc.nombre}
+
+
+@router.get("/presupuestos-documento/{doc_id}")
+def obtener_presupuesto_documento(doc_id: int, db: Session = Depends(get_db),
+                                   user=Depends(get_current_user)):
+    doc = db.query(models.PresupuestoDocumento).get(doc_id)
+    if not doc:
+        raise HTTPException(404, "Documento no encontrado")
+    lineas = db.query(models.Presupuesto).filter(
+        models.Presupuesto.documento_id == doc_id
+    ).order_by(models.Presupuesto.fecha.asc().nullslast(), models.Presupuesto.id).all()
+    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+          "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    lineas_out = []
+    for ln in lineas:
+        cta = db.query(models.CuentaContable).get(ln.cuenta_id)
+        total_ln = sum(float(getattr(ln, m) or 0) for m in mk)
+        lineas_out.append({
+            "id": ln.id, "cuenta_id": ln.cuenta_id,
+            "cuenta_codigo": cta.codigo if cta else None, "cuenta_nombre": cta.nombre if cta else None,
+            "campo_id": ln.campo_id,
+            "campo_nombre": db.query(models.Campo.nombre).filter(models.Campo.id_campo == ln.campo_id).scalar() if ln.campo_id else None,
+            "unidad_negocio_id": ln.unidad_negocio_id,
+            "unidad_negocio_nombre": db.query(models.UnidadNegocio.nombre).filter(models.UnidadNegocio.id == ln.unidad_negocio_id).scalar() if ln.unidad_negocio_id else None,
+            "departamento_id": ln.departamento_id,
+            "departamento_nombre": db.query(models.Departamento.nombre).filter(models.Departamento.id == ln.departamento_id).scalar() if ln.departamento_id else None,
+            "fecha": str(ln.fecha) if ln.fecha else None,
+            "descripcion": ln.descripcion, "estado": ln.estado,
+            "total": round(total_ln, 2),
+            **{m: float(getattr(ln, m) or 0) for m in mk},
+        })
+    usr = db.query(models.Usuario.nombre).filter(models.Usuario.id == doc.usuario_id).scalar() if doc.usuario_id else None
+    return {
+        "id": doc.id, "nombre": doc.nombre, "descripcion": doc.descripcion,
+        "anio": doc.anio, "periodo_inicio": doc.periodo_inicio, "periodo_fin": doc.periodo_fin,
+        "clase_cuentas": doc.clase_cuentas, "estado": doc.estado,
+        "usuario_nombre": usr, "created_at": str(doc.created_at) if doc.created_at else None,
+        "lineas": lineas_out,
+    }
+
+
+@router.put("/presupuestos-documento/{doc_id}")
+def actualizar_presupuesto_documento(doc_id: int, data: schemas.PresupuestoDocumentoCreate,
+                                      db: Session = Depends(get_db),
+                                      user=Depends(get_current_user)):
+    doc = db.query(models.PresupuestoDocumento).get(doc_id)
+    if not doc:
+        raise HTTPException(404, "Documento no encontrado")
+    if doc.estado == "aprobado":
+        raise HTTPException(400, "No se puede editar un documento aprobado")
+    doc.nombre = data.nombre
+    doc.descripcion = data.descripcion
+    doc.anio = data.anio
+    doc.periodo_inicio = data.periodo_inicio
+    doc.periodo_fin = data.periodo_fin
+    doc.clase_cuentas = data.clase_cuentas
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/presupuestos-documento/{doc_id}/lineas")
+def agregar_linea_documento(doc_id: int, data: schemas.PresupuestoDocumentoLineaIn,
+                             db: Session = Depends(get_db),
+                             user=Depends(get_current_user)):
+    doc = db.query(models.PresupuestoDocumento).get(doc_id)
+    if not doc:
+        raise HTTPException(404, "Documento no encontrado")
+    if doc.estado == "aprobado":
+        raise HTTPException(400, "Documento ya aprobado, no se pueden agregar líneas")
+    mes = data.fecha.month
+    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+          "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    vals = {m: 0 for m in mk}
+    vals[mk[mes - 1]] = round(data.monto, 2)
+    ln = models.Presupuesto(
+        anio=doc.anio, cuenta_id=data.cuenta_id, campo_id=data.campo_id,
+        unidad_negocio_id=data.unidad_negocio_id, departamento_id=data.departamento_id,
+        documento_id=doc_id, fecha=data.fecha, descripcion=data.descripcion,
+        estado="borrador", escenario="principal", **vals,
+    )
+    db.add(ln)
+    db.commit()
+    db.refresh(ln)
+    return {"id": ln.id, "mes_asignado": mes}
+
+
+@router.put("/presupuestos-documento/{doc_id}/lineas/{linea_id}")
+def actualizar_linea_documento(doc_id: int, linea_id: int,
+                                data: schemas.PresupuestoDocumentoLineaIn,
+                                db: Session = Depends(get_db),
+                                user=Depends(get_current_user)):
+    doc = db.query(models.PresupuestoDocumento).get(doc_id)
+    if not doc:
+        raise HTTPException(404, "Documento no encontrado")
+    if doc.estado == "aprobado":
+        raise HTTPException(400, "Documento aprobado")
+    ln = db.query(models.Presupuesto).filter(
+        models.Presupuesto.id == linea_id,
+        models.Presupuesto.documento_id == doc_id).first()
+    if not ln:
+        raise HTTPException(404, "Línea no encontrada")
+    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may", "monto_jun",
+          "monto_jul", "monto_ago", "monto_sep", "monto_oct", "monto_nov", "monto_dic"]
+    for m in mk:
+        setattr(ln, m, 0)
+    mes = data.fecha.month
+    setattr(ln, mk[mes - 1], round(data.monto, 2))
+    ln.cuenta_id = data.cuenta_id
+    ln.campo_id = data.campo_id
+    ln.unidad_negocio_id = data.unidad_negocio_id
+    ln.departamento_id = data.departamento_id
+    ln.fecha = data.fecha
+    ln.descripcion = data.descripcion
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/presupuestos-documento/{doc_id}/lineas/{linea_id}")
+def eliminar_linea_documento(doc_id: int, linea_id: int,
+                              db: Session = Depends(get_db),
+                              user=Depends(get_current_user)):
+    doc = db.query(models.PresupuestoDocumento).get(doc_id)
+    if not doc:
+        raise HTTPException(404)
+    if doc.estado == "aprobado":
+        raise HTTPException(400, "Documento aprobado")
+    n = db.query(models.Presupuesto).filter(
+        models.Presupuesto.id == linea_id,
+        models.Presupuesto.documento_id == doc_id).delete()
+    db.commit()
+    return {"ok": True, "eliminadas": n}
+
+
+@router.put("/presupuestos-documento/{doc_id}/aprobar")
+def aprobar_presupuesto_documento(doc_id: int, db: Session = Depends(get_db),
+                                   user=Depends(require_admin)):
+    doc = db.query(models.PresupuestoDocumento).get(doc_id)
+    if not doc:
+        raise HTTPException(404)
+    if doc.estado == "aprobado":
+        raise HTTPException(400, "Ya aprobado")
+    doc.estado = "aprobado"
+    n = db.query(models.Presupuesto).filter(
+        models.Presupuesto.documento_id == doc_id,
+        models.Presupuesto.estado == "borrador"
+    ).update({"estado": "aprobado"}, synchronize_session=False)
+    db.commit()
+    return {"ok": True, "lineas_aprobadas": n}
+
+
+@router.delete("/presupuestos-documento/{doc_id}")
+def eliminar_presupuesto_documento(doc_id: int, db: Session = Depends(get_db),
+                                    user=Depends(require_admin)):
+    doc = db.query(models.PresupuestoDocumento).get(doc_id)
+    if not doc:
+        raise HTTPException(404)
+    if doc.estado == "aprobado":
+        raise HTTPException(400, "No se puede eliminar un documento aprobado")
+    db.query(models.Presupuesto).filter(models.Presupuesto.documento_id == doc_id).delete()
+    db.delete(doc)
+    db.commit()
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ESCENARIOS DE PRESUPUESTO
 # ══════════════════════════════════════════════════════════════════════════════
 
