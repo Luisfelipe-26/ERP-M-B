@@ -3207,6 +3207,80 @@ def obtener_registro_presupuestario(id: int, db: Session = Depends(get_db),
     }
 
 
+def _validar_reglas_tipo_registro(tipo: str, lineas):
+    """Valida reglas de signo según tipo de registro presupuestario."""
+    for ln in lineas:
+        total = sum(float(getattr(ln, mk, 0) or 0) for mk in MK_PRES)
+        if tipo in ("original", "adicion") and total < 0:
+            raise HTTPException(400, f"Las líneas de tipo '{tipo}' deben ser positivas")
+    if tipo == "transferencia":
+        neto = sum(sum(float(getattr(ln, mk, 0) or 0) for mk in MK_PRES) for ln in lineas)
+        if round(neto, 2) != 0:
+            raise HTTPException(400, f"Las transferencias deben sumar cero (neto actual: {round(neto, 2)})")
+
+
+@router.get("/presupuestos/saldo-linea")
+def saldo_linea_presupuesto(
+    anio: int = Query(...), cuenta_id: int = Query(...),
+    campo_id: str = None, unidad_negocio_id: int = None,
+    departamento_id: int = None,
+    db: Session = Depends(get_db), user=Depends(get_current_user),
+):
+    """Retorna presupuestado, ejecutado y disponible para una cuenta+dimensión."""
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.estado == "aprobado",
+    )
+    if campo_id:
+        q = q.filter(models.Presupuesto.campo_id == campo_id)
+    else:
+        q = q.filter(models.Presupuesto.campo_id.is_(None))
+    if unidad_negocio_id:
+        q = q.filter(models.Presupuesto.unidad_negocio_id == unidad_negocio_id)
+    else:
+        q = q.filter(models.Presupuesto.unidad_negocio_id.is_(None))
+    if departamento_id:
+        q = q.filter(models.Presupuesto.departamento_id == departamento_id)
+    else:
+        q = q.filter(models.Presupuesto.departamento_id.is_(None))
+    q = q.filter(models.Presupuesto.cuenta_id == cuenta_id)
+    presup = q.all()
+    total_presupuestado = sum(
+        sum(float(getattr(p, mk) or 0) for mk in MK_PRES) for p in presup
+    )
+    from sqlalchemy import extract
+    ejecutado_q = db.query(
+        func.coalesce(func.sum(models.LineaAsiento.debe), 0).label("total_debe"),
+        func.coalesce(func.sum(models.LineaAsiento.haber), 0).label("total_haber"),
+    ).join(
+        models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
+    ).filter(
+        models.LineaAsiento.cuenta_id == cuenta_id,
+        models.AsientoContable.estado == "contabilizado",
+        extract("year", models.AsientoContable.fecha) == anio,
+    )
+    if campo_id:
+        ejecutado_q = ejecutado_q.filter(models.LineaAsiento.campo_id == campo_id)
+    if unidad_negocio_id:
+        ejecutado_q = ejecutado_q.filter(models.LineaAsiento.unidad_negocio_id == unidad_negocio_id)
+    if departamento_id:
+        ejecutado_q = ejecutado_q.filter(models.LineaAsiento.departamento_id == departamento_id)
+    row = ejecutado_q.first()
+    cta = db.query(models.CuentaContable).get(cuenta_id)
+    nat = (cta.codigo or "")[0] if cta else "0"
+    debe = float(row.total_debe) if row else 0
+    haber = float(row.total_haber) if row else 0
+    ejecutado = (debe - haber) if nat in ("4", "5", "6", "7") else (haber - debe)
+    disponible = round(total_presupuestado - ejecutado, 2)
+    return {
+        "presupuestado": round(total_presupuestado, 2),
+        "ejecutado": round(ejecutado, 2),
+        "disponible": disponible,
+    }
+
+
 @router.post("/registros-presupuestarios")
 def crear_registro_presupuestario(data: schemas.RegistroPresupuestarioIn,
                                   db: Session = Depends(get_db),
@@ -3218,6 +3292,7 @@ def crear_registro_presupuestario(data: schemas.RegistroPresupuestarioIn,
     for ln in data.lineas:
         if not db.query(models.CuentaContable).get(ln.cuenta_id):
             raise HTTPException(400, f"Cuenta {ln.cuenta_id} no existe")
+    _validar_reglas_tipo_registro(data.tipo, data.lineas)
     numero = get_next("RP", db)
     reg = models.RegistroPresupuestario(
         numero=numero, fecha=date.today(), tipo=data.tipo,
@@ -3250,6 +3325,7 @@ def actualizar_registro_presupuestario(id: int, data: schemas.RegistroPresupuest
         raise HTTPException(404, "Registro no encontrado")
     if reg.estado != "borrador":
         raise HTTPException(400, "Solo se pueden editar registros en estado borrador")
+    _validar_reglas_tipo_registro(data.tipo, data.lineas)
     reg.tipo = data.tipo
     reg.anio = data.anio
     reg.descripcion = data.descripcion
