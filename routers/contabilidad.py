@@ -3162,14 +3162,20 @@ def listar_registros_presupuestarios(anio: int = None, tipo: str = None,
     usr_ids = {r.usuario_id for r in regs if r.usuario_id}
     usrs = {u.id: u.nombre for u in db.query(models.Usuario).filter(
         models.Usuario.id.in_(usr_ids)).all()} if usr_ids else {}
+    doc_ids = {r.documento_id for r in regs if r.documento_id}
+    docs = {d.id: d for d in db.query(models.PresupuestoDocumento).filter(
+        models.PresupuestoDocumento.id.in_(doc_ids)).all()} if doc_ids else {}
     result = []
     for r in regs:
         lineas_out = [_enrich_linea(ln, ctas, campos_map, uns, deps) for ln in r.lineas]
         total = round(sum(l["total"] for l in lineas_out), 2)
+        doc = docs.get(r.documento_id)
         result.append({
             "id": r.id, "numero": r.numero, "fecha": str(r.fecha), "tipo": r.tipo,
             "anio": r.anio, "descripcion": r.descripcion, "estado": r.estado,
             "usuario_nombre": usrs.get(r.usuario_id, ""),
+            "documento_id": r.documento_id,
+            "documento_nombre": f"{doc.numero} — {doc.nombre}" if doc else None,
             "created_at": str(r.created_at) if r.created_at else None,
             "lineas": lineas_out, "total": total,
         })
@@ -3187,11 +3193,14 @@ def obtener_registro_presupuestario(id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Registro no encontrado")
     ctas, campos_map, uns, deps = _build_lookups(db, r.lineas) if r.lineas else ({}, {}, {}, {})
     usr = db.query(models.Usuario).get(r.usuario_id) if r.usuario_id else None
+    doc = db.query(models.PresupuestoDocumento).get(r.documento_id) if r.documento_id else None
     lineas_out = [_enrich_linea(ln, ctas, campos_map, uns, deps) for ln in r.lineas]
     return {
         "id": r.id, "numero": r.numero, "fecha": str(r.fecha), "tipo": r.tipo,
         "anio": r.anio, "descripcion": r.descripcion, "estado": r.estado,
         "usuario_nombre": usr.nombre if usr else "",
+        "documento_id": r.documento_id,
+        "documento_nombre": f"{doc.numero} — {doc.nombre}" if doc else None,
         "created_at": str(r.created_at) if r.created_at else None,
         "lineas": lineas_out,
         "total": round(sum(l["total"] for l in lineas_out), 2),
@@ -3213,6 +3222,7 @@ def crear_registro_presupuestario(data: schemas.RegistroPresupuestarioIn,
     reg = models.RegistroPresupuestario(
         numero=numero, fecha=date.today(), tipo=data.tipo,
         anio=data.anio, descripcion=data.descripcion,
+        documento_id=data.documento_id,
         estado="borrador", usuario_id=user.id,
     )
     db.add(reg)
@@ -3243,6 +3253,7 @@ def actualizar_registro_presupuestario(id: int, data: schemas.RegistroPresupuest
     reg.tipo = data.tipo
     reg.anio = data.anio
     reg.descripcion = data.descripcion
+    reg.documento_id = data.documento_id
     db.query(models.LineaRegistroPresupuestario).filter(
         models.LineaRegistroPresupuestario.registro_id == id).delete()
     for ln in data.lineas:

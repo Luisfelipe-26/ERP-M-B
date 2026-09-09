@@ -771,6 +771,7 @@ class RegistroPresupuestarioIn(BaseModel):
     tipo: str
     anio: int
     descripcion: Optional[str] = None
+    documento_id: Optional[int] = None
     lineas: List[LineaRegistroPresupuestarioIn]
 
 class LineaRegistroPresupuestarioOut(LineaRegistroPresupuestarioIn):
@@ -794,6 +795,8 @@ class RegistroPresupuestarioOut(BaseModel):
     descripcion: Optional[str] = None
     estado: str
     usuario_nombre: Optional[str] = None
+    documento_id: Optional[int] = None
+    documento_nombre: Optional[str] = None
     created_at: Optional[datetime] = None
     lineas: List[LineaRegistroPresupuestarioOut] = []
     total: Optional[float] = None

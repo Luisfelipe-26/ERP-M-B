@@ -1050,6 +1050,7 @@ class RegistroPresupuestario(Base):
     descripcion = Column(String(300))
     estado = Column(String(20), default="borrador")
     usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    documento_id = Column(Integer, ForeignKey("presupuestos_documento.id"), index=True)
     created_at = Column(DateTime, server_default=func.now())
     lineas = relationship("LineaRegistroPresupuestario", cascade="all, delete-orphan",
                           backref="registro")

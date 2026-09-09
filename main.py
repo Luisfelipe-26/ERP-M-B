@@ -150,6 +150,9 @@ def run_migrations():
         "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES presupuestos_documento(id)",
         "ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS fecha DATE",
         "CREATE INDEX IF NOT EXISTS ix_presupuestos_documento ON presupuestos(documento_id)",
+        # Documento presupuestario en registros presupuestarios
+        "ALTER TABLE registros_presupuestarios ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES presupuestos_documento(id)",
+        "CREATE INDEX IF NOT EXISTS ix_reg_presup_doc ON registros_presupuestarios(documento_id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).
