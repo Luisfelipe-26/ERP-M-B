@@ -3250,10 +3250,9 @@ def saldo_linea_presupuesto(
     total_presupuestado = sum(
         sum(float(getattr(p, mk) or 0) for mk in MK_PRES) for p in presup
     )
-    from sqlalchemy import extract
     ejecutado_q = db.query(
-        func.coalesce(func.sum(models.LineaAsiento.debe), 0).label("total_debe"),
-        func.coalesce(func.sum(models.LineaAsiento.haber), 0).label("total_haber"),
+        sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.debe), 0).label("total_debe"),
+        sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.haber), 0).label("total_haber"),
     ).join(
         models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
     ).filter(
