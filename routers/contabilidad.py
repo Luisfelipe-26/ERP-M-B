@@ -2339,6 +2339,8 @@ def eliminar_presupuesto(id: int, db: Session = Depends(get_db), user=Depends(re
     p = db.query(models.Presupuesto).get(id)
     if not p:
         raise HTTPException(404, "Presupuesto no encontrado")
+    if p.estado == "aprobado":
+        raise HTTPException(400, "No se puede eliminar una línea aprobada")
     db.delete(p)
     db.commit()
     return {"ok": True}
