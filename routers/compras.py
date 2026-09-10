@@ -54,6 +54,9 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
         fecha=data.fecha or datetime.now(),
         proveedor=data.proveedor,
         campo_id=data.campo_id,
+        unidad_negocio_id=data.unidad_negocio_id,
+        departamento_id=data.departamento_id,
+        almacen_id=data.almacen_id,
         estado="Pendiente",
         observaciones=data.observaciones,
     )
@@ -84,6 +87,19 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
         ))
 
     oc.total_estimado = round(total, 2)
+
+    r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
+    if r_compra and total > 0:
+        fecha_oc = data.fecha or datetime.now()
+        db.add(models.CompromisoPresupuestario(
+            anio=fecha_oc.year, mes=fecha_oc.month,
+            cuenta_id=r_compra[0],
+            campo_id=data.campo_id,
+            unidad_negocio_id=data.unidad_negocio_id,
+            departamento_id=data.departamento_id,
+            monto=Decimal(str(round(total, 2))),
+            origen_tipo="OC", origen_id=oc_id, estado="activo",
+        ))
 
     audit.log(db, current_user, "CREAR", "OC", oc_id,
               f"OC {oc_id} creada: {data.proveedor or 'Sin proveedor'} — Total: RD$ {total:,.2f}",
@@ -145,6 +161,12 @@ def update_oc_estado(oc_id: str, estado: str = Query(...),
     if not oc:
         raise HTTPException(status_code=404, detail="Orden de compra no encontrada")
     oc.estado = estado
+    if estado == "Cancelada":
+        db.query(models.CompromisoPresupuestario).filter(
+            models.CompromisoPresupuestario.origen_tipo == "OC",
+            models.CompromisoPresupuestario.origen_id == oc_id,
+            models.CompromisoPresupuestario.estado == "activo",
+        ).update({"estado": "cancelado"})
     db.commit()
     return {"ok": True, "estado": estado}
 
@@ -231,19 +253,28 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
         elif any_received:
             oc.estado = "Parcial"
 
+        if all_received:
+            db.query(models.CompromisoPresupuestario).filter(
+                models.CompromisoPresupuestario.origen_tipo == "OC",
+                models.CompromisoPresupuestario.origen_id == oc_id,
+                models.CompromisoPresupuestario.estado == "activo",
+            ).update({"estado": "ejecutado"})
+
         asiento_num = None
         if total_recibido_now > 0:
             monto = Decimal(str(round(total_recibido_now, 2)))
             r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
             if r_compra:
+                dim = {"campo_id": oc.campo_id, "unidad_negocio_id": oc.unidad_negocio_id, "departamento_id": oc.departamento_id}
                 asiento = _crear_asiento_auto(
                     db, datetime.now().date(), "GR", oc_id,
                     f"Recepción OC {oc_id} — {oc.proveedor or 'Proveedor'}",
                     [
                         {"cuenta_id": r_compra[0], "debe": monto, "haber": 0,
-                         "campo_id": oc.campo_id,
+                         **dim,
                          "descripcion_linea": f"Entrada inventario OC {oc_id}"},
                         {"cuenta_id": r_compra[1], "debe": 0, "haber": monto,
+                         **dim,
                          "descripcion_linea": f"CxP recepción OC {oc_id}"},
                     ],
                     current_user.nombre
@@ -276,6 +307,9 @@ def update_oc(oc_id: str, data: schemas.OrdenCompraCreate, db: Session = Depends
     oc.fecha = data.fecha or oc.fecha
     oc.proveedor = data.proveedor or oc.proveedor
     oc.campo_id = data.campo_id
+    oc.unidad_negocio_id = data.unidad_negocio_id
+    oc.departamento_id = data.departamento_id
+    oc.almacen_id = data.almacen_id
     oc.observaciones = data.observaciones
 
     # Replace lines if provided
