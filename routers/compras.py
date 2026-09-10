@@ -331,6 +331,17 @@ def update_oc(oc_id: str, data: schemas.OrdenCompraCreate, db: Session = Depends
             ))
         oc.total_estimado = round(total, 2)
 
+        comp = db.query(models.CompromisoPresupuestario).filter(
+            models.CompromisoPresupuestario.origen_tipo == "OC",
+            models.CompromisoPresupuestario.origen_id == oc_id,
+            models.CompromisoPresupuestario.estado == "activo",
+        ).first()
+        if comp:
+            comp.monto = Decimal(str(round(total, 2)))
+            comp.campo_id = data.campo_id
+            comp.unidad_negocio_id = data.unidad_negocio_id
+            comp.departamento_id = data.departamento_id
+
     audit.log(db, current_user, "MODIFICAR", "OC", oc_id,
               f"OC {oc_id} editada: proveedor={oc.proveedor}, campo={oc.campo_id}",
               {"proveedor": oc.proveedor, "campo_id": oc.campo_id,
@@ -353,6 +364,10 @@ def delete_oc(oc_id: str, db: Session = Depends(get_db),
               {"proveedor": oc.proveedor, "estado": oc.estado,
                "total_estimado": float(oc.total_estimado or 0)})
 
+    db.query(models.CompromisoPresupuestario).filter(
+        models.CompromisoPresupuestario.origen_tipo == "OC",
+        models.CompromisoPresupuestario.origen_id == oc_id,
+    ).delete()
     db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).delete()
     db.delete(oc)
     db.commit()
