@@ -169,11 +169,21 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
             "estado": comp.estado, "anio": comp.anio, "mes": comp.mes,
         }
 
+    cxp_list = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.oc_id == oc_id,
+    ).order_by(models.CuentaPorPagar.fecha_factura.desc()).all()
+    cxp_out = [{
+        "numero": c.numero, "fecha": str(c.fecha_factura),
+        "total": float(c.total or 0), "saldo": float(c.saldo_pendiente or 0),
+        "estado": c.estado, "num_factura": c.num_factura_proveedor,
+    } for c in cxp_list]
+
     return {
         "orden": schemas.OrdenCompraOut.model_validate(oc),
         "lineas": lineas_out,
         "asiento_contable": asiento_info,
         "compromiso": compromiso_info,
+        "cuentas_por_pagar": cxp_out,
     }
 
 
@@ -286,6 +296,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
             ).update({"estado": "ejecutado"})
 
         asiento_num = None
+        cxp_numero = None
         if total_recibido_now > 0:
             monto = Decimal(str(round(total_recibido_now, 2)))
             r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
@@ -307,6 +318,35 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                 if asiento:
                     asiento_num = asiento.numero
 
+            prov = db.query(models.Proveedor).filter(
+                models.Proveedor.nombre == oc.proveedor,
+                models.Proveedor.activo == True,
+            ).first() if oc.proveedor else None
+
+            if prov:
+                from datetime import timedelta
+                cxp_num = get_next("CXP", db)
+                fecha_hoy = datetime.now().date()
+                vencimiento = fecha_hoy + timedelta(days=prov.condicion_pago_dias or 30)
+                cxp = models.CuentaPorPagar(
+                    numero=cxp_num,
+                    proveedor_id=prov.id,
+                    oc_id=oc_id,
+                    tipo_ncf=prov.tipo_ncf_default or "B11",
+                    num_factura_proveedor=data.num_factura,
+                    fecha_factura=fecha_hoy,
+                    fecha_vencimiento=vencimiento,
+                    subtotal=monto,
+                    itbis=Decimal("0"),
+                    retencion_isr=Decimal("0"),
+                    total=monto,
+                    saldo_pendiente=monto,
+                    asiento_id=asiento.id if asiento else None,
+                    notas=f"Generada automáticamente desde recepción OC {oc_id}",
+                )
+                db.add(cxp)
+                cxp_numero = cxp_num
+
         db.commit()
         db.refresh(oc)
     except Exception:
@@ -314,7 +354,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
         _logging.getLogger(__name__).exception("Error en recepción OC %s", oc_id)
         raise HTTPException(500, "Error al procesar la recepción")
     return {"ok": True, "estado": oc.estado, "total_recibido": oc.total_recibido,
-            "num_factura": oc.num_factura, "asiento": asiento_num}
+            "num_factura": oc.num_factura, "asiento": asiento_num, "cxp": cxp_numero}
 
 
 @router.put("/{oc_id}")

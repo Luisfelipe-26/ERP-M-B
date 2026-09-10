@@ -1,6 +1,7 @@
 """Proveedores — CRUD + sync Odoo."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func as sqlfunc
 from database import get_db
 import models, auth
 from pydantic import BaseModel
@@ -95,3 +96,42 @@ def delete_proveedor(prov_id: int, db: Session = Depends(get_db),
     db.delete(prov)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/{prov_id}/resumen")
+def resumen_proveedor(prov_id: int, db: Session = Depends(get_db),
+                      _=Depends(auth.get_current_user)):
+    prov = db.query(models.Proveedor).filter(models.Proveedor.id == prov_id).first()
+    if not prov:
+        raise HTTPException(404, "Proveedor no encontrado")
+
+    ocs = db.query(models.OrdenCompra).filter(
+        models.OrdenCompra.proveedor == prov.nombre,
+    ).order_by(models.OrdenCompra.fecha.desc()).limit(10).all()
+
+    ocs_out = [{
+        "oc_id": o.oc_id, "fecha": str(o.fecha.date()) if o.fecha else None,
+        "estado": o.estado, "total": float(o.total_estimado or 0),
+    } for o in ocs]
+
+    saldo_cxp = float(db.query(
+        sqlfunc.coalesce(sqlfunc.sum(models.CuentaPorPagar.saldo_pendiente), 0)
+    ).filter(
+        models.CuentaPorPagar.proveedor_id == prov_id,
+        models.CuentaPorPagar.estado.in_(["pendiente", "parcial"]),
+    ).scalar() or 0)
+
+    total_compras = float(db.query(
+        sqlfunc.coalesce(sqlfunc.sum(models.OrdenCompra.total_estimado), 0)
+    ).filter(models.OrdenCompra.proveedor == prov.nombre).scalar() or 0)
+
+    num_ocs = db.query(models.OrdenCompra).filter(
+        models.OrdenCompra.proveedor == prov.nombre
+    ).count()
+
+    return {
+        "saldo_cxp": saldo_cxp,
+        "total_compras": total_compras,
+        "num_ocs": num_ocs,
+        "ultimas_ocs": ocs_out,
+    }
