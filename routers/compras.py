@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models, schemas, auth
 from routers.sequences import get_next, peek_next
-from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
+from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -40,7 +40,7 @@ def list_ocs(
     return q.order_by(models.OrdenCompra.fecha.desc()).offset(skip).limit(limit).all()
 
 
-@router.post("", response_model=schemas.OrdenCompraOut)
+@router.post("")
 def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
               current_user: models.Usuario = Depends(auth.require_supervisor)):
     if not data.lineas:
@@ -106,9 +106,22 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
               {"proveedor": data.proveedor, "campo_id": data.campo_id, "total_estimado": total,
                "num_lineas": len(data.lineas)})
 
+    alertas_presupuesto = []
+    if r_compra and total > 0:
+        fecha_check = (data.fecha or datetime.now()).date() if hasattr(data.fecha or datetime.now(), 'date') else data.fecha or datetime.now()
+        ver = _verificar_presupuesto(db, [{
+            "cuenta_id": r_compra[0], "debe": float(total), "haber": 0,
+            "campo_id": data.campo_id,
+            "unidad_negocio_id": data.unidad_negocio_id,
+            "departamento_id": data.departamento_id,
+        }], fecha_check)
+        alertas_presupuesto = ver.get("alertas", [])
+
     db.commit()
     db.refresh(oc)
-    return oc
+    out = schemas.OrdenCompraOut.model_validate(oc).model_dump()
+    out["alertas_presupuesto"] = alertas_presupuesto
+    return out
 
 
 @router.get("/{oc_id}")
@@ -145,10 +158,22 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
                             "total_debe": float(asiento.total_debe or 0),
                             "estado": asiento.estado}
 
+    compromiso_info = None
+    comp = db.query(models.CompromisoPresupuestario).filter(
+        models.CompromisoPresupuestario.origen_tipo == "OC",
+        models.CompromisoPresupuestario.origen_id == oc_id,
+    ).first()
+    if comp:
+        compromiso_info = {
+            "id": comp.id, "monto": float(comp.monto or 0),
+            "estado": comp.estado, "anio": comp.anio, "mes": comp.mes,
+        }
+
     return {
         "orden": schemas.OrdenCompraOut.model_validate(oc),
         "lineas": lineas_out,
         "asiento_contable": asiento_info,
+        "compromiso": compromiso_info,
     }
 
 
