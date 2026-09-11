@@ -7,7 +7,7 @@ import models
 import auth as auth_module
 from routers import (
     auth, campos, trabajadores, actividades, productos,
-    contabilidad, sequences, admin,
+    contabilidad, sequences, admin, roles,
     ordenes, dashboard, inventario, reportes, compras,
     audit_log, tipos_producto, proveedores,
     clima, sanidad, riego, analytics,
@@ -383,6 +383,116 @@ def seed_diarios():
         db.close()
 
 
+def seed_rbac():
+    """Seed default permissions and roles, then assign existing users to roles."""
+    db = SessionLocal()
+    try:
+        MODULOS = [
+            ("dashboard", "Dashboard"),
+            ("ordenes", "Órdenes de Trabajo"),
+            ("costos", "Costos por Campo"),
+            ("analytics", "Analytics"),
+            ("nomina", "Nómina"),
+            ("clima", "Clima"),
+            ("sanidad", "Sanidad (MIP)"),
+            ("riego", "Riego"),
+            ("contabilidad", "Contabilidad"),
+            ("activos_fijos", "Activos Fijos"),
+            ("presupuesto", "Presupuesto"),
+            ("clientes", "Clientes"),
+            ("proveedores", "Proveedores"),
+            ("efectivo_banco", "Efectivo y Banco"),
+            ("campos", "Campos"),
+            ("trabajadores", "Trabajadores"),
+            ("productos", "Productos"),
+            ("inventario", "Inventario"),
+            ("actividades", "Actividades"),
+            ("compras", "Compras"),
+            ("configuracion", "Configuración"),
+            ("admin", "Administración"),
+        ]
+        ACCIONES = [
+            ("read", "Ver"),
+            ("create", "Crear"),
+            ("update", "Editar"),
+            ("delete", "Eliminar"),
+        ]
+        # Create permission catalog
+        for mod, mod_label in MODULOS:
+            for accion, accion_label in ACCIONES:
+                codigo = f"{mod}.{accion}"
+                exists = db.query(models.Permiso).filter(models.Permiso.codigo == codigo).first()
+                if not exists:
+                    db.add(models.Permiso(
+                        codigo=codigo, modulo=mod, accion=accion,
+                        descripcion=f"Permite {accion_label.lower()} en {mod_label}",
+                    ))
+        db.commit()
+
+        perms = {p.codigo: p for p in db.query(models.Permiso).all()}
+
+        def all_perms():
+            return [p.id for p in perms.values() if p.activo]
+
+        def perms_for(mods_subset):
+            return [p.id for p in perms.values() if p.activo and p.modulo in mods_subset]
+
+        ADMIN_FULL = [
+            "dashboard", "ordenes", "costos", "analytics", "nomina", "clima",
+            "sanidad", "riego", "contabilidad", "activos_fijos", "presupuesto",
+            "clientes", "proveedores", "efectivo_banco", "campos", "trabajadores",
+            "productos", "inventario", "actividades", "compras",
+            "configuracion", "admin",
+        ]
+        SUPERVISOR_READ_WRITE = [
+            "dashboard", "ordenes", "costos", "analytics", "clima", "sanidad",
+            "riego", "contabilidad", "campos", "trabajadores", "productos",
+            "inventario", "actividades", "compras", "clientes", "proveedores",
+            "efectivo_banco", "activos_fijos", "presupuesto",
+        ]
+        SUPERVISOR_READ = ["nomina"]
+        OPERADOR_READ_WRITE = ["ordenes", "dashboard", "costos", "inventario", "actividades", "campos"]
+        OPERADOR_READ = [
+            "analytics", "nomina", "clima", "sanidad", "riego", "trabajadores",
+            "productos", "contabilidad", "clientes", "proveedores", "presupuesto",
+            "activos_fijos", "efectivo_banco", "compras",
+        ]
+
+        default_roles = [
+            ("admin", "Acceso total al sistema", True, all_perms()),
+            ("supervisor", "Supervisión de operaciones de campo y finanzas", False,
+             perms_for(SUPERVISOR_READ_WRITE) + perms_for(SUPERVISOR_READ)),
+            ("operador", "Acceso básico operativo", False,
+             perms_for(OPERADOR_READ_WRITE) + perms_for(OPERADOR_READ)),
+        ]
+        for nombre, desc, es_sistema, perm_ids in default_roles:
+            rol = db.query(models.Rol).filter(models.Rol.nombre == nombre).first()
+            if not rol:
+                rol = models.Rol(nombre=nombre, descripcion=desc, es_sistema=es_sistema)
+                db.add(rol)
+                db.flush()
+                rol.permisos = db.query(models.Permiso).filter(models.Permiso.id.in_(perm_ids)).all()
+            elif not rol.permisos:
+                rol.permisos = db.query(models.Permiso).filter(models.Permiso.id.in_(perm_ids)).all()
+        db.commit()
+
+        # Assign existing users to matching roles
+        for u in db.query(models.Usuario).all():
+            if not u.roles:
+                rol = db.query(models.Rol).filter(models.Rol.nombre == u.rol).first()
+                if rol:
+                    u.roles = [rol]
+        # Assign admin user to admin role
+        admin_rol = db.query(models.Rol).filter(models.Rol.nombre == "admin").first()
+        if admin_rol:
+            for u in db.query(models.Usuario).filter(models.Usuario.rol == "admin").all():
+                if admin_rol not in u.roles:
+                    u.roles.append(admin_rol)
+        db.commit()
+    finally:
+        db.close()
+
+
 def seed_admin():
     """Ensure a default admin user exists so the system is always accessible."""
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@corvus.do")
@@ -413,6 +523,7 @@ async def lifespan(app: FastAPI):
     models.Base.metadata.create_all(bind=engine)
     run_migrations()
     seed_perfiles()
+    seed_rbac()
     seed_diarios()
     seed_admin()
     recalc_all_ot_costs()
@@ -458,6 +569,7 @@ app.include_router(clientes.router)
 app.include_router(cuentas_bancarias.router)
 app.include_router(sequences.router)
 app.include_router(admin.router)
+app.include_router(roles.router)
 
 
 @app.get("/")
