@@ -1,3 +1,4 @@
+"""Auth — login, token, user-me endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -18,7 +19,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user.id, "nombre": user.nombre, "email": user.email, "rol": user.rol}
+        "user": auth._build_user_payload(user, db),
     }
 
 
@@ -33,13 +34,13 @@ def login_json(data: schemas.LoginRequest, db: Session = Depends(get_db)):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user.id, "nombre": user.nombre, "email": user.email, "rol": user.rol}
+        "user": auth._build_user_payload(user, db),
     }
 
 
-@router.get("/me", response_model=schemas.UsuarioOut)
-def get_me(current_user: models.Usuario = Depends(auth.get_current_user)):
-    return current_user
+@router.get("/me")
+def get_me(current_user: models.Usuario = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    return auth._build_user_payload(current_user, db)
 
 
 @router.post("/usuarios", response_model=schemas.UsuarioOut)
@@ -51,9 +52,15 @@ def create_user(data: schemas.UsuarioCreate, db: Session = Depends(get_db),
         nombre=data.nombre,
         email=data.email,
         hashed_password=auth.get_password_hash(data.password),
-        rol=data.rol
+        rol=data.rol,
+        perfil_id=data.perfil_id,
     )
     db.add(user)
+    db.flush()
+    # Assign roles
+    if data.rol_ids:
+        roles = db.query(models.Rol).filter(models.Rol.id.in_(data.rol_ids)).all()
+        user.roles = roles
     db.commit()
     db.refresh(user)
     return user
@@ -75,13 +82,18 @@ def recover_admin(data: schemas.LoginRequest, db: Session = Depends(get_db)):
         perfil_id=perfil.id if perfil else None,
     )
     db.add(user)
+    db.flush()
+    # Assign admin role if exists
+    admin_rol = db.query(models.Rol).filter(models.Rol.nombre == "admin").first()
+    if admin_rol:
+        user.roles.append(admin_rol)
     db.commit()
     db.refresh(user)
     token = auth.create_access_token({"sub": user.email})
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user.id, "nombre": user.nombre, "email": user.email, "rol": user.rol},
+        "user": auth._build_user_payload(user, db),
     }
 
 

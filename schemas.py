@@ -14,12 +14,60 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
-# Usuario
+# ── RBAC ───────────────────────────────────────────────────────────────────
+
+class RolCreate(BaseModel):
+    nombre: str
+    descripcion: Optional[str] = None
+    permiso_ids: List[int] = []
+
+class RolUpdate(BaseModel):
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    permiso_ids: Optional[List[int]] = None
+    activo: Optional[bool] = None
+
+class PermisoOut(BaseModel):
+    id: int
+    codigo: str
+    modulo: str
+    accion: str
+    descripcion: Optional[str] = None
+    activo: bool
+    class Config:
+        from_attributes = True
+
+class RolOut(BaseModel):
+    id: int
+    nombre: str
+    descripcion: Optional[str] = None
+    es_sistema: bool
+    activo: bool
+    permisos: List[PermisoOut] = []
+    class Config:
+        from_attributes = True
+
+class UsuarioRolAssign(BaseModel):
+    rol_ids: List[int]
+
+# ── Usuario ────────────────────────────────────────────────────────────────
+
 class UsuarioCreate(BaseModel):
     nombre: str
     email: str
     password: str
     rol: str = "operador"
+    rol_ids: Optional[List[int]] = None
+    perfil_id: Optional[int] = None
+
+class UsuarioUpdate(BaseModel):
+    nombre: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    rol: Optional[str] = None
+    rol_ids: Optional[List[int]] = None
+    perfil_id: Optional[int] = None
+    activo: Optional[bool] = None
 
 class UsuarioOut(BaseModel):
     id: int
@@ -29,6 +77,18 @@ class UsuarioOut(BaseModel):
     activo: bool
     class Config:
         from_attributes = True
+
+class UsuarioDetailOut(BaseModel):
+    id: int
+    nombre: str
+    email: str
+    rol: str
+    activo: bool
+    perfil_id: Optional[int] = None
+    perfil_nombre: Optional[str] = None
+    roles: List[dict] = []
+    permisos: List[str] = []
+    creado_en: Optional[str] = None
 
 # Campo
 class CampoCreate(BaseModel):

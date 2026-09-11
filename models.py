@@ -1,8 +1,50 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Index, Date, Numeric, UniqueConstraint, JSON
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Index, Date, Numeric, UniqueConstraint, JSON, Table
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
 
+
+# ── RBAC: Association Tables ──────────────────────────────────────────────
+
+usuario_roles = Table(
+    "usuario_roles", Base.metadata,
+    Column("usuario_id", Integer, ForeignKey("usuarios.id", ondelete="CASCADE"), primary_key=True),
+    Column("rol_id", Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
+)
+
+rol_permisos = Table(
+    "rol_permisos", Base.metadata,
+    Column("rol_id", Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
+    Column("permiso_id", Integer, ForeignKey("permisos.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+# ── RBAC: Role & Permission Models ────────────────────────────────────────
+
+class Rol(Base):
+    __tablename__ = "roles"
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(50), unique=True, nullable=False)
+    descripcion = Column(String(200))
+    es_sistema = Column(Boolean, default=False)   # built-in roles cannot be deleted
+    activo = Column(Boolean, default=True)
+    creado_en = Column(DateTime, server_default=func.now())
+    permisos = relationship("Permiso", secondary=rol_permisos, back_populates="roles", order_by="Permiso.codigo")
+    usuarios = relationship("Usuario", secondary=usuario_roles, back_populates="roles")
+
+
+class Permiso(Base):
+    __tablename__ = "permisos"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(100), unique=True, nullable=False)   # e.g. "ordenes.create"
+    modulo = Column(String(50), nullable=False, index=True)     # e.g. "ordenes"
+    accion = Column(String(30), nullable=False)                  # read, create, update, delete
+    descripcion = Column(String(200))
+    activo = Column(Boolean, default=True)
+    roles = relationship("Rol", secondary=rol_permisos, back_populates="permisos")
+
+
+# ── Legacy: PerfilAcceso (kept for migration compatibility) ──────────────
 
 class PerfilAcceso(Base):
     __tablename__ = "perfiles_acceso"
@@ -13,17 +55,20 @@ class PerfilAcceso(Base):
     activo = Column(Boolean, default=True)
 
 
+# ── Usuario ────────────────────────────────────────────────────────────────
+
 class Usuario(Base):
     __tablename__ = "usuarios"
     id = Column(Integer, primary_key=True, index=True)
     nombre = Column(String(100), nullable=False)
     email = Column(String(100), unique=True, index=True, nullable=False)
     hashed_password = Column(String(200), nullable=False)
-    rol = Column(String(50), default="operador")
+    rol = Column(String(50), default="operador")   # kept for backward compat; primary auth uses roles M2M
     perfil_id = Column(Integer, ForeignKey("perfiles_acceso.id"))
     activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, server_default=func.now())
     perfil = relationship("PerfilAcceso")
+    roles = relationship("Rol", secondary=usuario_roles, back_populates="usuarios", order_by="Rol.nombre")
 
 
 class Campo(Base):

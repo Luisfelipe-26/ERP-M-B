@@ -1,8 +1,8 @@
-"""Admin — perfiles de acceso y gestión de usuarios."""
+"""Admin — perfiles de acceso y gestión de usuarios (enhanced with RBAC)."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from auth import get_current_user, require_admin, get_password_hash
+from auth import get_current_user, require_admin, get_password_hash, _get_user_permissions
 import models
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -80,12 +80,18 @@ def eliminar_perfil(perfil_id: int, db: Session = Depends(get_db), user=Depends(
 
 @router.get("/usuarios")
 def listar_usuarios(db: Session = Depends(get_db), user=Depends(require_admin)):
-    usuarios = db.query(models.Usuario).options(joinedload(models.Usuario.perfil)).order_by(models.Usuario.nombre).all()
+    usuarios = db.query(models.Usuario).options(
+        joinedload(models.Usuario.perfil),
+        joinedload(models.Usuario.roles),
+    ).order_by(models.Usuario.nombre).all()
     return [
-        {"id": u.id, "nombre": u.nombre, "email": u.email, "rol": u.rol,
-         "perfil_id": u.perfil_id,
-         "perfil_nombre": u.perfil.nombre if u.perfil else None,
-         "activo": u.activo, "creado_en": u.creado_en.isoformat() if u.creado_en else None}
+        {
+            "id": u.id, "nombre": u.nombre, "email": u.email, "rol": u.rol,
+            "perfil_id": u.perfil_id,
+            "perfil_nombre": u.perfil.nombre if u.perfil else None,
+            "roles": [{"id": r.id, "nombre": r.nombre} for r in u.roles if r.activo],
+            "activo": u.activo, "creado_en": u.creado_en.isoformat() if u.creado_en else None,
+        }
         for u in usuarios
     ]
 
@@ -107,6 +113,16 @@ def crear_usuario(data: dict, db: Session = Depends(get_db), user=Depends(requir
         activo=data.get("activo", True),
     )
     db.add(u)
+    db.flush()
+    # Assign RBAC roles
+    rol_ids = data.get("rol_ids", [])
+    if rol_ids:
+        roles = db.query(models.Rol).filter(models.Rol.id.in_(rol_ids)).all()
+        u.roles = roles
+    elif rol:
+        default_role = db.query(models.Rol).filter(models.Rol.nombre == rol).first()
+        if default_role:
+            u.roles = [default_role]
     db.commit()
     db.refresh(u)
     return {"ok": True, "id": u.id}
@@ -115,7 +131,7 @@ def crear_usuario(data: dict, db: Session = Depends(get_db), user=Depends(requir
 @router.put("/usuarios/{usuario_id}")
 def actualizar_usuario(usuario_id: int, data: dict, db: Session = Depends(get_db),
                        user=Depends(require_admin)):
-    u = db.query(models.Usuario).get(usuario_id)
+    u = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
     if not u:
         raise HTTPException(404, "Usuario no encontrado")
     if "nombre" in data:
@@ -133,6 +149,12 @@ def actualizar_usuario(usuario_id: int, data: dict, db: Session = Depends(get_db
         u.perfil_id = data["perfil_id"]
     if "activo" in data:
         u.activo = data["activo"]
+    # Update RBAC roles
+    if "rol_ids" in data:
+        roles = db.query(models.Rol).filter(models.Rol.id.in_(data["rol_ids"])).all()
+        u.roles = roles
+        if roles and "rol" not in data:
+            u.rol = roles[0].nombre
     db.commit()
     return {"ok": True}
 
