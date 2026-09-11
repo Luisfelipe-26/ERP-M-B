@@ -268,6 +268,12 @@ class OCLineaCreate(BaseModel):
     producto_id: str
     cantidad: float
     precio_unitario: float
+    descuento_pct: float = 0
+    impuesto: str = "itbis_18"
+    cuenta_contable_id: Optional[int] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    almacen_id: Optional[int] = None
 
 class OCLineaOut(BaseModel):
     id: int
@@ -276,13 +282,20 @@ class OCLineaOut(BaseModel):
     cantidad: float
     cantidad_recibida: float
     precio_unitario: float
+    descuento_pct: Optional[float] = 0
+    impuesto: Optional[str] = "itbis_18"
     subtotal: float
+    cuenta_contable_id: Optional[int] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    almacen_id: Optional[int] = None
     class Config:
         from_attributes = True
 
 class OrdenCompraCreate(BaseModel):
     fecha: Optional[datetime] = None
     proveedor: Optional[str] = None
+    proveedor_id: Optional[int] = None
     campo_id: Optional[str] = None
     unidad_negocio_id: Optional[int] = None
     departamento_id: Optional[int] = None
@@ -295,6 +308,7 @@ class OrdenCompraOut(BaseModel):
     oc_id: str
     fecha: Optional[datetime]
     proveedor: Optional[str]
+    proveedor_id: Optional[int] = None
     campo_id: Optional[str] = None
     unidad_negocio_id: Optional[int] = None
     departamento_id: Optional[int] = None

@@ -188,6 +188,15 @@ def run_migrations():
         "ALTER TABLE ordenes_compra ADD COLUMN IF NOT EXISTS fecha_cierre TIMESTAMP",
         # Fase 1: Migrar OCs Pendiente → Aprobada (ya tenían compromiso activo)
         "UPDATE ordenes_compra SET estado = 'Aprobada' WHERE estado = 'Pendiente'",
+        # Fase 2: OC proveedor FK + líneas enriquecidas
+        "ALTER TABLE ordenes_compra ADD COLUMN IF NOT EXISTS proveedor_id INTEGER REFERENCES proveedores(id)",
+        "UPDATE ordenes_compra SET proveedor_id = p.id FROM proveedores p WHERE ordenes_compra.proveedor = p.nombre AND ordenes_compra.proveedor_id IS NULL",
+        "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS descuento_pct NUMERIC(5,2) DEFAULT 0",
+        "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS impuesto VARCHAR(20) DEFAULT 'itbis_18'",
+        "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS cuenta_contable_id INTEGER REFERENCES cuentas_contables(id)",
+        "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS unidad_negocio_id INTEGER REFERENCES unidades_negocio(id)",
+        "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
+        "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

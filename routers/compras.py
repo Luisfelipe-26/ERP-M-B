@@ -49,10 +49,18 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
     oc_id = get_next("OC", db)
     total = 0.0
 
+    nombre_proveedor = data.proveedor
+    prov_id = data.proveedor_id
+    if prov_id and not nombre_proveedor:
+        prov = db.query(models.Proveedor).filter(models.Proveedor.id == prov_id).first()
+        if prov:
+            nombre_proveedor = prov.nombre
+
     oc = models.OrdenCompra(
         oc_id=oc_id,
         fecha=data.fecha or datetime.now(),
-        proveedor=data.proveedor,
+        proveedor=nombre_proveedor,
+        proveedor_id=prov_id,
         campo_id=data.campo_id,
         unidad_negocio_id=data.unidad_negocio_id,
         departamento_id=data.departamento_id,
@@ -74,7 +82,8 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
         if linea.precio_unitario < 0:
             raise HTTPException(status_code=400, detail=f"Precio no puede ser negativo para '{prod.producto}'")
 
-        subtotal = round(linea.cantidad * linea.precio_unitario, 2)
+        desc = float(linea.descuento_pct or 0)
+        subtotal = round(linea.cantidad * linea.precio_unitario * (1 - desc / 100), 2)
         total += subtotal
 
         db.add(models.OrdenCompraLinea(
@@ -83,14 +92,21 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
             cantidad=linea.cantidad,
             cantidad_recibida=0,
             precio_unitario=linea.precio_unitario,
+            descuento_pct=desc,
+            impuesto=linea.impuesto or prod.impuesto_compra or "itbis_18",
             subtotal=subtotal,
+            cuenta_contable_id=linea.cuenta_contable_id,
+            unidad_negocio_id=linea.unidad_negocio_id,
+            departamento_id=linea.departamento_id,
+            almacen_id=linea.almacen_id,
         ))
 
     oc.total_estimado = round(total, 2)
 
     audit.log(db, current_user, "CREAR", "OC", oc_id,
-              f"OC {oc_id} creada en Borrador: {data.proveedor or 'Sin proveedor'} — Total: RD$ {total:,.2f}",
-              {"proveedor": data.proveedor, "campo_id": data.campo_id, "total_estimado": total,
+              f"OC {oc_id} creada en Borrador: {nombre_proveedor or 'Sin proveedor'} — Total: RD$ {total:,.2f}",
+              {"proveedor": nombre_proveedor, "proveedor_id": prov_id,
+               "campo_id": data.campo_id, "total_estimado": total,
                "num_lineas": len(data.lineas)})
 
     db.commit()
@@ -118,7 +134,13 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
             "cantidad_recibida": l.cantidad_recibida or 0,
             "cantidad_pendiente": round(l.cantidad - (l.cantidad_recibida or 0), 4),
             "precio_unitario": l.precio_unitario,
+            "descuento_pct": float(l.descuento_pct or 0),
+            "impuesto": l.impuesto or "itbis_18",
             "subtotal": l.subtotal,
+            "cuenta_contable_id": l.cuenta_contable_id,
+            "unidad_negocio_id": l.unidad_negocio_id,
+            "departamento_id": l.departamento_id,
+            "almacen_id": l.almacen_id,
         })
 
     asiento_info = None
@@ -431,14 +453,19 @@ def update_oc(oc_id: str, data: schemas.OrdenCompraCreate, db: Session = Depends
         raise HTTPException(403, f"Solo un administrador puede editar OCs en estado {oc.estado}")
 
     oc.fecha = data.fecha or oc.fecha
-    oc.proveedor = data.proveedor or oc.proveedor
+    if data.proveedor_id:
+        prov = db.query(models.Proveedor).filter(models.Proveedor.id == data.proveedor_id).first()
+        if prov:
+            oc.proveedor_id = data.proveedor_id
+            oc.proveedor = prov.nombre
+    elif data.proveedor:
+        oc.proveedor = data.proveedor
     oc.campo_id = data.campo_id
     oc.unidad_negocio_id = data.unidad_negocio_id
     oc.departamento_id = data.departamento_id
     oc.almacen_id = data.almacen_id
     oc.observaciones = data.observaciones
 
-    # Replace lines if provided
     if data.lineas:
         db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).delete()
         total = 0.0
@@ -448,12 +475,20 @@ def update_oc(oc_id: str, data: schemas.OrdenCompraCreate, db: Session = Depends
             ).first()
             if not prod:
                 raise HTTPException(status_code=400, detail=f"Producto '{linea.producto_id}' no existe")
-            subtotal = round(linea.cantidad * linea.precio_unitario, 2)
+            desc = float(linea.descuento_pct or 0)
+            subtotal = round(linea.cantidad * linea.precio_unitario * (1 - desc / 100), 2)
             total += subtotal
             db.add(models.OrdenCompraLinea(
                 oc_id=oc_id, producto_id=linea.producto_id,
                 cantidad=linea.cantidad, cantidad_recibida=0,
-                precio_unitario=linea.precio_unitario, subtotal=subtotal,
+                precio_unitario=linea.precio_unitario,
+                descuento_pct=desc,
+                impuesto=linea.impuesto or prod.impuesto_compra or "itbis_18",
+                subtotal=subtotal,
+                cuenta_contable_id=linea.cuenta_contable_id,
+                unidad_negocio_id=linea.unidad_negocio_id,
+                departamento_id=linea.departamento_id,
+                almacen_id=linea.almacen_id,
             ))
         oc.total_estimado = round(total, 2)
 

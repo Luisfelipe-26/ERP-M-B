@@ -223,6 +223,7 @@ class OrdenCompra(Base):
     oc_id = Column(String(20), unique=True, index=True, nullable=False)  # OC-0001
     fecha = Column(DateTime, server_default=func.now())
     proveedor = Column(String(200))
+    proveedor_id = Column(Integer, ForeignKey("proveedores.id"), index=True)
     campo_id = Column(String(10), ForeignKey("campos.id_campo"))
     estado = Column(String(50), default="Borrador")
     total_estimado = Column(Float, default=0)
@@ -240,6 +241,7 @@ class OrdenCompra(Base):
     almacen_id = Column(Integer, ForeignKey("almacenes.id"), index=True)
     lineas = relationship("OrdenCompraLinea", back_populates="orden")
     campo = relationship("Campo")
+    proveedor_rel = relationship("Proveedor", foreign_keys=[proveedor_id])
 
 
 class OrdenCompraLinea(Base):
@@ -250,9 +252,16 @@ class OrdenCompraLinea(Base):
     cantidad = Column(Float)
     cantidad_recibida = Column(Float, default=0)
     precio_unitario = Column(Float)
+    descuento_pct = Column(Numeric(5, 2), default=0)
+    impuesto = Column(String(20), default="itbis_18")
     subtotal = Column(Float)
+    cuenta_contable_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"))
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"))
+    almacen_id = Column(Integer, ForeignKey("almacenes.id"))
     orden = relationship("OrdenCompra", back_populates="lineas")
     producto = relationship("Producto")
+    cuenta_contable = relationship("CuentaContable", foreign_keys=[cuenta_contable_id])
 
 
 class MovimientoInventario(Base):
