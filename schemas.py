@@ -663,6 +663,36 @@ class PagoOut(BaseModel):
     class Config:
         from_attributes = True
 
+# Notas de Crédito
+class NotaCreditoCreate(BaseModel):
+    proveedor_id: int
+    cxp_id: Optional[int] = None
+    tipo: str = "proveedor"
+    ncf: Optional[str] = None
+    fecha: date
+    motivo: Optional[str] = None
+    subtotal: float = 0
+    itbis: float = 0
+
+class NotaCreditoOut(BaseModel):
+    id: int
+    numero: str
+    tipo: str
+    proveedor_id: Optional[int] = None
+    cxp_id: Optional[int] = None
+    estado: Optional[str] = "activa"
+    referencia_id: Optional[int] = None
+    ncf: Optional[str] = None
+    fecha: date
+    motivo: Optional[str] = None
+    subtotal: float
+    itbis: float
+    total: float
+    asiento_id: Optional[int] = None
+    creado_en: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
 # CxC
 class CuentaPorCobrarCreate(BaseModel):
     cliente_id: int

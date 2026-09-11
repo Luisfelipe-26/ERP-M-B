@@ -1864,6 +1864,150 @@ def listar_pagos(cxp_id: int = None, skip: int = 0, limit: int = 50,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# NOTAS DE CRÉDITO
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/notas-credito")
+def crear_nota_credito(data: schemas.NotaCreditoCreate, db: Session = Depends(get_db),
+                       user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+
+    prov = db.query(models.Proveedor).get(data.proveedor_id)
+    if not prov:
+        raise HTTPException(400, f"Proveedor ID {data.proveedor_id} no existe")
+
+    subtotal = Decimal(str(data.subtotal or 0))
+    itbis = Decimal(str(data.itbis or 0))
+    total = subtotal + itbis
+
+    if total <= 0:
+        raise HTTPException(400, "El monto de la nota de crédito debe ser mayor a 0")
+
+    numero = get_next("NC", db)
+
+    nc = models.NotaCredito(
+        numero=numero,
+        tipo=data.tipo or "proveedor",
+        proveedor_id=data.proveedor_id,
+        cxp_id=data.cxp_id,
+        estado="activa",
+        ncf=data.ncf,
+        fecha=data.fecha,
+        motivo=data.motivo,
+        subtotal=subtotal,
+        itbis=itbis,
+        total=total,
+    )
+    db.add(nc)
+    db.flush()
+
+    cxp_numero = None
+    if data.cxp_id:
+        cxp = db.query(models.CuentaPorPagar).get(data.cxp_id)
+        if cxp:
+            cxp.saldo_pendiente = max(Decimal("0"), (cxp.saldo_pendiente or Decimal("0")) - total)
+            if cxp.saldo_pendiente <= 0:
+                cxp.estado = "pagada"
+            elif cxp.saldo_pendiente < cxp.total:
+                cxp.estado = "parcial"
+            cxp_numero = cxp.numero
+            nc.referencia_id = cxp.id
+
+    asiento = None
+    r_factura = _get_regla_cuentas(db, "compra", "factura_proveedor")
+    if r_factura and subtotal > 0:
+        asiento_lineas = [
+            {"cuenta_id": r_factura[1], "debe": subtotal, "haber": 0,
+             "tercero_id": str(data.proveedor_id),
+             "descripcion_linea": f"NC {prov.nombre} — reducción CxP"},
+            {"cuenta_id": r_factura[0], "debe": 0, "haber": subtotal,
+             "tercero_id": str(data.proveedor_id),
+             "descripcion_linea": f"NC devolución/ajuste {prov.nombre}"},
+        ]
+        r_itbis = _get_regla_cuentas(db, "compra", "itbis_compra")
+        if r_itbis and itbis > 0:
+            asiento_lineas.append({"cuenta_id": r_itbis[1], "debe": itbis, "haber": 0,
+                                   "tercero_id": str(data.proveedor_id),
+                                   "descripcion_linea": f"NC ITBIS {prov.nombre}"})
+            asiento_lineas.append({"cuenta_id": r_itbis[0], "debe": 0, "haber": itbis,
+                                   "descripcion_linea": "Reverso ITBIS crédito fiscal"})
+        try:
+            asiento = _crear_asiento_auto(
+                db, data.fecha, "NC", numero,
+                f"Nota de crédito {prov.nombre} — {numero}",
+                asiento_lineas, user.nombre
+            )
+            if asiento:
+                nc.asiento_id = asiento.id
+        except Exception:
+            logger.exception("Error creando asiento para NC %s", numero)
+
+    _audit(db, user, "CREAR", "NC", numero,
+           f"Nota de crédito {prov.nombre} sub={subtotal} itbis={itbis} total={total}" +
+           (f" aplicada a CxP {cxp_numero}" if cxp_numero else ""))
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al crear nota de crédito")
+    db.refresh(nc)
+    return {"ok": True, "numero": numero, "id": nc.id,
+            "asiento": asiento.numero if asiento else None,
+            "cxp_ajustada": cxp_numero}
+
+
+@router.get("/notas-credito")
+def listar_notas_credito(
+    tipo: str = None,
+    proveedor_id: int = None,
+    cxp_id: int = None,
+    estado: str = None,
+    skip: int = 0, limit: int = 100,
+    db: Session = Depends(get_db), user=Depends(get_current_user),
+):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.NotaCredito)
+    if tipo:
+        q = q.filter(models.NotaCredito.tipo == tipo)
+    if proveedor_id:
+        q = q.filter(models.NotaCredito.proveedor_id == proveedor_id)
+    if cxp_id:
+        q = q.filter(models.NotaCredito.cxp_id == cxp_id)
+    if estado:
+        q = q.filter(models.NotaCredito.estado == estado)
+    total = q.count()
+    items = q.order_by(models.NotaCredito.fecha.desc()).offset(skip).limit(limit).all()
+    result = []
+    for nc in items:
+        out = schemas.NotaCreditoOut.model_validate(nc)
+        prov = db.query(models.Proveedor).get(nc.proveedor_id) if nc.proveedor_id else None
+        out_dict = out.model_dump()
+        out_dict["proveedor_nombre"] = prov.nombre if prov else None
+        result.append(out_dict)
+    return {"total": total, "items": result}
+
+
+@router.get("/notas-credito/{nc_id}")
+def detalle_nota_credito(nc_id: int, db: Session = Depends(get_db),
+                         user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    nc = db.query(models.NotaCredito).get(nc_id)
+    if not nc:
+        raise HTTPException(404, "Nota de crédito no encontrada")
+    prov = db.query(models.Proveedor).get(nc.proveedor_id) if nc.proveedor_id else None
+    out = schemas.NotaCreditoOut.model_validate(nc).model_dump()
+    out["proveedor_nombre"] = prov.nombre if prov else None
+    if nc.cxp_id:
+        cxp = db.query(models.CuentaPorPagar).get(nc.cxp_id)
+        out["cxp_numero"] = cxp.numero if cxp else None
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CUENTAS POR COBRAR (CxC)
 # ══════════════════════════════════════════════════════════════════════════════
 

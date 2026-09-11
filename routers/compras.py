@@ -11,6 +11,7 @@ from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas, _verif
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
+from sqlalchemy import func as sqlfunc, extract, Integer, case
 import audit
 
 router = APIRouter(prefix="/api/ordenes-compra", tags=["ordenes-compra"])
@@ -51,7 +52,6 @@ def list_ocs(
 @router.get("/resumen-cxp")
 def resumen_cxp(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
     """Dashboard summary of CxP linked to OCs."""
-    from sqlalchemy import func as sqlfunc
     cxp_q = db.query(models.CuentaPorPagar).filter(models.CuentaPorPagar.oc_id.isnot(None))
     total_pendiente = db.query(sqlfunc.coalesce(sqlfunc.sum(models.CuentaPorPagar.saldo_pendiente), 0)).filter(
         models.CuentaPorPagar.oc_id.isnot(None),
@@ -73,6 +73,165 @@ def resumen_cxp(db: Session = Depends(get_db), _=Depends(auth.get_current_user))
         "num_vencidas": num_vencidas,
         "monto_vencido": float(monto_vencido),
     }
+
+
+MESES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+
+@router.get("/reportes/compras-periodo")
+def reporte_compras_periodo(
+    anio: int = None,
+    campo_id: Optional[str] = None,
+    unidad_negocio_id: Optional[int] = None,
+    departamento_id: Optional[int] = None,
+    db: Session = Depends(get_db), _=Depends(auth.get_current_user),
+):
+    anio = anio or datetime.now().year
+    q = db.query(
+        extract("month", models.OrdenCompra.fecha).label("mes"),
+        sqlfunc.coalesce(sqlfunc.sum(models.OrdenCompra.total_estimado), 0).label("total_estimado"),
+        sqlfunc.coalesce(sqlfunc.sum(models.OrdenCompra.total_recibido), 0).label("total_recibido"),
+        sqlfunc.count().label("num_ocs"),
+        sqlfunc.sum(case((models.OrdenCompra.estado == "Recibida", 1), else_=0)).label("num_recibidas"),
+    ).filter(extract("year", models.OrdenCompra.fecha) == anio)
+    if campo_id:
+        q = q.filter(models.OrdenCompra.campo_id == campo_id)
+    if unidad_negocio_id:
+        q = q.filter(models.OrdenCompra.unidad_negocio_id == unidad_negocio_id)
+    if departamento_id:
+        q = q.filter(models.OrdenCompra.departamento_id == departamento_id)
+    rows = q.group_by("mes").all()
+    by_month = {int(r.mes): r for r in rows}
+    result = []
+    for m in range(1, 13):
+        r = by_month.get(m)
+        result.append({
+            "mes": m, "nombre_mes": MESES[m],
+            "total_estimado": round(float(r.total_estimado), 2) if r else 0,
+            "total_recibido": round(float(r.total_recibido), 2) if r else 0,
+            "num_ocs": int(r.num_ocs) if r else 0,
+            "num_recibidas": int(r.num_recibidas or 0) if r else 0,
+        })
+    return {"anio": anio, "datos": result}
+
+
+@router.get("/reportes/top-proveedores")
+def reporte_top_proveedores(
+    anio: Optional[int] = None,
+    mes: Optional[int] = None,
+    limit: int = 10,
+    campo_id: Optional[str] = None,
+    unidad_negocio_id: Optional[int] = None,
+    db: Session = Depends(get_db), _=Depends(auth.get_current_user),
+):
+    q = db.query(
+        models.OrdenCompra.proveedor,
+        models.OrdenCompra.proveedor_id,
+        sqlfunc.coalesce(sqlfunc.sum(models.OrdenCompra.total_estimado), 0).label("total"),
+        sqlfunc.count().label("num_ocs"),
+    ).filter(models.OrdenCompra.proveedor.isnot(None))
+    if anio:
+        q = q.filter(extract("year", models.OrdenCompra.fecha) == anio)
+    if mes:
+        q = q.filter(extract("month", models.OrdenCompra.fecha) == mes)
+    if campo_id:
+        q = q.filter(models.OrdenCompra.campo_id == campo_id)
+    if unidad_negocio_id:
+        q = q.filter(models.OrdenCompra.unidad_negocio_id == unidad_negocio_id)
+    rows = q.group_by(models.OrdenCompra.proveedor, models.OrdenCompra.proveedor_id)\
+            .order_by(sqlfunc.sum(models.OrdenCompra.total_estimado).desc())\
+            .limit(limit).all()
+    grand = sum(float(r.total) for r in rows)
+    return [{
+        "proveedor": r.proveedor,
+        "proveedor_id": r.proveedor_id,
+        "total": round(float(r.total), 2),
+        "num_ocs": int(r.num_ocs),
+        "porcentaje": round(float(r.total) / grand * 100, 1) if grand else 0,
+    } for r in rows]
+
+
+@router.get("/reportes/compras-dimension")
+def reporte_compras_dimension(
+    dimension: str = Query("campo", regex="^(campo|unidad_negocio|departamento)$"),
+    anio: Optional[int] = None,
+    mes: Optional[int] = None,
+    db: Session = Depends(get_db), _=Depends(auth.get_current_user),
+):
+    OC = models.OrdenCompra
+    if dimension == "campo":
+        dim_col = OC.campo_id
+        name_expr = OC.campo_id
+    elif dimension == "unidad_negocio":
+        dim_col = OC.unidad_negocio_id
+        name_expr = models.UnidadNegocio.nombre
+    else:
+        dim_col = OC.departamento_id
+        name_expr = models.Departamento.nombre
+
+    q = db.query(
+        dim_col.label("dim_id"),
+        name_expr.label("nombre"),
+        sqlfunc.coalesce(sqlfunc.sum(OC.total_estimado), 0).label("total"),
+        sqlfunc.count().label("num_ocs"),
+    ).filter(dim_col.isnot(None))
+
+    if dimension == "unidad_negocio":
+        q = q.join(models.UnidadNegocio, OC.unidad_negocio_id == models.UnidadNegocio.id)
+    elif dimension == "departamento":
+        q = q.join(models.Departamento, OC.departamento_id == models.Departamento.id)
+
+    if anio:
+        q = q.filter(extract("year", OC.fecha) == anio)
+    if mes:
+        q = q.filter(extract("month", OC.fecha) == mes)
+
+    rows = q.group_by(dim_col, name_expr).order_by(sqlfunc.sum(OC.total_estimado).desc()).all()
+    grand = sum(float(r.total) for r in rows)
+    return [{
+        "id": str(r.dim_id) if r.dim_id else None,
+        "nombre": str(r.nombre or "Sin asignar"),
+        "total": round(float(r.total), 2),
+        "num_ocs": int(r.num_ocs),
+        "porcentaje": round(float(r.total) / grand * 100, 1) if grand else 0,
+    } for r in rows]
+
+
+@router.get("/reportes/productos-frecuentes")
+def reporte_productos_frecuentes(
+    anio: Optional[int] = None,
+    mes: Optional[int] = None,
+    limit: int = 15,
+    db: Session = Depends(get_db), _=Depends(auth.get_current_user),
+):
+    L = models.OrdenCompraLinea
+    P = models.Producto
+    OC = models.OrdenCompra
+    q = db.query(
+        L.producto_id,
+        P.producto.label("producto_nombre"),
+        P.unidad,
+        sqlfunc.coalesce(sqlfunc.sum(L.cantidad), 0).label("total_cantidad"),
+        sqlfunc.coalesce(sqlfunc.sum(L.subtotal), 0).label("total_monto"),
+        sqlfunc.count(sqlfunc.distinct(L.oc_id)).label("num_ocs"),
+    ).join(P, L.producto_id == P.id_prod)\
+     .join(OC, L.oc_id == OC.oc_id)
+    if anio:
+        q = q.filter(extract("year", OC.fecha) == anio)
+    if mes:
+        q = q.filter(extract("month", OC.fecha) == mes)
+    rows = q.group_by(L.producto_id, P.producto, P.unidad)\
+            .order_by(sqlfunc.sum(L.subtotal).desc())\
+            .limit(limit).all()
+    return [{
+        "producto_id": r.producto_id,
+        "producto_nombre": r.producto_nombre,
+        "unidad": r.unidad,
+        "total_cantidad": round(float(r.total_cantidad), 2),
+        "total_monto": round(float(r.total_monto), 2),
+        "num_ocs": int(r.num_ocs),
+    } for r in rows]
 
 
 @router.post("")
@@ -761,5 +920,180 @@ def duplicar_oc(oc_id: str, db: Session = Depends(get_db),
         db.rollback()
         raise HTTPException(500, "Error al duplicar la orden de compra")
     return {"ok": True, "oc_id": new_id, "orden": schemas.OrdenCompraOut.model_validate(new_oc)}
+
+
+# ─── Devolución a Proveedor ────────────────────────────────────────────────
+
+class DevolucionLinea(PydanticBase):
+    linea_id: int
+    cantidad_devuelta: float
+
+class DevolucionPayload(PydanticBase):
+    motivo: str = "Devolución a proveedor"
+    lineas: TList[DevolucionLinea] = []
+
+
+@router.post("/{oc_id}/devolucion")
+def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_db),
+                current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Return received items to supplier — adjusts inventory, generates NC, reduces CxP."""
+    oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
+    if not oc:
+        raise HTTPException(404, "Orden de compra no encontrada")
+    if oc.estado not in ("Parcial", "Recibida", "Cerrada"):
+        raise HTTPException(400, f"Solo se puede devolver una OC Parcial/Recibida/Cerrada (estado: {oc.estado})")
+    if not data.lineas:
+        raise HTTPException(400, "Debe indicar al menos una línea a devolver")
+
+    from routers.inventario import _recalc_avg_cost
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    try:
+        total_devuelto = Decimal("0")
+        lineas_devueltas = []
+
+        for item in data.lineas:
+            if item.cantidad_devuelta <= 0:
+                continue
+            linea = db.query(models.OrdenCompraLinea).filter(
+                models.OrdenCompraLinea.id == item.linea_id,
+                models.OrdenCompraLinea.oc_id == oc_id
+            ).first()
+            if not linea:
+                raise HTTPException(400, f"Línea {item.linea_id} no encontrada en OC {oc_id}")
+
+            recibida = float(linea.cantidad_recibida or 0)
+            prev_devuelto = db.query(sqlfunc.coalesce(sqlfunc.sum(models.MovimientoInventario.cantidad), 0)).filter(
+                models.MovimientoInventario.oc_referencia == oc_id,
+                models.MovimientoInventario.tipo_doc == "DEV-GR",
+                models.MovimientoInventario.producto_id == linea.producto_id,
+            ).scalar() or 0
+            disponible = recibida - float(prev_devuelto)
+            if item.cantidad_devuelta > disponible:
+                raise HTTPException(400,
+                    f"Producto {linea.producto_id}: disponible para devolver={disponible}, solicitado={item.cantidad_devuelta}")
+
+            monto_linea = Decimal(str(round(item.cantidad_devuelta * float(linea.precio_unitario), 4)))
+            total_devuelto += monto_linea
+
+            prod = db.query(models.Producto).filter(
+                models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
+            ).first()
+            if prod and prod.es_inventariable:
+                nuevo_stock = max(0, (prod.stock_actual or 0) - item.cantidad_devuelta)
+                num_doc = get_next("DEV-GR", db)
+                mov = models.MovimientoInventario(
+                    num_documento=num_doc,
+                    producto_id=linea.producto_id,
+                    tipo_doc="DEV-GR",
+                    tipo="salida",
+                    motivo=data.motivo,
+                    cantidad=item.cantidad_devuelta,
+                    costo_unitario=float(linea.precio_unitario),
+                    stock_post=round(nuevo_stock, 4),
+                    proveedor=oc.proveedor,
+                    fecha=datetime.now(),
+                    oc_referencia=oc_id,
+                    usuario_id=current_user.id,
+                    observacion=f"Devolución OC {oc_id} — {data.motivo}",
+                )
+                db.add(mov)
+                prod.stock_actual = round(nuevo_stock, 4)
+
+            linea.cantidad_recibida = max(0, recibida - item.cantidad_devuelta)
+            lineas_devueltas.append({
+                "linea_id": linea.id,
+                "producto_id": linea.producto_id,
+                "cantidad_devuelta": item.cantidad_devuelta,
+                "monto": float(monto_linea),
+            })
+
+        if not lineas_devueltas:
+            raise HTTPException(400, "No se procesaron líneas de devolución")
+
+        oc.total_recibido = max(Decimal("0"), Decimal(str(oc.total_recibido or 0)) - total_devuelto)
+
+        nc_numero = None
+        cxp_ajustada = None
+        prov = None
+        if oc.proveedor_id:
+            prov = db.query(models.Proveedor).get(oc.proveedor_id)
+        if not prov and oc.proveedor:
+            prov = db.query(models.Proveedor).filter(
+                models.Proveedor.nombre == oc.proveedor, models.Proveedor.activo == True
+            ).first()
+
+        if prov and total_devuelto > 0:
+            itbis_monto = round(total_devuelto * Decimal("0.18"), 2)
+            nc_total = total_devuelto + itbis_monto
+            nc_numero = get_next("NC", db)
+            cxp = db.query(models.CuentaPorPagar).filter(
+                models.CuentaPorPagar.oc_id == oc_id
+            ).first()
+
+            nc = models.NotaCredito(
+                numero=nc_numero,
+                tipo="proveedor",
+                proveedor_id=prov.id,
+                cxp_id=cxp.id if cxp else None,
+                estado="activa",
+                referencia_id=cxp.id if cxp else None,
+                fecha=datetime.now().date(),
+                motivo=data.motivo,
+                subtotal=total_devuelto,
+                itbis=itbis_monto,
+                total=nc_total,
+            )
+            db.add(nc)
+            db.flush()
+
+            if cxp:
+                cxp.saldo_pendiente = max(Decimal("0"), (cxp.saldo_pendiente or Decimal("0")) - nc_total)
+                if cxp.saldo_pendiente <= 0:
+                    cxp.estado = "pagada"
+                elif cxp.saldo_pendiente < cxp.total:
+                    cxp.estado = "parcial"
+                cxp_ajustada = cxp.numero
+
+            r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
+            if r_compra:
+                dim = {"campo_id": oc.campo_id, "unidad_negocio_id": oc.unidad_negocio_id,
+                       "departamento_id": oc.departamento_id}
+                try:
+                    _crear_asiento_auto(
+                        db, datetime.now().date(), "DEV-GR", oc_id,
+                        f"Devolución OC {oc_id} — {prov.nombre}",
+                        [
+                            {"cuenta_id": r_compra[1], "debe": total_devuelto, "haber": 0,
+                             **dim, "descripcion_linea": f"Reverso CxP devolución OC {oc_id}"},
+                            {"cuenta_id": r_compra[0], "debe": 0, "haber": total_devuelto,
+                             **dim, "descripcion_linea": f"Salida inventario devolución OC {oc_id}"},
+                        ],
+                        current_user.nombre
+                    )
+                except Exception:
+                    _log.exception("Error asiento devolución OC %s", oc_id)
+
+        audit.log(db, current_user, "DEVOLUCION", "OC", oc_id,
+                  f"Devolución {len(lineas_devueltas)} líneas — Total: RD$ {total_devuelto:,.2f}" +
+                  (f" — NC {nc_numero}" if nc_numero else ""),
+                  {"lineas": lineas_devueltas, "nc": nc_numero, "cxp_ajustada": cxp_ajustada})
+
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al procesar la devolución")
+
+    return {
+        "ok": True,
+        "lineas_devueltas": lineas_devueltas,
+        "total_devuelto": float(total_devuelto),
+        "nc_numero": nc_numero,
+        "cxp_ajustada": cxp_ajustada,
+    }
 
 

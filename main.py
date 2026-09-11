@@ -277,6 +277,10 @@ def run_migrations():
         "ALTER TABLE movimientos_inventario ALTER COLUMN stock_post TYPE NUMERIC(14,4) USING stock_post::NUMERIC(14,4)",
         # Ampliar tipo_doc de VARCHAR(5) a VARCHAR(10) para soportar DEV-GI
         "ALTER TABLE movimientos_inventario ALTER COLUMN tipo_doc TYPE VARCHAR(10)",
+        # NotaCredito — campos adicionales para vincular a proveedor/CxP
+        "ALTER TABLE notas_credito ADD COLUMN IF NOT EXISTS proveedor_id INTEGER REFERENCES proveedores(id)",
+        "ALTER TABLE notas_credito ADD COLUMN IF NOT EXISTS cxp_id INTEGER REFERENCES cuentas_por_pagar(id)",
+        "ALTER TABLE notas_credito ADD COLUMN IF NOT EXISTS estado VARCHAR(20) DEFAULT 'activa'",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

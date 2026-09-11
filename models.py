@@ -993,6 +993,9 @@ class NotaCredito(Base):
     numero = Column(String(20), unique=True, index=True, nullable=False)
     tipo = Column(String(20), nullable=False)          # proveedor, cliente
     referencia_id = Column(Integer)
+    proveedor_id = Column(Integer, ForeignKey("proveedores.id"))
+    cxp_id = Column(Integer, ForeignKey("cuentas_por_pagar.id"))
+    estado = Column(String(20), default="activa")      # activa, anulada
     ncf = Column(String(30))
     fecha = Column(Date, nullable=False)
     motivo = Column(Text)
@@ -1001,6 +1004,8 @@ class NotaCredito(Base):
     total = Column(Numeric(14, 2), default=0)
     asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
     creado_en = Column(DateTime, server_default=func.now())
+    proveedor = relationship("Proveedor", foreign_keys=[proveedor_id])
+    cxp = relationship("CuentaPorPagar", foreign_keys=[cxp_id])
 
 
 class NotaDebito(Base):
