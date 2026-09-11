@@ -234,6 +234,37 @@ def run_migrations():
         "CREATE INDEX IF NOT EXISTS ix_mov_pres_anio ON movimientos_presupuestarios(anio)",
         "CREATE INDEX IF NOT EXISTS ix_mov_pres_origen ON movimientos_presupuestarios(origen_id)",
         "CREATE INDEX IF NOT EXISTS ix_mov_pres_tipo ON movimientos_presupuestarios(tipo)",
+        # Fase 5: Dimensiones genéricas
+        """CREATE TABLE IF NOT EXISTS dimensiones (
+            id SERIAL PRIMARY KEY,
+            codigo VARCHAR(20) UNIQUE NOT NULL,
+            nombre VARCHAR(200) NOT NULL,
+            descripcion VARCHAR(500),
+            entidades_aplica TEXT DEFAULT '[]',
+            obligatoria BOOLEAN DEFAULT FALSE,
+            activo BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS dimension_valores (
+            id SERIAL PRIMARY KEY,
+            dimension_id INTEGER NOT NULL REFERENCES dimensiones(id),
+            codigo VARCHAR(20) NOT NULL,
+            nombre VARCHAR(200) NOT NULL,
+            descripcion VARCHAR(500),
+            activo BOOLEAN DEFAULT TRUE,
+            UNIQUE(dimension_id, codigo)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_dimval_dimension ON dimension_valores(dimension_id)",
+        """CREATE TABLE IF NOT EXISTS dimension_entidades (
+            id SERIAL PRIMARY KEY,
+            dimension_id INTEGER NOT NULL REFERENCES dimensiones(id),
+            valor_id INTEGER NOT NULL REFERENCES dimension_valores(id),
+            entidad_tipo VARCHAR(20) NOT NULL,
+            entidad_id VARCHAR(30) NOT NULL,
+            UNIQUE(dimension_id, entidad_tipo, entidad_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_diment_entidad ON dimension_entidades(entidad_tipo, entidad_id)",
+        "CREATE INDEX IF NOT EXISTS ix_diment_dimension ON dimension_entidades(dimension_id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

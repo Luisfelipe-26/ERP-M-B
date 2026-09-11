@@ -923,6 +923,59 @@ class AlmacenOut(AlmacenCreate):
     class Config:
         from_attributes = True
 
+# ── Dimensiones Genéricas ────────────────────────────────────
+
+class DimensionValorOut(BaseModel):
+    id: int
+    dimension_id: int
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    activo: bool = True
+    class Config:
+        from_attributes = True
+
+class DimensionCreate(BaseModel):
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    entidades_aplica: List[str] = []
+    obligatoria: bool = False
+
+class DimensionOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+    entidades_aplica: List[str] = []
+    obligatoria: bool = False
+    activo: bool = True
+    valores: List[DimensionValorOut] = []
+    class Config:
+        from_attributes = True
+
+class DimensionValorCreate(BaseModel):
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = None
+
+class DimensionEntidadIn(BaseModel):
+    dimension_id: int
+    valor_id: int
+
+class DimensionEntidadOut(BaseModel):
+    id: int
+    dimension_id: int
+    valor_id: int
+    entidad_tipo: str
+    entidad_id: str
+    dimension_codigo: Optional[str] = None
+    dimension_nombre: Optional[str] = None
+    valor_codigo: Optional[str] = None
+    valor_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
 # Nómina
 class NominaProcesar(BaseModel):
     tipo: str = "quincenal"

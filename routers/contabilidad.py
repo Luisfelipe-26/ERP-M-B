@@ -4530,6 +4530,162 @@ def eliminar_almacen(id: int, db: Session = Depends(get_db), user=Depends(get_cu
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# DIMENSIONES GENÉRICAS
+# ══════════════════════════════════════════════════════════════════════════════
+
+ENTIDAD_TIPOS = ("OT", "OC", "ASIENTO", "CXP", "PRESUPUESTO", "NOMINA", "INVENTARIO")
+
+def _dim_to_dict(dim):
+    import json
+    ent = dim.entidades_aplica or "[]"
+    try:
+        aplica = json.loads(ent) if isinstance(ent, str) else ent
+    except Exception:
+        aplica = []
+    return {
+        "id": dim.id, "codigo": dim.codigo, "nombre": dim.nombre,
+        "descripcion": dim.descripcion, "entidades_aplica": aplica,
+        "obligatoria": dim.obligatoria, "activo": dim.activo,
+        "valores": [
+            {"id": v.id, "dimension_id": v.dimension_id, "codigo": v.codigo,
+             "nombre": v.nombre, "descripcion": v.descripcion, "activo": v.activo}
+            for v in dim.valores
+        ],
+    }
+
+@router.get("/dimensiones")
+def listar_dimensiones(entidad_tipo: str = None, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    dims = db.query(models.Dimension).order_by(models.Dimension.codigo).all()
+    result = [_dim_to_dict(d) for d in dims]
+    if entidad_tipo:
+        result = [d for d in result if entidad_tipo in d["entidades_aplica"]]
+    return result
+
+@router.post("/dimensiones")
+def crear_dimension(data: schemas.DimensionCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    import json
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = models.Dimension(
+        codigo=data.codigo.upper().strip(),
+        nombre=data.nombre.strip(),
+        descripcion=data.descripcion,
+        entidades_aplica=json.dumps(data.entidades_aplica),
+        obligatoria=data.obligatoria,
+    )
+    db.add(obj); db.commit(); db.refresh(obj)
+    return _dim_to_dict(obj)
+
+@router.put("/dimensiones/{id}")
+def actualizar_dimension(id: int, data: schemas.DimensionCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    import json
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.Dimension).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrada")
+    obj.codigo = data.codigo.upper().strip()
+    obj.nombre = data.nombre.strip()
+    obj.descripcion = data.descripcion
+    obj.entidades_aplica = json.dumps(data.entidades_aplica)
+    obj.obligatoria = data.obligatoria
+    db.commit(); db.refresh(obj)
+    return _dim_to_dict(obj)
+
+@router.delete("/dimensiones/{id}")
+def eliminar_dimension(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.Dimension).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrada")
+    obj.activo = False
+    db.commit()
+    return {"ok": True}
+
+# ── Valores de dimensión ──
+
+@router.post("/dimensiones/{dim_id}/valores")
+def crear_dimension_valor(dim_id: int, data: schemas.DimensionValorCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    dim = db.query(models.Dimension).get(dim_id)
+    if not dim:
+        raise HTTPException(404, "Dimensión no encontrada")
+    obj = models.DimensionValor(
+        dimension_id=dim_id,
+        codigo=data.codigo.upper().strip(),
+        nombre=data.nombre.strip(),
+        descripcion=data.descripcion,
+    )
+    db.add(obj); db.commit(); db.refresh(obj)
+    return {"id": obj.id, "dimension_id": obj.dimension_id, "codigo": obj.codigo,
+            "nombre": obj.nombre, "descripcion": obj.descripcion, "activo": obj.activo}
+
+@router.put("/dimension-valores/{id}")
+def actualizar_dimension_valor(id: int, data: schemas.DimensionValorCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.DimensionValor).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    obj.codigo = data.codigo.upper().strip()
+    obj.nombre = data.nombre.strip()
+    obj.descripcion = data.descripcion
+    db.commit(); db.refresh(obj)
+    return {"id": obj.id, "dimension_id": obj.dimension_id, "codigo": obj.codigo,
+            "nombre": obj.nombre, "descripcion": obj.descripcion, "activo": obj.activo}
+
+@router.delete("/dimension-valores/{id}")
+def eliminar_dimension_valor(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol not in ("admin", "contador"):
+        raise HTTPException(403, "Solo admin/contador")
+    obj = db.query(models.DimensionValor).get(id)
+    if not obj:
+        raise HTTPException(404, "No encontrado")
+    obj.activo = False
+    db.commit()
+    return {"ok": True}
+
+# ── Asignación de dimensiones a entidades ──
+
+@router.get("/entidad-dimensiones/{entidad_tipo}/{entidad_id}")
+def obtener_dimensiones_entidad(entidad_tipo: str, entidad_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    rows = (db.query(models.DimensionEntidad)
+            .filter(models.DimensionEntidad.entidad_tipo == entidad_tipo,
+                    models.DimensionEntidad.entidad_id == entidad_id)
+            .all())
+    result = []
+    for r in rows:
+        dim = db.query(models.Dimension).get(r.dimension_id)
+        val = db.query(models.DimensionValor).get(r.valor_id)
+        result.append({
+            "id": r.id, "dimension_id": r.dimension_id, "valor_id": r.valor_id,
+            "entidad_tipo": r.entidad_tipo, "entidad_id": r.entidad_id,
+            "dimension_codigo": dim.codigo if dim else None,
+            "dimension_nombre": dim.nombre if dim else None,
+            "valor_codigo": val.codigo if val else None,
+            "valor_nombre": val.nombre if val else None,
+        })
+    return result
+
+@router.post("/entidad-dimensiones/{entidad_tipo}/{entidad_id}")
+def asignar_dimensiones_entidad(entidad_tipo: str, entidad_id: str, asignaciones: list[schemas.DimensionEntidadIn],
+                                db: Session = Depends(get_db), user=Depends(get_current_user)):
+    db.query(models.DimensionEntidad).filter(
+        models.DimensionEntidad.entidad_tipo == entidad_tipo,
+        models.DimensionEntidad.entidad_id == entidad_id,
+    ).delete()
+    for a in asignaciones:
+        db.add(models.DimensionEntidad(
+            dimension_id=a.dimension_id, valor_id=a.valor_id,
+            entidad_tipo=entidad_tipo, entidad_id=str(entidad_id),
+        ))
+    db.commit()
+    return obtener_dimensiones_entidad(entidad_tipo, entidad_id, db, user)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # NÓMINA — Procesamiento y contabilización
 # ══════════════════════════════════════════════════════════════════════════════
 

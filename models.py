@@ -1294,3 +1294,43 @@ class Almacen(Base):
     nombre = Column(String(200), nullable=False)
     ubicacion = Column(String(300))
     activo = Column(Boolean, default=True)
+
+
+# ── Dimensiones Genéricas ────────────────────────────────────
+
+class Dimension(Base):
+    __tablename__ = "dimensiones"
+    id = Column(Integer, primary_key=True, index=True)
+    codigo = Column(String(20), unique=True, nullable=False, index=True)
+    nombre = Column(String(200), nullable=False)
+    descripcion = Column(String(500))
+    entidades_aplica = Column(Text, default="[]")
+    obligatoria = Column(Boolean, default=False)
+    activo = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.now())
+    valores = relationship("DimensionValor", back_populates="dimension", order_by="DimensionValor.codigo")
+
+
+class DimensionValor(Base):
+    __tablename__ = "dimension_valores"
+    id = Column(Integer, primary_key=True, index=True)
+    dimension_id = Column(Integer, ForeignKey("dimensiones.id"), nullable=False, index=True)
+    codigo = Column(String(20), nullable=False, index=True)
+    nombre = Column(String(200), nullable=False)
+    descripcion = Column(String(500))
+    activo = Column(Boolean, default=True)
+    dimension = relationship("Dimension", back_populates="valores")
+    __table_args__ = (UniqueConstraint("dimension_id", "codigo", name="uq_dimval_dim_codigo"),)
+
+
+class DimensionEntidad(Base):
+    __tablename__ = "dimension_entidades"
+    id = Column(Integer, primary_key=True, index=True)
+    dimension_id = Column(Integer, ForeignKey("dimensiones.id"), nullable=False, index=True)
+    valor_id = Column(Integer, ForeignKey("dimension_valores.id"), nullable=False, index=True)
+    entidad_tipo = Column(String(20), nullable=False, index=True)
+    entidad_id = Column(String(30), nullable=False, index=True)
+    __table_args__ = (
+        UniqueConstraint("dimension_id", "entidad_tipo", "entidad_id", name="uq_diment_dim_ent"),
+        Index("ix_diment_entidad", "entidad_tipo", "entidad_id"),
+    )
