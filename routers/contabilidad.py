@@ -1514,6 +1514,33 @@ def listar_cxp(estado: str = None, skip: int = 0, limit: int = 100,
     return {"total": total, "items": result}
 
 
+ITBIS_RATES = {"itbis_18": Decimal("0.18"), "itbis_0": Decimal("0"), "exento": Decimal("0")}
+
+
+def _calcular_cxp_desde_lineas(lineas_data, prov):
+    """Calculate CxP totals from line items + proveedor retenciones."""
+    subtotal = Decimal("0")
+    itbis_total = Decimal("0")
+    lineas_out = []
+    for l in lineas_data:
+        cant = Decimal(str(l.cantidad or 0))
+        precio = Decimal(str(l.precio_unitario or 0))
+        desc = Decimal(str(l.descuento_pct or 0))
+        sub = round(cant * precio * (1 - desc / 100), 2)
+        rate = ITBIS_RATES.get(l.impuesto, Decimal("0.18"))
+        mitbis = round(sub * rate, 2)
+        subtotal += sub
+        itbis_total += mitbis
+        lineas_out.append({"sub": sub, "mitbis": mitbis, "data": l})
+
+    isr_pct = Decimal(str(prov.retencion_isr_pct or 0))
+    itbis_ret_pct = Decimal(str(prov.retencion_itbis_pct or 0))
+    ret_isr = round(subtotal * isr_pct / 100, 2)
+    ret_itbis = round(itbis_total * itbis_ret_pct / 100, 2)
+    total = subtotal + itbis_total - ret_isr - ret_itbis
+    return subtotal, itbis_total, ret_isr, ret_itbis, total, lineas_out
+
+
 @router.post("/cxp")
 def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
               user=Depends(get_current_user)):
@@ -1524,10 +1551,15 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
     if not prov:
         raise HTTPException(400, f"Proveedor ID {data.proveedor_id} no existe")
 
-    subtotal = Decimal(str(data.subtotal or 0))
-    itbis = Decimal(str(data.itbis or 0))
-    retencion = Decimal(str(data.retencion_isr or 0))
-    total = subtotal + itbis - retencion
+    if data.lineas:
+        subtotal, itbis, ret_isr, ret_itbis, total, lineas_calc = _calcular_cxp_desde_lineas(data.lineas, prov)
+    else:
+        subtotal = Decimal(str(data.subtotal or 0))
+        itbis = Decimal(str(data.itbis or 0))
+        ret_isr = Decimal(str(data.retencion_isr or 0))
+        ret_itbis = Decimal(str(data.retencion_itbis or 0))
+        total = subtotal + itbis - ret_isr - ret_itbis
+        lineas_calc = []
 
     numero = get_next("CXP", db)
     cxp = models.CuentaPorPagar(
@@ -1541,7 +1573,8 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
         fecha_vencimiento=data.fecha_vencimiento,
         subtotal=subtotal,
         itbis=itbis,
-        retencion_isr=retencion,
+        retencion_isr=ret_isr,
+        retencion_itbis=ret_itbis,
         total=total,
         saldo_pendiente=total,
         notas=data.notas,
@@ -1549,43 +1582,68 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
     db.add(cxp)
     db.flush()
 
-    lineas = []
+    for lc in lineas_calc:
+        l = lc["data"]
+        db.add(models.LineaCxP(
+            cxp_id=cxp.id,
+            producto_id=l.producto_id,
+            oc_linea_id=l.oc_linea_id,
+            cantidad=l.cantidad,
+            precio_unitario=l.precio_unitario,
+            descuento_pct=l.descuento_pct,
+            impuesto=l.impuesto,
+            monto_itbis=lc["mitbis"],
+            subtotal=lc["sub"],
+            cuenta_contable_id=l.cuenta_contable_id,
+        ))
+
+    asiento_lineas = []
     r_factura = _get_regla_cuentas(db, "compra", "factura_proveedor")
     if r_factura and subtotal > 0:
-        lineas.append({"cuenta_id": r_factura[0], "debe": subtotal, "haber": 0,
+        asiento_lineas.append({"cuenta_id": r_factura[0], "debe": subtotal, "haber": 0,
                         "tercero_id": str(data.proveedor_id),
                         "descripcion_linea": f"Compra {prov.nombre}"})
-        lineas.append({"cuenta_id": r_factura[1], "debe": 0, "haber": subtotal,
+        asiento_lineas.append({"cuenta_id": r_factura[1], "debe": 0, "haber": subtotal,
                         "tercero_id": str(data.proveedor_id),
                         "descripcion_linea": f"CxP {prov.nombre}"})
     r_itbis = _get_regla_cuentas(db, "compra", "itbis_compra")
     if r_itbis and itbis > 0:
-        lineas.append({"cuenta_id": r_itbis[0], "debe": itbis, "haber": 0,
+        asiento_lineas.append({"cuenta_id": r_itbis[0], "debe": itbis, "haber": 0,
                         "descripcion_linea": "ITBIS crédito fiscal"})
-        lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis,
+        asiento_lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis,
                         "tercero_id": str(data.proveedor_id),
                         "descripcion_linea": f"CxP ITBIS {prov.nombre}"})
-    if retencion > 0:
-        cta_ret = db.query(models.CuentaContable).filter(
+    if ret_isr > 0:
+        cta_ret_isr = db.query(models.CuentaContable).filter(
             models.CuentaContable.codigo == "2.1.02.03").first()
-        if cta_ret and r_factura:
-            lineas.append({"cuenta_id": r_factura[1], "debe": retencion, "haber": 0,
+        if cta_ret_isr and r_factura:
+            asiento_lineas.append({"cuenta_id": r_factura[1], "debe": ret_isr, "haber": 0,
                             "tercero_id": str(data.proveedor_id),
                             "descripcion_linea": f"Retención ISR {prov.nombre}"})
-            lineas.append({"cuenta_id": cta_ret.id, "debe": 0, "haber": retencion,
+            asiento_lineas.append({"cuenta_id": cta_ret_isr.id, "debe": 0, "haber": ret_isr,
                             "descripcion_linea": "Retención ISR por pagar"})
+    if ret_itbis > 0:
+        cta_ret_itbis = db.query(models.CuentaContable).filter(
+            models.CuentaContable.codigo == "2.1.02.04").first()
+        if cta_ret_itbis and r_factura:
+            asiento_lineas.append({"cuenta_id": r_factura[1], "debe": ret_itbis, "haber": 0,
+                            "tercero_id": str(data.proveedor_id),
+                            "descripcion_linea": f"Retención ITBIS {prov.nombre}"})
+            asiento_lineas.append({"cuenta_id": cta_ret_itbis.id, "debe": 0, "haber": ret_itbis,
+                            "descripcion_linea": "Retención ITBIS por pagar"})
 
     try:
         asiento = None
-        if lineas:
+        if asiento_lineas:
             asiento = _crear_asiento_auto(
                 db, data.fecha_factura, "CXP", numero,
                 f"Factura proveedor {prov.nombre} — {numero}",
-                lineas, user.nombre
+                asiento_lineas, user.nombre
             )
             if asiento:
                 cxp.asiento_id = asiento.id
-        _audit(db, user, "CREAR", "CXP", numero, f"Factura {prov.nombre} total={total}")
+        _audit(db, user, "CREAR", "CXP", numero,
+               f"Factura {prov.nombre} sub={subtotal} itbis={itbis} ret_isr={ret_isr} ret_itbis={ret_itbis} total={total}")
         db.commit()
     except Exception:
         db.rollback()
@@ -1594,6 +1652,83 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
     db.refresh(cxp)
     return {"ok": True, "numero": numero, "id": cxp.id,
             "asiento": asiento.numero if asiento else None}
+
+
+@router.post("/cxp/{cxp_id}/validar")
+def validar_cxp(cxp_id: int, db: Session = Depends(get_db),
+                user=Depends(get_current_user)):
+    """Three-way match: factura vs OC vs recepción. Marca compromiso como ejecutado."""
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+
+    cxp = db.query(models.CuentaPorPagar).get(cxp_id)
+    if not cxp:
+        raise HTTPException(404, "CxP no encontrada")
+
+    alertas = []
+    errores = []
+    TOL_QTY = Decimal("0.05")
+    TOL_AMT = Decimal("0.02")
+
+    if cxp.oc_id:
+        oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == cxp.oc_id).first()
+        if oc:
+            oc_lineas = db.query(models.OrdenCompraLinea).filter(
+                models.OrdenCompraLinea.oc_id == cxp.oc_id
+            ).all()
+            cxp_lineas = db.query(models.LineaCxP).filter(models.LineaCxP.cxp_id == cxp_id).all()
+
+            for cl in cxp_lineas:
+                oc_l = None
+                if cl.oc_linea_id:
+                    oc_l = next((o for o in oc_lineas if o.id == cl.oc_linea_id), None)
+                elif cl.producto_id:
+                    oc_l = next((o for o in oc_lineas if o.producto_id == cl.producto_id), None)
+
+                if not oc_l:
+                    alertas.append(f"Línea {cl.producto_id}: no tiene línea OC correspondiente")
+                    continue
+
+                qty_fac = Decimal(str(cl.cantidad or 0))
+                qty_rec = Decimal(str(oc_l.cantidad_recibida or 0))
+                if qty_rec > 0 and abs(qty_fac - qty_rec) / qty_rec > TOL_QTY:
+                    errores.append(
+                        f"{cl.producto_id}: cantidad factura ({qty_fac}) vs recibida ({qty_rec}) "
+                        f"excede tolerancia {TOL_QTY*100}%"
+                    )
+
+                precio_oc = Decimal(str(oc_l.precio_unitario or 0))
+                precio_fac = Decimal(str(cl.precio_unitario or 0))
+                if precio_oc > 0 and abs(precio_fac - precio_oc) / precio_oc > TOL_AMT:
+                    errores.append(
+                        f"{cl.producto_id}: precio factura ({precio_fac}) vs OC ({precio_oc}) "
+                        f"excede tolerancia {TOL_AMT*100}%"
+                    )
+
+            total_oc = Decimal(str(oc.total_estimado or 0))
+            total_cxp = Decimal(str(cxp.subtotal or 0))
+            if total_oc > 0 and abs(total_cxp - total_oc) / total_oc > TOL_AMT:
+                alertas.append(
+                    f"Total factura ({total_cxp}) vs total OC ({total_oc}) "
+                    f"difiere más de {TOL_AMT*100}%"
+                )
+
+    if errores:
+        return {"ok": False, "errores": errores, "alertas": alertas,
+                "mensaje": "Three-way match falló — corrija las diferencias"}
+
+    if cxp.oc_id:
+        db.query(models.CompromisoPresupuestario).filter(
+            models.CompromisoPresupuestario.origen_tipo == "OC",
+            models.CompromisoPresupuestario.origen_id == cxp.oc_id,
+            models.CompromisoPresupuestario.estado == "activo",
+        ).update({"estado": "ejecutado"})
+
+    _audit(db, user, "VALIDAR", "CXP", cxp.numero,
+           f"Three-way match OK — compromiso ejecutado" + (f" (alertas: {len(alertas)})" if alertas else ""))
+    db.commit()
+    return {"ok": True, "alertas": alertas,
+            "mensaje": "Factura validada — compromiso presupuestario ejecutado"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -197,6 +197,22 @@ def run_migrations():
         "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS unidad_negocio_id INTEGER REFERENCES unidades_negocio(id)",
         "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS departamento_id INTEGER REFERENCES departamentos(id)",
         "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS almacen_id INTEGER REFERENCES almacenes(id)",
+        # Fase 3: Factura proveedor — LineaCxP + retencion_itbis
+        "ALTER TABLE cuentas_por_pagar ADD COLUMN IF NOT EXISTS retencion_itbis NUMERIC(14,2) DEFAULT 0",
+        """CREATE TABLE IF NOT EXISTS lineas_cxp (
+            id SERIAL PRIMARY KEY,
+            cxp_id INTEGER NOT NULL REFERENCES cuentas_por_pagar(id),
+            producto_id VARCHAR(10) REFERENCES productos(id_prod),
+            oc_linea_id INTEGER REFERENCES ordenes_compra_lineas(id),
+            cantidad NUMERIC(14,4) DEFAULT 0,
+            precio_unitario NUMERIC(14,4) DEFAULT 0,
+            descuento_pct NUMERIC(5,2) DEFAULT 0,
+            impuesto VARCHAR(20) DEFAULT 'itbis_18',
+            monto_itbis NUMERIC(14,2) DEFAULT 0,
+            subtotal NUMERIC(14,2) DEFAULT 0,
+            cuenta_contable_id INTEGER REFERENCES cuentas_contables(id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_lineas_cxp_cxp_id ON lineas_cxp(cxp_id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

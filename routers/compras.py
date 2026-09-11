@@ -325,6 +325,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
 
     try:
         total_recibido_now = 0.0
+        received_lineas = []
         for item in data.lineas:
             if item.cantidad_recibida <= 0:
                 continue
@@ -337,6 +338,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
 
             linea.cantidad_recibida = (linea.cantidad_recibida or 0) + item.cantidad_recibida
             total_recibido_now += item.cantidad_recibida * linea.precio_unitario
+            received_lineas.append({"linea_id": linea.id, "cantidad_recibida": item.cantidad_recibida})
 
             prod = db.query(models.Producto).filter(
                 models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
@@ -370,9 +372,9 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
         if data.num_factura:
             oc.num_factura = data.num_factura
 
-        lineas_all = db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).all()
-        all_received = all((l.cantidad_recibida or 0) >= l.cantidad for l in lineas_all)
-        any_received = any((l.cantidad_recibida or 0) > 0 for l in lineas_all)
+        lineas_oc = db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).all()
+        all_received = all((l.cantidad_recibida or 0) >= l.cantidad for l in lineas_oc)
+        any_received = any((l.cantidad_recibida or 0) > 0 for l in lineas_oc)
 
         if all_received:
             oc.estado = "Recibida"
@@ -402,16 +404,29 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                 if asiento:
                     asiento_num = asiento.numero
 
-            prov = db.query(models.Proveedor).filter(
-                models.Proveedor.nombre == oc.proveedor,
-                models.Proveedor.activo == True,
-            ).first() if oc.proveedor else None
+            prov = None
+            if oc.proveedor_id:
+                prov = db.query(models.Proveedor).get(oc.proveedor_id)
+            if not prov and oc.proveedor:
+                prov = db.query(models.Proveedor).filter(
+                    models.Proveedor.nombre == oc.proveedor,
+                    models.Proveedor.activo == True,
+                ).first()
 
             if prov:
                 from datetime import timedelta
                 cxp_num = get_next("CXP", db)
                 fecha_hoy = datetime.now().date()
                 vencimiento = fecha_hoy + timedelta(days=prov.condicion_pago_dias or 30)
+
+                itbis_pct = Decimal("0.18")
+                itbis_monto = round(monto * itbis_pct, 2)
+                isr_pct = Decimal(str(prov.retencion_isr_pct or 0))
+                itbis_ret_pct = Decimal(str(prov.retencion_itbis_pct or 0))
+                ret_isr = round(monto * isr_pct / 100, 2)
+                ret_itbis = round(itbis_monto * itbis_ret_pct / 100, 2)
+                total_cxp = monto + itbis_monto - ret_isr - ret_itbis
+
                 cxp = models.CuentaPorPagar(
                     numero=cxp_num,
                     proveedor_id=prov.id,
@@ -421,14 +436,35 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                     fecha_factura=fecha_hoy,
                     fecha_vencimiento=vencimiento,
                     subtotal=monto,
-                    itbis=Decimal("0"),
-                    retencion_isr=Decimal("0"),
-                    total=monto,
-                    saldo_pendiente=monto,
+                    itbis=itbis_monto,
+                    retencion_isr=ret_isr,
+                    retencion_itbis=ret_itbis,
+                    total=total_cxp,
+                    saldo_pendiente=total_cxp,
                     asiento_id=asiento.id if asiento else None,
                     notas=f"Generada automáticamente desde recepción OC {oc_id}",
                 )
                 db.add(cxp)
+                db.flush()
+
+                for rl in received_lineas:
+                    oc_l = next((o for o in lineas_oc if o.id == rl["linea_id"]), None)
+                    if oc_l:
+                        sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(oc_l.precio_unitario or 0))
+                        imp = oc_l.impuesto or "itbis_18"
+                        rate = Decimal("0.18") if imp == "itbis_18" else Decimal("0")
+                        db.add(models.LineaCxP(
+                            cxp_id=cxp.id,
+                            producto_id=oc_l.producto_id,
+                            oc_linea_id=oc_l.id,
+                            cantidad=rl["cantidad_recibida"],
+                            precio_unitario=float(oc_l.precio_unitario or 0),
+                            descuento_pct=float(oc_l.descuento_pct or 0),
+                            impuesto=imp,
+                            monto_itbis=round(sub_l * rate, 2),
+                            subtotal=round(sub_l, 2),
+                        ))
+
                 cxp_numero = cxp_num
 
         db.commit()

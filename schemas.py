@@ -491,6 +491,15 @@ class ConfiguracionEmpresaOut(ConfiguracionEmpresaUpdate):
         from_attributes = True
 
 # CxP
+class LineaCxPCreate(BaseModel):
+    producto_id: Optional[str] = None
+    oc_linea_id: Optional[int] = None
+    cantidad: float = 0
+    precio_unitario: float = 0
+    descuento_pct: float = 0
+    impuesto: str = "itbis_18"
+    cuenta_contable_id: Optional[int] = None
+
 class CuentaPorPagarCreate(BaseModel):
     proveedor_id: int
     oc_id: Optional[str] = None
@@ -502,8 +511,24 @@ class CuentaPorPagarCreate(BaseModel):
     subtotal: float = 0
     itbis: float = 0
     retencion_isr: float = 0
+    retencion_itbis: float = 0
     total: float = 0
     notas: Optional[str] = None
+    lineas: List[LineaCxPCreate] = []
+
+class LineaCxPOut(BaseModel):
+    id: int
+    producto_id: Optional[str] = None
+    oc_linea_id: Optional[int] = None
+    cantidad: float
+    precio_unitario: float
+    descuento_pct: float = 0
+    impuesto: str = "itbis_18"
+    monto_itbis: float = 0
+    subtotal: float
+    cuenta_contable_id: Optional[int] = None
+    class Config:
+        from_attributes = True
 
 class CuentaPorPagarOut(BaseModel):
     id: int
@@ -518,6 +543,7 @@ class CuentaPorPagarOut(BaseModel):
     subtotal: float
     itbis: float
     retencion_isr: float
+    retencion_itbis: float = 0
     total: float
     saldo_pendiente: float
     estado: str

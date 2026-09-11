@@ -853,6 +853,7 @@ class CuentaPorPagar(Base):
     subtotal = Column(Numeric(14, 2), default=0)
     itbis = Column(Numeric(14, 2), default=0)
     retencion_isr = Column(Numeric(14, 2), default=0)
+    retencion_itbis = Column(Numeric(14, 2), default=0)
     total = Column(Numeric(14, 2), default=0)
     saldo_pendiente = Column(Numeric(14, 2), default=0)
     estado = Column(String(20), default="pendiente")   # pendiente, parcial, pagada, anulada
@@ -861,6 +862,24 @@ class CuentaPorPagar(Base):
     creado_en = Column(DateTime, server_default=func.now())
     proveedor = relationship("Proveedor")
     pagos = relationship("Pago", back_populates="cxp")
+    lineas = relationship("LineaCxP", back_populates="cxp")
+
+
+class LineaCxP(Base):
+    __tablename__ = "lineas_cxp"
+    id = Column(Integer, primary_key=True, index=True)
+    cxp_id = Column(Integer, ForeignKey("cuentas_por_pagar.id"), nullable=False, index=True)
+    producto_id = Column(String(10), ForeignKey("productos.id_prod"))
+    oc_linea_id = Column(Integer, ForeignKey("ordenes_compra_lineas.id"))
+    cantidad = Column(Numeric(14, 4), default=0)
+    precio_unitario = Column(Numeric(14, 4), default=0)
+    descuento_pct = Column(Numeric(5, 2), default=0)
+    impuesto = Column(String(20), default="itbis_18")
+    monto_itbis = Column(Numeric(14, 2), default=0)
+    subtotal = Column(Numeric(14, 2), default=0)
+    cuenta_contable_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    cxp = relationship("CuentaPorPagar", back_populates="lineas")
+    producto = relationship("Producto")
 
 
 class Pago(Base):
