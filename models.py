@@ -1081,6 +1081,25 @@ class CompromisoPresupuestario(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class MovimientoPresupuestario(Base):
+    __tablename__ = "movimientos_presupuestarios"
+    id = Column(Integer, primary_key=True, index=True)
+    fecha = Column(Date, nullable=False)
+    tipo = Column(String(20), nullable=False)  # APROPIACION, COMPROMISO, DEVENGADO, PAGADO, TRANSFERENCIA, MODIFICACION
+    anio = Column(Integer, nullable=False)
+    mes = Column(Integer, nullable=False)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), nullable=False)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"))
+    departamento_id = Column(Integer, ForeignKey("departamentos.id"))
+    monto = Column(Numeric(14, 2), nullable=False)
+    origen_tipo = Column(String(20))  # OC, CXP, PAGO, PRESUPUESTO, TRANSFERENCIA
+    origen_id = Column(String(30), index=True)
+    notas = Column(String(300))
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class ConfigPresupuesto(Base):
     __tablename__ = "config_presupuesto"
     id = Column(Integer, primary_key=True, index=True)

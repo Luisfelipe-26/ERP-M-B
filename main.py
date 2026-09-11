@@ -213,6 +213,27 @@ def run_migrations():
             cuenta_contable_id INTEGER REFERENCES cuentas_contables(id)
         )""",
         "CREATE INDEX IF NOT EXISTS ix_lineas_cxp_cxp_id ON lineas_cxp(cxp_id)",
+        # Fase 4: Ledger presupuestario — MovimientoPresupuestario
+        """CREATE TABLE IF NOT EXISTS movimientos_presupuestarios (
+            id SERIAL PRIMARY KEY,
+            fecha DATE NOT NULL,
+            tipo VARCHAR(20) NOT NULL,
+            anio INTEGER NOT NULL,
+            mes INTEGER NOT NULL,
+            cuenta_id INTEGER NOT NULL REFERENCES cuentas_contables(id),
+            campo_id VARCHAR(10) REFERENCES campos(id_campo),
+            unidad_negocio_id INTEGER REFERENCES unidades_negocio(id),
+            departamento_id INTEGER REFERENCES departamentos(id),
+            monto NUMERIC(14,2) NOT NULL,
+            origen_tipo VARCHAR(20),
+            origen_id VARCHAR(30),
+            notas VARCHAR(300),
+            usuario_id INTEGER REFERENCES usuarios(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_mov_pres_anio ON movimientos_presupuestarios(anio)",
+        "CREATE INDEX IF NOT EXISTS ix_mov_pres_origen ON movimientos_presupuestarios(origen_id)",
+        "CREATE INDEX IF NOT EXISTS ix_mov_pres_tipo ON movimientos_presupuestarios(tipo)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

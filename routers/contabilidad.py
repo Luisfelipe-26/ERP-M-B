@@ -1734,11 +1734,23 @@ def validar_cxp(cxp_id: int, db: Session = Depends(get_db),
                 "mensaje": "Three-way match falló — corrija las diferencias"}
 
     if cxp.oc_id:
-        db.query(models.CompromisoPresupuestario).filter(
+        comps = db.query(models.CompromisoPresupuestario).filter(
             models.CompromisoPresupuestario.origen_tipo == "OC",
             models.CompromisoPresupuestario.origen_id == cxp.oc_id,
             models.CompromisoPresupuestario.estado == "activo",
-        ).update({"estado": "ejecutado"})
+        ).all()
+        for comp in comps:
+            comp.estado = "ejecutado"
+            _registrar_mov_pres(
+                db, tipo="DEVENGADO", fecha=cxp.fecha_factura,
+                cuenta_id=comp.cuenta_id, monto=comp.monto,
+                anio=comp.anio, mes=comp.mes,
+                campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+                departamento_id=comp.departamento_id,
+                origen_tipo="CXP", origen_id=cxp.numero,
+                notas=f"Devengado desde factura {cxp.numero}",
+                usuario_id=user.id,
+            )
 
     _audit(db, user, "VALIDAR", "CXP", cxp.numero,
            f"Three-way match OK — compromiso ejecutado" + (f" (alertas: {len(alertas)})" if alertas else ""))
@@ -1812,6 +1824,21 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
             )
             if asiento:
                 pago.asiento_id = asiento.id
+        if cxp.oc_id:
+            comp = db.query(models.CompromisoPresupuestario).filter(
+                models.CompromisoPresupuestario.origen_tipo == "OC",
+                models.CompromisoPresupuestario.origen_id == cxp.oc_id,
+            ).first()
+            if comp:
+                _registrar_mov_pres(
+                    db, tipo="PAGADO", fecha=data.fecha,
+                    cuenta_id=comp.cuenta_id, monto=monto,
+                    campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+                    departamento_id=comp.departamento_id,
+                    origen_tipo="PAGO", origen_id=numero,
+                    notas=f"Pago {numero} CxP {cxp.numero}",
+                    usuario_id=user.id,
+                )
         _audit(db, user, "CREAR", "PAGO", numero, f"Pago CxP {cxp.numero} monto={monto}")
         db.commit()
     except Exception:
@@ -2821,6 +2848,123 @@ def aprobar_lote(anio: int = Query(...), db: Session = Depends(get_db),
     n = q.update({"estado": "aprobado"})
     db.commit()
     return {"ok": True, "aprobados": n}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEDGER PRESUPUESTARIO — MovimientoPresupuestario
+# ══════════════════════════════════════════════════════════════════════════════
+
+TIPOS_MOV_PRES = ("APROPIACION", "COMPROMISO", "DEVENGADO", "PAGADO",
+                  "TRANSFERENCIA", "MODIFICACION", "LIBERACION")
+
+
+def _registrar_mov_pres(db, *, tipo: str, fecha, cuenta_id: int, monto,
+                        anio: int = None, mes: int = None,
+                        campo_id=None, unidad_negocio_id=None, departamento_id=None,
+                        origen_tipo=None, origen_id=None, notas=None, usuario_id=None):
+    from datetime import date as date_t
+    if isinstance(fecha, str):
+        from datetime import datetime as dt_mod
+        fecha = dt_mod.fromisoformat(fecha).date()
+    if anio is None:
+        anio = fecha.year
+    if mes is None:
+        mes = fecha.month
+    mov = models.MovimientoPresupuestario(
+        fecha=fecha, tipo=tipo, anio=anio, mes=mes,
+        cuenta_id=cuenta_id, monto=monto,
+        campo_id=campo_id, unidad_negocio_id=unidad_negocio_id,
+        departamento_id=departamento_id,
+        origen_tipo=origen_tipo, origen_id=origen_id,
+        notas=notas, usuario_id=usuario_id,
+    )
+    db.add(mov)
+    return mov
+
+
+@router.get("/movimientos-presupuestarios")
+def listar_mov_pres(anio: int = Query(...), tipo: str = None, cuenta_id: int = None,
+                    origen_id: str = None, skip: int = 0, limit: int = 200,
+                    db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(models.MovimientoPresupuestario).filter(
+        models.MovimientoPresupuestario.anio == anio)
+    if tipo:
+        q = q.filter(models.MovimientoPresupuestario.tipo == tipo)
+    if cuenta_id:
+        q = q.filter(models.MovimientoPresupuestario.cuenta_id == cuenta_id)
+    if origen_id:
+        q = q.filter(models.MovimientoPresupuestario.origen_id == origen_id)
+    total = q.count()
+    items = q.order_by(models.MovimientoPresupuestario.created_at.desc()).offset(skip).limit(limit).all()
+    cta_ids = {m.cuenta_id for m in items}
+    ctas = {c.id: c for c in db.query(models.CuentaContable).filter(
+        models.CuentaContable.id.in_(cta_ids)).all()} if cta_ids else {}
+    result = []
+    for m in items:
+        cta = ctas.get(m.cuenta_id)
+        out = schemas.MovimientoPresupuestarioOut.model_validate(m)
+        out.cuenta_codigo = cta.codigo if cta else None
+        out.cuenta_nombre = cta.nombre if cta else None
+        result.append(out)
+    return {"total": total, "items": result}
+
+
+@router.get("/ejecucion-presupuestaria")
+def ejecucion_presupuestaria(anio: int = Query(...), campo_id: str = None,
+                              unidad_negocio_id: int = None, departamento_id: int = None,
+                              db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Resumen de ejecución: apropiado, comprometido, devengado, pagado, disponible por cuenta."""
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    q = db.query(
+        models.MovimientoPresupuestario.cuenta_id,
+        models.MovimientoPresupuestario.tipo,
+        func.coalesce(func.sum(models.MovimientoPresupuestario.monto), 0).label("total"),
+    ).filter(models.MovimientoPresupuestario.anio == anio)
+    if campo_id:
+        q = q.filter(models.MovimientoPresupuestario.campo_id == campo_id)
+    if unidad_negocio_id:
+        q = q.filter(models.MovimientoPresupuestario.unidad_negocio_id == unidad_negocio_id)
+    if departamento_id:
+        q = q.filter(models.MovimientoPresupuestario.departamento_id == departamento_id)
+    rows = q.group_by(
+        models.MovimientoPresupuestario.cuenta_id,
+        models.MovimientoPresupuestario.tipo,
+    ).all()
+
+    acum: dict = {}
+    for r in rows:
+        if r.cuenta_id not in acum:
+            acum[r.cuenta_id] = {"APROPIACION": 0, "MODIFICACION": 0, "COMPROMISO": 0,
+                                 "DEVENGADO": 0, "PAGADO": 0, "TRANSFERENCIA": 0, "LIBERACION": 0}
+        acum[r.cuenta_id][r.tipo] = float(r.total)
+
+    cta_ids = set(acum.keys())
+    ctas = {c.id: c for c in db.query(models.CuentaContable).filter(
+        models.CuentaContable.id.in_(cta_ids)).all()} if cta_ids else {}
+
+    result = []
+    for cta_id, tots in acum.items():
+        cta = ctas.get(cta_id)
+        apropiado = tots["APROPIACION"] + tots["MODIFICACION"] + tots["TRANSFERENCIA"]
+        comprometido = tots["COMPROMISO"] + tots["LIBERACION"]
+        devengado = tots["DEVENGADO"]
+        pagado = tots["PAGADO"]
+        disponible = apropiado - comprometido - devengado
+        result.append({
+            "cuenta_id": cta_id,
+            "cuenta_codigo": cta.codigo if cta else None,
+            "cuenta_nombre": cta.nombre if cta else None,
+            "apropiado": round(apropiado, 2),
+            "comprometido": round(comprometido, 2),
+            "devengado": round(devengado, 2),
+            "pagado": round(pagado, 2),
+            "disponible": round(disponible, 2),
+        })
+    result.sort(key=lambda r: r.get("cuenta_codigo") or "")
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════

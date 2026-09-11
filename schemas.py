@@ -761,6 +761,27 @@ class PresupuestoDocumentoLineaIn(BaseModel):
     departamento_id: Optional[int] = None
     descripcion: Optional[str] = None
 
+class MovimientoPresupuestarioOut(BaseModel):
+    id: int
+    fecha: date
+    tipo: str
+    anio: int
+    mes: int
+    cuenta_id: int
+    campo_id: Optional[str] = None
+    unidad_negocio_id: Optional[int] = None
+    departamento_id: Optional[int] = None
+    monto: float
+    origen_tipo: Optional[str] = None
+    origen_id: Optional[str] = None
+    notas: Optional[str] = None
+    usuario_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    cuenta_codigo: Optional[str] = None
+    cuenta_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
 class TransferenciaPresupuestoIn(BaseModel):
     origen_id: int
     destino_id: int

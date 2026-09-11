@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models, schemas, auth
 from routers.sequences import get_next, peek_next
-from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto
+from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto, _registrar_mov_pres
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -216,16 +216,28 @@ def aprobar_oc(oc_id: str, override: bool = Query(False),
         if ver.get("bloqueado") and override and current_user.rol != "admin":
             raise HTTPException(403, "Solo un administrador puede autorizar sobregiro presupuestario")
 
+        comp_anio = fecha_oc.year if hasattr(fecha_oc, 'year') else datetime.now().year
+        comp_mes = fecha_oc.month if hasattr(fecha_oc, 'month') else datetime.now().month
+        comp_monto = Decimal(str(round(total, 2)))
         db.add(models.CompromisoPresupuestario(
-            anio=fecha_oc.year if hasattr(fecha_oc, 'year') else datetime.now().year,
-            mes=fecha_oc.month if hasattr(fecha_oc, 'month') else datetime.now().month,
+            anio=comp_anio, mes=comp_mes,
             cuenta_id=r_compra[0],
             campo_id=oc.campo_id,
             unidad_negocio_id=oc.unidad_negocio_id,
             departamento_id=oc.departamento_id,
-            monto=Decimal(str(round(total, 2))),
+            monto=comp_monto,
             origen_tipo="OC", origen_id=oc_id, estado="activo",
         ))
+        _registrar_mov_pres(
+            db, tipo="COMPROMISO", fecha=fecha_check,
+            cuenta_id=r_compra[0], monto=comp_monto,
+            anio=comp_anio, mes=comp_mes,
+            campo_id=oc.campo_id, unidad_negocio_id=oc.unidad_negocio_id,
+            departamento_id=oc.departamento_id,
+            origen_tipo="OC", origen_id=oc_id,
+            notas=f"Compromiso OC {oc_id}",
+            usuario_id=current_user.id,
+        )
 
     oc.estado = "Aprobada"
     oc.aprobado_por = current_user.nombre
@@ -251,11 +263,23 @@ def cerrar_oc(oc_id: str, db: Session = Depends(get_db),
     if oc.estado not in ("Aprobada", "Parcial", "Recibida"):
         raise HTTPException(400, f"Solo se puede cerrar una OC Aprobada, Parcial o Recibida (estado actual: {oc.estado})")
 
-    db.query(models.CompromisoPresupuestario).filter(
+    comps_cerrar = db.query(models.CompromisoPresupuestario).filter(
         models.CompromisoPresupuestario.origen_tipo == "OC",
         models.CompromisoPresupuestario.origen_id == oc_id,
         models.CompromisoPresupuestario.estado == "activo",
-    ).update({"estado": "cancelado"})
+    ).all()
+    for comp in comps_cerrar:
+        comp.estado = "cancelado"
+        _registrar_mov_pres(
+            db, tipo="LIBERACION", fecha=datetime.now().date(),
+            cuenta_id=comp.cuenta_id, monto=-comp.monto,
+            anio=comp.anio, mes=comp.mes,
+            campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+            departamento_id=comp.departamento_id,
+            origen_tipo="OC", origen_id=oc_id,
+            notas=f"Liberación por cierre OC {oc_id}",
+            usuario_id=current_user.id,
+        )
 
     oc.estado = "Cerrada"
     oc.cerrado_por = current_user.nombre
@@ -282,11 +306,23 @@ def update_oc_estado(oc_id: str, estado: str = Query(...),
     if estado == "Cancelada":
         if oc.estado not in ("Borrador", "Aprobada", "Parcial"):
             raise HTTPException(400, f"No se puede cancelar una OC en estado {oc.estado}")
-        db.query(models.CompromisoPresupuestario).filter(
+        comps_cancel = db.query(models.CompromisoPresupuestario).filter(
             models.CompromisoPresupuestario.origen_tipo == "OC",
             models.CompromisoPresupuestario.origen_id == oc_id,
             models.CompromisoPresupuestario.estado == "activo",
-        ).update({"estado": "cancelado"})
+        ).all()
+        for comp in comps_cancel:
+            comp.estado = "cancelado"
+            _registrar_mov_pres(
+                db, tipo="LIBERACION", fecha=datetime.now().date(),
+                cuenta_id=comp.cuenta_id, monto=-comp.monto,
+                anio=comp.anio, mes=comp.mes,
+                campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+                departamento_id=comp.departamento_id,
+                origen_tipo="OC", origen_id=oc_id,
+                notas=f"Liberación por cancelación OC {oc_id}",
+                usuario_id=current_user.id,
+            )
         oc.estado = "Cancelada"
         audit.log(db, current_user, "CANCELAR", "OC", oc_id,
                   f"OC {oc_id} cancelada por {current_user.nombre}",
