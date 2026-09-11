@@ -15,7 +15,7 @@ import audit
 
 router = APIRouter(prefix="/api/ordenes-compra", tags=["ordenes-compra"])
 
-ESTADOS_OC = ["Pendiente", "Parcial", "Recibida", "Cancelada"]
+ESTADOS_OC = ["Borrador", "Aprobada", "Parcial", "Recibida", "Cerrada", "Cancelada"]
 
 
 @router.get("/preview/next-id")
@@ -57,7 +57,7 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
         unidad_negocio_id=data.unidad_negocio_id,
         departamento_id=data.departamento_id,
         almacen_id=data.almacen_id,
-        estado="Pendiente",
+        estado="Borrador",
         observaciones=data.observaciones,
     )
     db.add(oc)
@@ -88,40 +88,14 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
 
     oc.total_estimado = round(total, 2)
 
-    r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
-    if r_compra and total > 0:
-        fecha_oc = data.fecha or datetime.now()
-        db.add(models.CompromisoPresupuestario(
-            anio=fecha_oc.year, mes=fecha_oc.month,
-            cuenta_id=r_compra[0],
-            campo_id=data.campo_id,
-            unidad_negocio_id=data.unidad_negocio_id,
-            departamento_id=data.departamento_id,
-            monto=Decimal(str(round(total, 2))),
-            origen_tipo="OC", origen_id=oc_id, estado="activo",
-        ))
-
     audit.log(db, current_user, "CREAR", "OC", oc_id,
-              f"OC {oc_id} creada: {data.proveedor or 'Sin proveedor'} — Total: RD$ {total:,.2f}",
+              f"OC {oc_id} creada en Borrador: {data.proveedor or 'Sin proveedor'} — Total: RD$ {total:,.2f}",
               {"proveedor": data.proveedor, "campo_id": data.campo_id, "total_estimado": total,
                "num_lineas": len(data.lineas)})
 
-    alertas_presupuesto = []
-    if r_compra and total > 0:
-        fecha_check = (data.fecha or datetime.now()).date() if hasattr(data.fecha or datetime.now(), 'date') else data.fecha or datetime.now()
-        ver = _verificar_presupuesto(db, [{
-            "cuenta_id": r_compra[0], "debe": float(total), "haber": 0,
-            "campo_id": data.campo_id,
-            "unidad_negocio_id": data.unidad_negocio_id,
-            "departamento_id": data.departamento_id,
-        }], fecha_check)
-        alertas_presupuesto = ver.get("alertas", [])
-
     db.commit()
     db.refresh(oc)
-    out = schemas.OrdenCompraOut.model_validate(oc).model_dump()
-    out["alertas_presupuesto"] = alertas_presupuesto
-    return out
+    return schemas.OrdenCompraOut.model_validate(oc)
 
 
 @router.get("/{oc_id}")
@@ -187,23 +161,118 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
     }
 
 
-@router.put("/{oc_id}/estado")
-def update_oc_estado(oc_id: str, estado: str = Query(...),
-                      db: Session = Depends(get_db), _=Depends(auth.require_supervisor)):
-    if estado not in ESTADOS_OC:
-        raise HTTPException(status_code=400, detail=f"Estado inválido. Permitidos: {ESTADOS_OC}")
+@router.post("/{oc_id}/aprobar")
+def aprobar_oc(oc_id: str, override: bool = Query(False),
+               db: Session = Depends(get_db),
+               current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Aprobar OC: crea compromiso presupuestario + bloqueo duro."""
     oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
     if not oc:
-        raise HTTPException(status_code=404, detail="Orden de compra no encontrada")
-    oc.estado = estado
+        raise HTTPException(404, "Orden de compra no encontrada")
+    if oc.estado != "Borrador":
+        raise HTTPException(400, f"Solo se puede aprobar una OC en Borrador (estado actual: {oc.estado})")
+
+    total = float(oc.total_estimado or 0)
+    r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
+
+    if r_compra and total > 0:
+        fecha_oc = oc.fecha or datetime.now()
+        fecha_check = fecha_oc.date() if hasattr(fecha_oc, 'date') else fecha_oc
+        ver = _verificar_presupuesto(db, [{
+            "cuenta_id": r_compra[0], "debe": total, "haber": 0,
+            "campo_id": oc.campo_id,
+            "unidad_negocio_id": oc.unidad_negocio_id,
+            "departamento_id": oc.departamento_id,
+        }], fecha_check)
+
+        if ver.get("bloqueado") and not override:
+            raise HTTPException(400, {
+                "detail": "Presupuesto insuficiente — aprobación bloqueada",
+                "alertas": ver.get("alertas", []),
+                "requiere_override": True,
+            })
+        if ver.get("bloqueado") and override and current_user.rol != "admin":
+            raise HTTPException(403, "Solo un administrador puede autorizar sobregiro presupuestario")
+
+        db.add(models.CompromisoPresupuestario(
+            anio=fecha_oc.year if hasattr(fecha_oc, 'year') else datetime.now().year,
+            mes=fecha_oc.month if hasattr(fecha_oc, 'month') else datetime.now().month,
+            cuenta_id=r_compra[0],
+            campo_id=oc.campo_id,
+            unidad_negocio_id=oc.unidad_negocio_id,
+            departamento_id=oc.departamento_id,
+            monto=Decimal(str(round(total, 2))),
+            origen_tipo="OC", origen_id=oc_id, estado="activo",
+        ))
+
+    oc.estado = "Aprobada"
+    oc.aprobado_por = current_user.nombre
+    oc.fecha_aprobacion = datetime.now()
+
+    audit.log(db, current_user, "APROBAR", "OC", oc_id,
+              f"OC {oc_id} aprobada por {current_user.nombre}" +
+              (" (override presupuestario)" if override else ""),
+              {"total": total, "override": override})
+
+    db.commit()
+    alertas = ver.get("alertas", []) if r_compra and total > 0 else []
+    return {"ok": True, "estado": "Aprobada", "alertas_presupuesto": alertas}
+
+
+@router.post("/{oc_id}/cerrar")
+def cerrar_oc(oc_id: str, db: Session = Depends(get_db),
+              current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Cerrar OC: libera compromiso presupuestario remanente."""
+    oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
+    if not oc:
+        raise HTTPException(404, "Orden de compra no encontrada")
+    if oc.estado not in ("Aprobada", "Parcial", "Recibida"):
+        raise HTTPException(400, f"Solo se puede cerrar una OC Aprobada, Parcial o Recibida (estado actual: {oc.estado})")
+
+    db.query(models.CompromisoPresupuestario).filter(
+        models.CompromisoPresupuestario.origen_tipo == "OC",
+        models.CompromisoPresupuestario.origen_id == oc_id,
+        models.CompromisoPresupuestario.estado == "activo",
+    ).update({"estado": "cancelado"})
+
+    oc.estado = "Cerrada"
+    oc.cerrado_por = current_user.nombre
+    oc.fecha_cierre = datetime.now()
+
+    audit.log(db, current_user, "CERRAR", "OC", oc_id,
+              f"OC {oc_id} cerrada por {current_user.nombre} — compromiso remanente liberado",
+              {"total_estimado": float(oc.total_estimado or 0),
+               "total_recibido": float(oc.total_recibido or 0)})
+
+    db.commit()
+    return {"ok": True, "estado": "Cerrada"}
+
+
+@router.put("/{oc_id}/estado")
+def update_oc_estado(oc_id: str, estado: str = Query(...),
+                      db: Session = Depends(get_db),
+                      current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Cambio manual de estado (solo Cancelada desde Borrador/Aprobada)."""
+    oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
+    if not oc:
+        raise HTTPException(404, "Orden de compra no encontrada")
+
     if estado == "Cancelada":
+        if oc.estado not in ("Borrador", "Aprobada", "Parcial"):
+            raise HTTPException(400, f"No se puede cancelar una OC en estado {oc.estado}")
         db.query(models.CompromisoPresupuestario).filter(
             models.CompromisoPresupuestario.origen_tipo == "OC",
             models.CompromisoPresupuestario.origen_id == oc_id,
             models.CompromisoPresupuestario.estado == "activo",
         ).update({"estado": "cancelado"})
-    db.commit()
-    return {"ok": True, "estado": estado}
+        oc.estado = "Cancelada"
+        audit.log(db, current_user, "CANCELAR", "OC", oc_id,
+                  f"OC {oc_id} cancelada por {current_user.nombre}",
+                  {"estado_anterior": oc.estado})
+        db.commit()
+        return {"ok": True, "estado": "Cancelada"}
+
+    raise HTTPException(400, "Use /aprobar para aprobar o /cerrar para cerrar. Solo se permite cancelar vía este endpoint.")
 
 
 from pydantic import BaseModel as PydanticBase
@@ -225,8 +294,8 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
     oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
     if not oc:
         raise HTTPException(status_code=404, detail="Orden de compra no encontrada")
-    if oc.estado == "Cancelada":
-        raise HTTPException(status_code=400, detail="No se puede recibir una OC cancelada")
+    if oc.estado not in ("Aprobada", "Parcial"):
+        raise HTTPException(400, f"Solo se puede recibir una OC Aprobada o Parcial (estado actual: {oc.estado})")
 
     from routers.inventario import _recalc_avg_cost
     from routers.sequences import get_next
@@ -287,13 +356,6 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
             oc.estado = "Recibida"
         elif any_received:
             oc.estado = "Parcial"
-
-        if all_received:
-            db.query(models.CompromisoPresupuestario).filter(
-                models.CompromisoPresupuestario.origen_tipo == "OC",
-                models.CompromisoPresupuestario.origen_id == oc_id,
-                models.CompromisoPresupuestario.estado == "activo",
-            ).update({"estado": "ejecutado"})
 
         asiento_num = None
         cxp_numero = None
@@ -365,9 +427,8 @@ def update_oc(oc_id: str, data: schemas.OrdenCompraCreate, db: Session = Depends
     if not oc:
         raise HTTPException(status_code=404, detail="Orden de compra no encontrada")
 
-    # Only admin can edit closed/received OCs
-    if oc.estado in ["Recibida", "Cancelada"] and current_user.rol != "admin":
-        raise HTTPException(status_code=403, detail="Solo un administrador puede editar OCs cerradas")
+    if oc.estado not in ("Borrador", "Aprobada") and current_user.rol != "admin":
+        raise HTTPException(403, f"Solo un administrador puede editar OCs en estado {oc.estado}")
 
     oc.fecha = data.fecha or oc.fecha
     oc.proveedor = data.proveedor or oc.proveedor

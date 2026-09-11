@@ -78,7 +78,7 @@ def list_ots_for_select(db: Session = Depends(get_db), _=Depends(auth.get_curren
 def list_ocs_for_select(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
     """OCs pendientes/parciales para selector de entrada de mercancía."""
     ocs = db.query(models.OrdenCompra).filter(
-        models.OrdenCompra.estado.in_(["Pendiente", "Parcial"])
+        models.OrdenCompra.estado.in_(["Aprobada", "Parcial"])
     ).order_by(models.OrdenCompra.fecha.desc()).limit(100).all()
     return [{"oc_id": o.oc_id, "proveedor": o.proveedor,
              "fecha": o.fecha.isoformat() if o.fecha else None,

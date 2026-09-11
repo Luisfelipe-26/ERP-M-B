@@ -306,6 +306,10 @@ class OrdenCompraOut(BaseModel):
     fecha_recepcion: Optional[datetime] = None
     observaciones: Optional[str]
     creado_en: Optional[datetime]
+    aprobado_por: Optional[str] = None
+    fecha_aprobacion: Optional[datetime] = None
+    cerrado_por: Optional[str] = None
+    fecha_cierre: Optional[datetime] = None
     class Config:
         from_attributes = True
 

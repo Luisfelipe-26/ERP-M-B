@@ -136,7 +136,7 @@ def update_proveedor(prov_id: int, data: ProveedorCreate, db: Session = Depends(
     if nombre_nuevo != nombre_viejo:
         ocs_vinculadas = db.query(models.OrdenCompra).filter(
             models.OrdenCompra.proveedor == nombre_viejo,
-            models.OrdenCompra.estado.in_(["Pendiente", "Parcial"]),
+            models.OrdenCompra.estado.in_(["Borrador", "Aprobada", "Parcial"]),
         ).count()
         if ocs_vinculadas > 0:
             raise HTTPException(
@@ -175,7 +175,7 @@ def delete_proveedor(prov_id: int, db: Session = Depends(get_db),
 
     ocs_abiertas = db.query(models.OrdenCompra).filter(
         models.OrdenCompra.proveedor == prov.nombre,
-        models.OrdenCompra.estado.in_(["Pendiente", "Parcial"]),
+        models.OrdenCompra.estado.in_(["Borrador", "Aprobada", "Parcial"]),
     ).count()
     if ocs_abiertas > 0:
         raise HTTPException(

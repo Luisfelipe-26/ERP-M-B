@@ -521,13 +521,13 @@ def morning_briefing(db: Session = Depends(get_db), _=Depends(auth.get_current_u
 
     # --- OCs pending ---
     ocs_pending = db.query(models.OrdenCompra).filter(
-        models.OrdenCompra.estado.in_(["Pendiente", "Parcial"])
+        models.OrdenCompra.estado.in_(["Borrador", "Aprobada", "Parcial"])
     ).count()
 
     ocs_pending_total = db.query(
         func.coalesce(func.sum(models.OrdenCompra.total_estimado), 0)
     ).filter(
-        models.OrdenCompra.estado.in_(["Pendiente", "Parcial"])
+        models.OrdenCompra.estado.in_(["Borrador", "Aprobada", "Parcial"])
     ).scalar()
 
     # --- Financial summary (current month) ---
