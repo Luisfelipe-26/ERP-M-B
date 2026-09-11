@@ -85,13 +85,30 @@ class Proveedor(Base):
     telefono = Column(String(50))
     contacto = Column(String(200))
     direccion = Column(Text)
-    odoo_id = Column(Integer)
+    tipo_persona = Column(String(20), default="juridica")       # juridica / fisica
+    tipo_contribuyente = Column(String(20), default="formal")   # formal / informal
+    moneda_default = Column(String(5), default="DOP")           # DOP / USD
+    retencion_isr_pct = Column(Numeric(5, 2), default=0)
+    retencion_itbis_pct = Column(Numeric(5, 2), default=30)
     condicion_pago_dias = Column(Integer, default=30)
-    tipo_ncf_default = Column(String(5), default="B11")
+    tipo_ncf_default = Column(String(5), default="E31")
     cuenta_cxp_id = Column(Integer, ForeignKey("cuentas_contables.id"))
     activo = Column(Boolean, default=True)
     cuenta_cxp = relationship("CuentaContable", foreign_keys=[cuenta_cxp_id])
     cuentas_por_pagar = relationship("CuentaPorPagar", back_populates="proveedor")
+
+
+class CategoriaProducto(Base):
+    __tablename__ = "categorias_producto"
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(200), unique=True, nullable=False)
+    cuenta_inventario_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    cuenta_costo_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    cuenta_ingreso_id = Column(Integer, ForeignKey("cuentas_contables.id"))
+    activo = Column(Boolean, default=True)
+    cuenta_inventario = relationship("CuentaContable", foreign_keys=[cuenta_inventario_id])
+    cuenta_costo = relationship("CuentaContable", foreign_keys=[cuenta_costo_id])
+    cuenta_ingreso = relationship("CuentaContable", foreign_keys=[cuenta_ingreso_id])
 
 
 class Producto(Base):
@@ -99,10 +116,10 @@ class Producto(Base):
     id = Column(Integer, primary_key=True, index=True)
     id_prod = Column(String(10), unique=True, index=True, nullable=False)
     producto = Column(String(200), nullable=False)
-    tipo = Column(String(100))
+    tipo = Column(String(20), default="almacenable")    # almacenable / consumible / servicio
     unidad = Column(String(20))
-    costo_unitario = Column(Float)          # precio de referencia / lista
-    costo_promedio = Column(Float)          # costo promedio ponderado actual
+    costo_unitario = Column(Float)
+    costo_promedio = Column(Float)
     stock_actual = Column(Float, default=0)
     stock_minimo = Column(Float, default=0)
     stock_maximo = Column(Float)
@@ -110,10 +127,15 @@ class Producto(Base):
     proveedor_id = Column(Integer, ForeignKey("proveedores.id"))
     concentracion = Column(String(100))
     es_inventariable = Column(Boolean, default=True)
+    categoria_id = Column(Integer, ForeignKey("categorias_producto.id"))
+    impuesto_compra = Column(String(20), default="itbis_18")    # itbis_18 / exento / itbis_0
+    unidad_produccion = Column(String(20))
+    factor_conversion = Column(Numeric(10, 4), default=1)
     cuenta_inventario_id = Column(Integer, ForeignKey("cuentas_contables.id"))
     cuenta_costo_id = Column(Integer, ForeignKey("cuentas_contables.id"))
     cuenta_ingreso_id = Column(Integer, ForeignKey("cuentas_contables.id"))
     activo = Column(Boolean, default=True)
+    categoria = relationship("CategoriaProducto", foreign_keys=[categoria_id])
     detalles_ot = relationship("OTDetalle", back_populates="producto")
     movimientos = relationship("MovimientoInventario", back_populates="producto")
     proveedor_rel = relationship("Proveedor", foreign_keys=[proveedor_id])
@@ -731,7 +753,7 @@ class Cliente(Base):
     email = Column(String(200))
     contacto = Column(String(200))
     condicion_pago_dias = Column(Integer, default=30)
-    tipo_ncf_default = Column(String(5), default="B01")
+    tipo_ncf_default = Column(String(5), default="E31")
     cuenta_cxc_id = Column(Integer, ForeignKey("cuentas_contables.id"))
     notas = Column(Text)
     activo = Column(Boolean, default=True)
@@ -771,7 +793,7 @@ class ConfiguracionEmpresa(Base):
 class SecuenciaNcf(Base):
     __tablename__ = "secuencias_ncf"
     id = Column(Integer, primary_key=True, index=True)
-    tipo_ncf = Column(String(5), nullable=False)       # B01, B02, B04, B11, B14, B15
+    tipo_ncf = Column(String(5), nullable=False)       # E31, E32, E33, E34, E41, E43, E44, E45
     serie = Column(String(20))
     desde = Column(Integer, nullable=False)
     hasta = Column(Integer, nullable=False)

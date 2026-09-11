@@ -12,6 +12,14 @@ router = APIRouter(prefix="/api/proveedores", tags=["proveedores"])
 RNC_RE = re.compile(r"^\d{9}$|^\d{11}$|^\d{3}-\d{7}-\d$")
 
 
+RETENCIONES_DEFAULT = {
+    ("juridica", "formal"):   {"isr": 0,  "itbis": 30, "ncf": "E31"},
+    ("juridica", "informal"): {"isr": 2,  "itbis": 0,  "ncf": "E41"},
+    ("fisica", "formal"):     {"isr": 15, "itbis": 100, "ncf": "E41"},
+    ("fisica", "informal"):   {"isr": 2,  "itbis": 0,  "ncf": "E41"},
+}
+
+
 class ProveedorCreate(BaseModel):
     nombre: str
     rnc: Optional[str] = None
@@ -19,8 +27,13 @@ class ProveedorCreate(BaseModel):
     telefono: Optional[str] = None
     contacto: Optional[str] = None
     direccion: Optional[str] = None
+    tipo_persona: str = "juridica"
+    tipo_contribuyente: str = "formal"
+    moneda_default: str = "DOP"
+    retencion_isr_pct: Optional[float] = None
+    retencion_itbis_pct: Optional[float] = None
     condicion_pago_dias: int = 30
-    tipo_ncf_default: str = "B11"
+    tipo_ncf_default: Optional[str] = None
     cuenta_cxp_id: Optional[int] = None
 
     @field_validator("rnc")
@@ -32,6 +45,20 @@ class ProveedorCreate(BaseModel):
                 raise ValueError("RNC debe ser 9 dígitos, 11 dígitos, o formato 000-0000000-0")
         return v
 
+    @field_validator("tipo_persona")
+    @classmethod
+    def validar_tipo_persona(cls, v):
+        if v not in ("juridica", "fisica"):
+            raise ValueError("tipo_persona debe ser 'juridica' o 'fisica'")
+        return v
+
+    @field_validator("tipo_contribuyente")
+    @classmethod
+    def validar_tipo_contribuyente(cls, v):
+        if v not in ("formal", "informal"):
+            raise ValueError("tipo_contribuyente debe ser 'formal' o 'informal'")
+        return v
+
 
 class ProveedorOut(BaseModel):
     id: int
@@ -41,9 +68,13 @@ class ProveedorOut(BaseModel):
     telefono: Optional[str] = None
     contacto: Optional[str] = None
     direccion: Optional[str] = None
-    odoo_id: Optional[int] = None
+    tipo_persona: str = "juridica"
+    tipo_contribuyente: str = "formal"
+    moneda_default: str = "DOP"
+    retencion_isr_pct: Optional[float] = 0
+    retencion_itbis_pct: Optional[float] = 30
     condicion_pago_dias: int = 30
-    tipo_ncf_default: Optional[str] = "B11"
+    tipo_ncf_default: Optional[str] = "E31"
     cuenta_cxp_id: Optional[int] = None
     activo: bool
     model_config = {"from_attributes": True}
@@ -56,6 +87,22 @@ def list_proveedores(db: Session = Depends(get_db), _=Depends(auth.get_current_u
     ).order_by(models.Proveedor.nombre).all()
 
 
+def _apply_retention_defaults(data: ProveedorCreate) -> dict:
+    """Fill in retention defaults based on tipo_persona + tipo_contribuyente."""
+    d = data.model_dump()
+    defaults = RETENCIONES_DEFAULT.get(
+        (d["tipo_persona"], d["tipo_contribuyente"]),
+        {"isr": 0, "itbis": 30, "ncf": "E31"},
+    )
+    if d.get("retencion_isr_pct") is None:
+        d["retencion_isr_pct"] = defaults["isr"]
+    if d.get("retencion_itbis_pct") is None:
+        d["retencion_itbis_pct"] = defaults["itbis"]
+    if d.get("tipo_ncf_default") is None:
+        d["tipo_ncf_default"] = defaults["ncf"]
+    return d
+
+
 @router.post("", response_model=ProveedorOut)
 def create_proveedor(data: ProveedorCreate, db: Session = Depends(get_db),
                      _=Depends(auth.require_admin)):
@@ -64,13 +111,13 @@ def create_proveedor(data: ProveedorCreate, db: Session = Depends(get_db),
     if existing:
         if not existing.activo:
             existing.activo = True
-            for k, v in data.model_dump().items():
+            for k, v in _apply_retention_defaults(data).items():
                 setattr(existing, k, v)
             db.commit()
             db.refresh(existing)
             return existing
         raise HTTPException(400, "Ya existe un proveedor con ese nombre")
-    prov = models.Proveedor(**data.model_dump())
+    prov = models.Proveedor(**_apply_retention_defaults(data))
     db.add(prov)
     db.commit()
     db.refresh(prov)

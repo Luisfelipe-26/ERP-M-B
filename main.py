@@ -153,6 +153,34 @@ def run_migrations():
         # Documento presupuestario en registros presupuestarios
         "ALTER TABLE registros_presupuestarios ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES presupuestos_documento(id)",
         "CREATE INDEX IF NOT EXISTS ix_reg_presup_doc ON registros_presupuestarios(documento_id)",
+        # Fase 0 Procure-to-Pay: Proveedor — clasificación fiscal y retenciones
+        "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS tipo_persona VARCHAR(20) DEFAULT 'juridica'",
+        "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS tipo_contribuyente VARCHAR(20) DEFAULT 'formal'",
+        "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS moneda_default VARCHAR(5) DEFAULT 'DOP'",
+        "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS retencion_isr_pct NUMERIC(5,2) DEFAULT 0",
+        "ALTER TABLE proveedores ADD COLUMN IF NOT EXISTS retencion_itbis_pct NUMERIC(5,2) DEFAULT 30",
+        # Fase 0: Migrar tipo_ncf_default de B-series a E-series en proveedores existentes
+        "UPDATE proveedores SET tipo_ncf_default = 'E31' WHERE tipo_ncf_default = 'B01'",
+        "UPDATE proveedores SET tipo_ncf_default = 'E41' WHERE tipo_ncf_default = 'B11'",
+        "UPDATE proveedores SET tipo_ncf_default = 'E44' WHERE tipo_ncf_default = 'B14'",
+        "UPDATE proveedores SET tipo_ncf_default = 'E45' WHERE tipo_ncf_default = 'B15'",
+        # Fase 0: Migrar tipo_ncf_default en clientes
+        "UPDATE clientes SET tipo_ncf_default = 'E31' WHERE tipo_ncf_default = 'B01'",
+        "UPDATE clientes SET tipo_ncf_default = 'E32' WHERE tipo_ncf_default = 'B02'",
+        # Fase 0: CategoriaProducto
+        """CREATE TABLE IF NOT EXISTS categorias_producto (
+            id SERIAL PRIMARY KEY,
+            nombre VARCHAR(200) UNIQUE NOT NULL,
+            cuenta_inventario_id INTEGER REFERENCES cuentas_contables(id),
+            cuenta_costo_id INTEGER REFERENCES cuentas_contables(id),
+            cuenta_ingreso_id INTEGER REFERENCES cuentas_contables(id),
+            activo BOOLEAN DEFAULT TRUE
+        )""",
+        # Fase 0: Producto — nuevos campos
+        "ALTER TABLE productos ADD COLUMN IF NOT EXISTS categoria_id INTEGER REFERENCES categorias_producto(id)",
+        "ALTER TABLE productos ADD COLUMN IF NOT EXISTS impuesto_compra VARCHAR(20) DEFAULT 'itbis_18'",
+        "ALTER TABLE productos ADD COLUMN IF NOT EXISTS unidad_produccion VARCHAR(20)",
+        "ALTER TABLE productos ADD COLUMN IF NOT EXISTS factor_conversion NUMERIC(10,4) DEFAULT 1",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

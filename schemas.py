@@ -428,7 +428,7 @@ class ClienteCreate(BaseModel):
     email: Optional[str] = None
     contacto: Optional[str] = None
     condicion_pago_dias: int = 30
-    tipo_ncf_default: str = "B01"
+    tipo_ncf_default: str = "E31"
     cuenta_cxc_id: Optional[int] = None
     notas: Optional[str] = None
 
