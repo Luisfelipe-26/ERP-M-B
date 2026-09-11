@@ -23,10 +23,12 @@ def next_oc_id_preview(db: Session = Depends(get_db), _=Depends(auth.get_current
     return {"next_oc_id": peek_next("OC", db)}
 
 
-@router.get("", response_model=List[schemas.OrdenCompraOut])
+@router.get("")
 def list_ocs(
     estado: Optional[str] = None,
     proveedor: Optional[str] = None,
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -37,7 +39,40 @@ def list_ocs(
         q = q.filter(models.OrdenCompra.estado == estado)
     if proveedor:
         q = q.filter(models.OrdenCompra.proveedor.ilike(f"%{proveedor}%"))
-    return q.order_by(models.OrdenCompra.fecha.desc()).offset(skip).limit(limit).all()
+    if fecha_desde:
+        q = q.filter(models.OrdenCompra.fecha >= datetime.strptime(fecha_desde, "%Y-%m-%d"))
+    if fecha_hasta:
+        q = q.filter(models.OrdenCompra.fecha <= datetime.strptime(fecha_hasta + " 23:59:59", "%Y-%m-%d %H:%M:%S"))
+    total = q.count()
+    items = q.order_by(models.OrdenCompra.fecha.desc()).offset(skip).limit(limit).all()
+    return {"items": [schemas.OrdenCompraOut.model_validate(o) for o in items], "total": total}
+
+
+@router.get("/resumen-cxp")
+def resumen_cxp(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
+    """Dashboard summary of CxP linked to OCs."""
+    from sqlalchemy import func as sqlfunc
+    cxp_q = db.query(models.CuentaPorPagar).filter(models.CuentaPorPagar.oc_id.isnot(None))
+    total_pendiente = db.query(sqlfunc.coalesce(sqlfunc.sum(models.CuentaPorPagar.saldo_pendiente), 0)).filter(
+        models.CuentaPorPagar.oc_id.isnot(None),
+        models.CuentaPorPagar.estado.in_(["pendiente", "parcial"]),
+    ).scalar()
+    num_pendientes = cxp_q.filter(models.CuentaPorPagar.estado.in_(["pendiente", "parcial"])).count()
+    num_vencidas = cxp_q.filter(
+        models.CuentaPorPagar.estado.in_(["pendiente", "parcial"]),
+        models.CuentaPorPagar.fecha_vencimiento < datetime.now().date(),
+    ).count()
+    monto_vencido = db.query(sqlfunc.coalesce(sqlfunc.sum(models.CuentaPorPagar.saldo_pendiente), 0)).filter(
+        models.CuentaPorPagar.oc_id.isnot(None),
+        models.CuentaPorPagar.estado.in_(["pendiente", "parcial"]),
+        models.CuentaPorPagar.fecha_vencimiento < datetime.now().date(),
+    ).scalar()
+    return {
+        "total_pendiente": float(total_pendiente),
+        "num_pendientes": num_pendientes,
+        "num_vencidas": num_vencidas,
+        "monto_vencido": float(monto_vencido),
+    }
 
 
 @router.post("")
@@ -56,61 +91,68 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
         if prov:
             nombre_proveedor = prov.nombre
 
-    oc = models.OrdenCompra(
-        oc_id=oc_id,
-        fecha=data.fecha or datetime.now(),
-        proveedor=nombre_proveedor,
-        proveedor_id=prov_id,
-        campo_id=data.campo_id,
-        unidad_negocio_id=data.unidad_negocio_id,
-        departamento_id=data.departamento_id,
-        almacen_id=data.almacen_id,
-        estado="Borrador",
-        observaciones=data.observaciones,
-    )
-    db.add(oc)
-    db.flush()
-
-    for linea in data.lineas:
-        prod = db.query(models.Producto).filter(
-            models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
-        ).first()
-        if not prod:
-            raise HTTPException(status_code=400, detail=f"Producto '{linea.producto_id}' no existe")
-        if linea.cantidad <= 0:
-            raise HTTPException(status_code=400, detail=f"Cantidad debe ser mayor a 0 para '{prod.producto}'")
-        if linea.precio_unitario < 0:
-            raise HTTPException(status_code=400, detail=f"Precio no puede ser negativo para '{prod.producto}'")
-
-        desc = float(linea.descuento_pct or 0)
-        subtotal = round(linea.cantidad * linea.precio_unitario * (1 - desc / 100), 2)
-        total += subtotal
-
-        db.add(models.OrdenCompraLinea(
+    try:
+        oc = models.OrdenCompra(
             oc_id=oc_id,
-            producto_id=linea.producto_id,
-            cantidad=linea.cantidad,
-            cantidad_recibida=0,
-            precio_unitario=linea.precio_unitario,
-            descuento_pct=desc,
-            impuesto=linea.impuesto or prod.impuesto_compra or "itbis_18",
-            subtotal=subtotal,
-            cuenta_contable_id=linea.cuenta_contable_id,
-            unidad_negocio_id=linea.unidad_negocio_id,
-            departamento_id=linea.departamento_id,
-            almacen_id=linea.almacen_id,
-        ))
+            fecha=data.fecha or datetime.now(),
+            proveedor=nombre_proveedor,
+            proveedor_id=prov_id,
+            campo_id=data.campo_id,
+            unidad_negocio_id=data.unidad_negocio_id,
+            departamento_id=data.departamento_id,
+            almacen_id=data.almacen_id,
+            estado="Borrador",
+            observaciones=data.observaciones,
+        )
+        db.add(oc)
+        db.flush()
 
-    oc.total_estimado = round(total, 2)
+        for linea in data.lineas:
+            prod = db.query(models.Producto).filter(
+                models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
+            ).first()
+            if not prod:
+                raise HTTPException(status_code=400, detail=f"Producto '{linea.producto_id}' no existe")
+            if linea.cantidad <= 0:
+                raise HTTPException(status_code=400, detail=f"Cantidad debe ser mayor a 0 para '{prod.producto}'")
+            if linea.precio_unitario < 0:
+                raise HTTPException(status_code=400, detail=f"Precio no puede ser negativo para '{prod.producto}'")
 
-    audit.log(db, current_user, "CREAR", "OC", oc_id,
-              f"OC {oc_id} creada en Borrador: {nombre_proveedor or 'Sin proveedor'} — Total: RD$ {total:,.2f}",
-              {"proveedor": nombre_proveedor, "proveedor_id": prov_id,
-               "campo_id": data.campo_id, "total_estimado": total,
-               "num_lineas": len(data.lineas)})
+            desc = float(linea.descuento_pct or 0)
+            subtotal = round(linea.cantidad * linea.precio_unitario * (1 - desc / 100), 2)
+            total += subtotal
 
-    db.commit()
-    db.refresh(oc)
+            db.add(models.OrdenCompraLinea(
+                oc_id=oc_id,
+                producto_id=linea.producto_id,
+                cantidad=linea.cantidad,
+                cantidad_recibida=0,
+                precio_unitario=linea.precio_unitario,
+                descuento_pct=desc,
+                impuesto=linea.impuesto or prod.impuesto_compra or "itbis_18",
+                subtotal=subtotal,
+                cuenta_contable_id=linea.cuenta_contable_id,
+                unidad_negocio_id=linea.unidad_negocio_id,
+                departamento_id=linea.departamento_id,
+                almacen_id=linea.almacen_id,
+            ))
+
+        oc.total_estimado = round(total, 2)
+
+        audit.log(db, current_user, "CREAR", "OC", oc_id,
+                  f"OC {oc_id} creada en Borrador: {nombre_proveedor or 'Sin proveedor'} — Total: RD$ {total:,.2f}",
+                  {"proveedor": nombre_proveedor, "proveedor_id": prov_id,
+                   "campo_id": data.campo_id, "total_estimado": total,
+                   "num_lineas": len(data.lineas)})
+
+        db.commit()
+        db.refresh(oc)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al crear la orden de compra")
     return schemas.OrdenCompraOut.model_validate(oc)
 
 
@@ -503,6 +545,12 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
 
                 cxp_numero = cxp_num
 
+        audit.log(db, current_user, "RECEPCION", "OC", oc_id,
+                  f"Recepción OC {oc_id}: {len(received_lineas)} líneas, monto={total_recibido_now:,.2f}",
+                  {"lineas_recibidas": received_lineas, "total_recibido_now": total_recibido_now,
+                   "num_factura": data.num_factura, "estado_nuevo": oc.estado,
+                   "asiento": asiento_num, "cxp": cxp_numero})
+
         db.commit()
         db.refresh(oc)
     except Exception:
@@ -538,50 +586,89 @@ def update_oc(oc_id: str, data: schemas.OrdenCompraCreate, db: Session = Depends
     oc.almacen_id = data.almacen_id
     oc.observaciones = data.observaciones
 
-    if data.lineas:
-        db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).delete()
-        total = 0.0
-        for linea in data.lineas:
-            prod = db.query(models.Producto).filter(
-                models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
+    try:
+        if data.lineas:
+            has_receptions = any(
+                (l.cantidad_recibida or 0) > 0
+                for l in db.query(models.OrdenCompraLinea).filter(
+                    models.OrdenCompraLinea.oc_id == oc_id
+                ).all()
+            )
+            if has_receptions and oc.estado != "Borrador":
+                existing = {l.producto_id: l for l in db.query(models.OrdenCompraLinea).filter(
+                    models.OrdenCompraLinea.oc_id == oc_id).all()}
+                total = 0.0
+                for linea in data.lineas:
+                    prod = db.query(models.Producto).filter(
+                        models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
+                    ).first()
+                    if not prod:
+                        raise HTTPException(400, f"Producto '{linea.producto_id}' no existe")
+                    desc = float(linea.descuento_pct or 0)
+                    subtotal = round(linea.cantidad * linea.precio_unitario * (1 - desc / 100), 2)
+                    total += subtotal
+                    if linea.producto_id in existing:
+                        ex = existing[linea.producto_id]
+                        ex.cantidad = linea.cantidad
+                        ex.precio_unitario = linea.precio_unitario
+                        ex.descuento_pct = desc
+                        ex.impuesto = linea.impuesto or prod.impuesto_compra or "itbis_18"
+                        ex.subtotal = subtotal
+                        ex.cuenta_contable_id = linea.cuenta_contable_id
+                        ex.unidad_negocio_id = linea.unidad_negocio_id
+                        ex.departamento_id = linea.departamento_id
+                        ex.almacen_id = linea.almacen_id
+                oc.total_estimado = round(total, 2)
+            else:
+                db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).delete()
+                total = 0.0
+                for linea in data.lineas:
+                    prod = db.query(models.Producto).filter(
+                        models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
+                    ).first()
+                    if not prod:
+                        raise HTTPException(400, f"Producto '{linea.producto_id}' no existe")
+                    desc = float(linea.descuento_pct or 0)
+                    subtotal = round(linea.cantidad * linea.precio_unitario * (1 - desc / 100), 2)
+                    total += subtotal
+                    db.add(models.OrdenCompraLinea(
+                        oc_id=oc_id, producto_id=linea.producto_id,
+                        cantidad=linea.cantidad, cantidad_recibida=0,
+                        precio_unitario=linea.precio_unitario,
+                        descuento_pct=desc,
+                        impuesto=linea.impuesto or prod.impuesto_compra or "itbis_18",
+                        subtotal=subtotal,
+                        cuenta_contable_id=linea.cuenta_contable_id,
+                        unidad_negocio_id=linea.unidad_negocio_id,
+                        departamento_id=linea.departamento_id,
+                        almacen_id=linea.almacen_id,
+                    ))
+                oc.total_estimado = round(total, 2)
+
+            comp = db.query(models.CompromisoPresupuestario).filter(
+                models.CompromisoPresupuestario.origen_tipo == "OC",
+                models.CompromisoPresupuestario.origen_id == oc_id,
+                models.CompromisoPresupuestario.estado == "activo",
             ).first()
-            if not prod:
-                raise HTTPException(status_code=400, detail=f"Producto '{linea.producto_id}' no existe")
-            desc = float(linea.descuento_pct or 0)
-            subtotal = round(linea.cantidad * linea.precio_unitario * (1 - desc / 100), 2)
-            total += subtotal
-            db.add(models.OrdenCompraLinea(
-                oc_id=oc_id, producto_id=linea.producto_id,
-                cantidad=linea.cantidad, cantidad_recibida=0,
-                precio_unitario=linea.precio_unitario,
-                descuento_pct=desc,
-                impuesto=linea.impuesto or prod.impuesto_compra or "itbis_18",
-                subtotal=subtotal,
-                cuenta_contable_id=linea.cuenta_contable_id,
-                unidad_negocio_id=linea.unidad_negocio_id,
-                departamento_id=linea.departamento_id,
-                almacen_id=linea.almacen_id,
-            ))
-        oc.total_estimado = round(total, 2)
+            if comp:
+                comp.monto = Decimal(str(round(total, 2)))
+                comp.campo_id = data.campo_id
+                comp.unidad_negocio_id = data.unidad_negocio_id
+                comp.departamento_id = data.departamento_id
 
-        comp = db.query(models.CompromisoPresupuestario).filter(
-            models.CompromisoPresupuestario.origen_tipo == "OC",
-            models.CompromisoPresupuestario.origen_id == oc_id,
-            models.CompromisoPresupuestario.estado == "activo",
-        ).first()
-        if comp:
-            comp.monto = Decimal(str(round(total, 2)))
-            comp.campo_id = data.campo_id
-            comp.unidad_negocio_id = data.unidad_negocio_id
-            comp.departamento_id = data.departamento_id
+        audit.log(db, current_user, "MODIFICAR", "OC", oc_id,
+                  f"OC {oc_id} editada: proveedor={oc.proveedor}, campo={oc.campo_id}",
+                  {"proveedor": oc.proveedor, "campo_id": oc.campo_id,
+                   "total_estimado": float(oc.total_estimado or 0)})
 
-    audit.log(db, current_user, "MODIFICAR", "OC", oc_id,
-              f"OC {oc_id} editada: proveedor={oc.proveedor}, campo={oc.campo_id}",
-              {"proveedor": oc.proveedor, "campo_id": oc.campo_id,
-               "total_estimado": float(oc.total_estimado or 0)})
-
-    db.commit()
-    db.refresh(oc)
+        db.commit()
+        db.refresh(oc)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al actualizar la orden de compra")
     return oc
 
 
@@ -592,10 +679,23 @@ def delete_oc(oc_id: str, db: Session = Depends(get_db),
     if not oc:
         raise HTTPException(status_code=404, detail="Orden de compra no encontrada")
 
+    cxp_list = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.oc_id == oc_id).all()
+    cxp_con_pagos = [c for c in cxp_list if db.query(models.Pago).filter(
+        models.Pago.cxp_id == c.id).count() > 0]
+    if cxp_con_pagos:
+        nums = ", ".join(c.numero for c in cxp_con_pagos)
+        raise HTTPException(400, f"No se puede eliminar: existen CxP con pagos registrados ({nums})")
+
+    for cxp in cxp_list:
+        db.query(models.LineaCxP).filter(models.LineaCxP.cxp_id == cxp.id).delete()
+        db.delete(cxp)
+
     audit.log(db, current_user, "ELIMINAR", "OC", oc_id,
               f"OC {oc_id} eliminada: {oc.proveedor or 'Sin proveedor'} — Total era: RD$ {oc.total_estimado or 0:,.2f}",
               {"proveedor": oc.proveedor, "estado": oc.estado,
-               "total_estimado": float(oc.total_estimado or 0)})
+               "total_estimado": float(oc.total_estimado or 0),
+               "cxp_eliminadas": len(cxp_list)})
 
     db.query(models.CompromisoPresupuestario).filter(
         models.CompromisoPresupuestario.origen_tipo == "OC",
@@ -605,3 +705,61 @@ def delete_oc(oc_id: str, db: Session = Depends(get_db),
     db.delete(oc)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{oc_id}/duplicar")
+def duplicar_oc(oc_id: str, db: Session = Depends(get_db),
+                current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Clone an OC into a new Borrador."""
+    oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
+    if not oc:
+        raise HTTPException(404, "Orden de compra no encontrada")
+    lineas = db.query(models.OrdenCompraLinea).filter(models.OrdenCompraLinea.oc_id == oc_id).all()
+
+    new_id = get_next("OC", db)
+    try:
+        new_oc = models.OrdenCompra(
+            oc_id=new_id,
+            fecha=datetime.now(),
+            proveedor=oc.proveedor,
+            proveedor_id=oc.proveedor_id,
+            campo_id=oc.campo_id,
+            unidad_negocio_id=oc.unidad_negocio_id,
+            departamento_id=oc.departamento_id,
+            almacen_id=oc.almacen_id,
+            estado="Borrador",
+            observaciones=f"Duplicada de {oc_id}",
+        )
+        db.add(new_oc)
+        db.flush()
+
+        total = 0.0
+        for l in lineas:
+            sub = float(l.subtotal or 0)
+            total += sub
+            db.add(models.OrdenCompraLinea(
+                oc_id=new_id, producto_id=l.producto_id,
+                cantidad=l.cantidad, cantidad_recibida=0,
+                precio_unitario=l.precio_unitario,
+                descuento_pct=float(l.descuento_pct or 0),
+                impuesto=l.impuesto,
+                subtotal=sub,
+                cuenta_contable_id=l.cuenta_contable_id,
+                unidad_negocio_id=l.unidad_negocio_id,
+                departamento_id=l.departamento_id,
+                almacen_id=l.almacen_id,
+            ))
+        new_oc.total_estimado = round(total, 2)
+
+        audit.log(db, current_user, "DUPLICAR", "OC", new_id,
+                  f"OC {new_id} duplicada de {oc_id} — Total: RD$ {total:,.2f}",
+                  {"origen": oc_id, "total_estimado": total, "num_lineas": len(lineas)})
+
+        db.commit()
+        db.refresh(new_oc)
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al duplicar la orden de compra")
+    return {"ok": True, "oc_id": new_id, "orden": schemas.OrdenCompraOut.model_validate(new_oc)}
+
+
