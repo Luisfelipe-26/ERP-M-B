@@ -1514,6 +1514,22 @@ def listar_cxp(estado: str = None, skip: int = 0, limit: int = 100,
     return {"total": total, "items": result}
 
 
+@router.get("/cxp/{cxp_id}")
+def detalle_cxp(cxp_id: int, db: Session = Depends(get_db),
+                user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+    cxp = db.query(models.CuentaPorPagar).get(cxp_id)
+    if not cxp:
+        raise HTTPException(404, "CxP no encontrada")
+    out = schemas.CuentaPorPagarOut.model_validate(cxp)
+    prov = db.query(models.Proveedor).get(cxp.proveedor_id) if cxp.proveedor_id else None
+    out.proveedor_nombre = prov.nombre if prov else None
+    lineas = db.query(models.LineaCxP).filter(models.LineaCxP.cxp_id == cxp_id).all()
+    lineas_out = [schemas.LineaCxPOut.model_validate(l) for l in lineas]
+    return {**out.model_dump(), "lineas": lineas_out}
+
+
 ITBIS_RATES = {"itbis_18": Decimal("0.18"), "itbis_0": Decimal("0"), "exento": Decimal("0")}
 
 
