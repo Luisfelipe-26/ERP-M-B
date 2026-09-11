@@ -28,32 +28,22 @@ def _recalc_avg_cost(producto: models.Producto, qty_in: float, precio_compra: fl
 
 
 def _mov_out(m: models.MovimientoInventario) -> dict:
-    return {
-        "id": m.id,
-        "num_documento": m.num_documento,
-        "producto_id": m.producto_id,
-        "tipo_doc": m.tipo_doc,
-        "tipo": m.tipo,
-        "motivo": m.motivo,
-        "cantidad": m.cantidad,
-        "costo_unitario": m.costo_unitario,
-        "costo_promedio_post": m.costo_promedio_post,
-        "stock_post": m.stock_post,
-        "lote": m.lote,
-        "vencimiento": m.vencimiento.isoformat() if m.vencimiento else None,
-        "proveedor": m.proveedor,
-        "num_factura": m.num_factura,
-        "referencia": m.referencia,
-        "ot_referencia": m.ot_referencia,
-        "oc_referencia": m.oc_referencia,
-        "observacion": m.observacion,
-        "fecha": m.fecha.isoformat() if m.fecha else None,
-        "usuario_id": m.usuario_id,
-        "producto_nombre": m.producto.producto if m.producto else None,
-        "producto_unidad": m.producto.unidad if m.producto else None,
-        "asiento_id": getattr(m, "asiento_id", None),
-        "almacen_id": m.almacen_id,
-    }
+    out = schemas.MovimientoOut(
+        id=m.id, num_documento=m.num_documento, producto_id=m.producto_id,
+        tipo_doc=m.tipo_doc, tipo=m.tipo, motivo=m.motivo,
+        cantidad=float(m.cantidad) if m.cantidad is not None else None,
+        costo_unitario=float(m.costo_unitario) if m.costo_unitario is not None else None,
+        costo_promedio_post=float(m.costo_promedio_post) if m.costo_promedio_post is not None else None,
+        stock_post=float(m.stock_post) if m.stock_post is not None else None,
+        lote=m.lote, vencimiento=m.vencimiento, proveedor=m.proveedor,
+        num_factura=m.num_factura, referencia=m.referencia,
+        ot_referencia=m.ot_referencia, oc_referencia=m.oc_referencia,
+        observacion=m.observacion, fecha=m.fecha, usuario_id=m.usuario_id,
+        asiento_id=getattr(m, "asiento_id", None), almacen_id=m.almacen_id,
+        producto_nombre=m.producto.producto if m.producto else None,
+        producto_unidad=m.producto.unidad if m.producto else None,
+    )
+    return out.model_dump(mode="json")
 
 
 # ─── Sugerencia de próximo ID ───────────────────────────────────────────────
@@ -454,6 +444,156 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
     return _mov_out(mov)
 
 
+# ─── Devolución de GI (reversar salida) ────────────────────────────────────
+
+@router.post("/gi/{mov_id}/devolucion")
+def devolucion_gi(
+    mov_id: int,
+    cantidad: Optional[float] = None,
+    observacion: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_supervisor),
+):
+    gi = db.query(models.MovimientoInventario).options(
+        joinedload(models.MovimientoInventario.producto)
+    ).filter(
+        models.MovimientoInventario.id == mov_id,
+        models.MovimientoInventario.tipo_doc == "GI",
+        models.MovimientoInventario.tipo == "salida",
+    ).first()
+    if not gi:
+        raise HTTPException(404, "Movimiento GI no encontrado")
+
+    ya_devuelto = db.query(func.coalesce(func.sum(models.MovimientoInventario.cantidad), 0)).filter(
+        models.MovimientoInventario.tipo_doc == "DEV-GI",
+        models.MovimientoInventario.referencia == gi.num_documento,
+    ).scalar()
+    disponible = round((gi.cantidad or 0) - float(ya_devuelto), 4)
+    if disponible <= 0:
+        raise HTTPException(400, f"Esta GI ya fue devuelta completamente")
+
+    qty = cantidad or disponible
+    if qty <= 0 or qty > disponible:
+        raise HTTPException(400, f"Cantidad inválida. Disponible para devolución: {disponible}")
+
+    p = db.query(models.Producto).filter(models.Producto.id_prod == gi.producto_id).first()
+    if not p:
+        raise HTTPException(404, "Producto no encontrado")
+
+    nuevo_stock = (p.stock_actual or 0) + qty
+    cp = gi.costo_unitario or p.costo_promedio or p.costo_unitario or 0
+    num_doc = get_next("DEV", db)
+
+    mov = models.MovimientoInventario(
+        num_documento=num_doc,
+        producto_id=gi.producto_id,
+        tipo_doc="DEV-GI",
+        tipo="entrada",
+        motivo=f"Devolución de {gi.num_documento}",
+        cantidad=qty,
+        costo_unitario=cp,
+        costo_promedio_post=p.costo_promedio or cp,
+        stock_post=nuevo_stock,
+        referencia=gi.num_documento,
+        observacion=observacion or f"Devolución parcial/total de salida {gi.num_documento}",
+        fecha=datetime.now(),
+        usuario_id=current_user.id,
+        almacen_id=gi.almacen_id,
+    )
+    db.add(mov)
+    p.stock_actual = nuevo_stock
+
+    audit.log(db, current_user, "DEVOLUCION_GI", "DEV-GI", num_doc,
+              f"Devolución {num_doc}: {qty} {p.unidad} de {p.producto} (ref: {gi.num_documento})",
+              {"gi_original": gi.num_documento, "producto": gi.producto_id,
+               "cantidad": qty, "disponible_antes": disponible})
+
+    monto = round(qty * cp, 2)
+    if monto > 0 and p.cuenta_inventario_id and p.cuenta_costo_id:
+        r_inv = _get_regla_cuentas(db, "inventario", "entrada")
+        cta_debe = p.cuenta_inventario_id
+        cta_haber = r_inv[1] if r_inv else p.cuenta_costo_id
+        if cta_debe and cta_haber:
+            asiento = _crear_asiento_auto(
+                db, datetime.now().date(), "DEV-GI", num_doc,
+                f"Devolución GI {num_doc} — {p.producto}",
+                [
+                    {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
+                     "almacen_id": mov.almacen_id,
+                     "descripcion_linea": f"Inventario devolución {p.producto}"},
+                    {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
+                     "descripcion_linea": f"Contrapartida devolución GI {num_doc}"},
+                ],
+                current_user.nombre, origen_id=mov.id
+            )
+            if asiento:
+                mov.asiento_id = asiento.id
+
+    try:
+        db.commit()
+        db.refresh(mov)
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "Error al registrar devolución de GI")
+    return _mov_out(mov)
+
+
+# ─── Recálculo de costo promedio desde movimientos GR ──────────────────────
+
+@router.post("/recalcular-costos")
+def recalcular_costos(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(auth.require_admin),
+):
+    productos = db.query(models.Producto).filter(
+        models.Producto.activo == True,
+        models.Producto.es_inventariable == True,
+    ).all()
+
+    ajustados = []
+    for p in productos:
+        grs = db.query(models.MovimientoInventario).filter(
+            models.MovimientoInventario.producto_id == p.id_prod,
+            models.MovimientoInventario.tipo_doc == "GR",
+            models.MovimientoInventario.tipo == "entrada",
+        ).order_by(models.MovimientoInventario.fecha.asc(), models.MovimientoInventario.id.asc()).all()
+        if not grs:
+            continue
+
+        stock_acc = 0.0
+        valor_acc = 0.0
+        for gr in grs:
+            qty = gr.cantidad or 0
+            precio = gr.costo_unitario or 0
+            stock_acc += qty
+            valor_acc += qty * precio
+        if stock_acc <= 0:
+            continue
+
+        nuevo_cp = round(valor_acc / stock_acc, 4)
+        anterior = p.costo_promedio
+        if anterior is not None and round(anterior, 4) == nuevo_cp:
+            continue
+
+        p.costo_promedio = nuevo_cp
+        ajustados.append({
+            "id_prod": p.id_prod, "producto": p.producto,
+            "costo_anterior": anterior, "costo_nuevo": nuevo_cp,
+        })
+
+    if ajustados:
+        audit.log(db, current_user, "RECALC_COSTOS", "INV", f"{len(ajustados)} productos",
+                  f"Recálculo de costo promedio: {len(ajustados)} productos ajustados",
+                  {"productos": ajustados[:50]})
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "Error al recalcular costos")
+
+    return {"ok": True, "productos_ajustados": len(ajustados), "detalle": ajustados}
+
+
 # ─── Kardex — Historial por producto ────────────────────────────────────────
 
 @router.get("/kardex/{id_prod}")
@@ -489,6 +629,7 @@ def list_movimientos(
     fecha_desde: Optional[str] = None,
     fecha_hasta: Optional[str] = None,
     limit: int = Query(500, le=1000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
     q = db.query(models.MovimientoInventario).options(joinedload(models.MovimientoInventario.producto))
@@ -505,7 +646,8 @@ def list_movimientos(
         except ValueError:
             dt_hasta = datetime.fromisoformat(fecha_hasta)
         q = q.filter(models.MovimientoInventario.fecha < dt_hasta)
-    movs = q.order_by(models.MovimientoInventario.fecha.desc()).limit(limit).all()
+    total = q.count()
+    movs = q.order_by(models.MovimientoInventario.fecha.desc()).offset(offset).limit(limit).all()
     out = [_mov_out(m) for m in movs]
 
     # Actividad de la OT para consumos (columna Actividad en el reporte)
@@ -518,7 +660,7 @@ def list_movimientos(
         for o in out:
             if o.get("ot_referencia"):
                 o["actividad"] = act_map.get(o["ot_referencia"])
-    return out
+    return {"items": out, "total": total, "has_more": (offset + limit) < total}
 
 
 # ─── Valoración de Inventario ────────────────────────────────────────────────

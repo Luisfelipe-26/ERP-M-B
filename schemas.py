@@ -251,6 +251,34 @@ class AjusteCreate(BaseModel):
     fecha: Optional[datetime] = None
     almacen_id: Optional[int] = None
 
+class MovimientoOut(BaseModel):
+    id: int
+    num_documento: Optional[str] = None
+    producto_id: Optional[str] = None
+    tipo_doc: Optional[str] = None
+    tipo: Optional[str] = None
+    motivo: Optional[str] = None
+    cantidad: Optional[float] = None
+    costo_unitario: Optional[float] = None
+    costo_promedio_post: Optional[float] = None
+    stock_post: Optional[float] = None
+    lote: Optional[str] = None
+    vencimiento: Optional[datetime] = None
+    proveedor: Optional[str] = None
+    num_factura: Optional[str] = None
+    referencia: Optional[str] = None
+    ot_referencia: Optional[int] = None
+    oc_referencia: Optional[str] = None
+    observacion: Optional[str] = None
+    fecha: Optional[datetime] = None
+    usuario_id: Optional[int] = None
+    asiento_id: Optional[int] = None
+    almacen_id: Optional[int] = None
+    producto_nombre: Optional[str] = None
+    producto_unidad: Optional[str] = None
+    class Config:
+        from_attributes = True
+
 # Dashboard
 class DashboardStats(BaseModel):
     total_campos: int

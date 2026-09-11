@@ -265,6 +265,18 @@ def run_migrations():
         )""",
         "CREATE INDEX IF NOT EXISTS ix_diment_entidad ON dimension_entidades(entidad_tipo, entidad_id)",
         "CREATE INDEX IF NOT EXISTS ix_diment_dimension ON dimension_entidades(dimension_id)",
+        # DT-1: Float → Numeric(14,4) en campos financieros de inventario
+        "ALTER TABLE productos ALTER COLUMN costo_unitario TYPE NUMERIC(14,4) USING costo_unitario::NUMERIC(14,4)",
+        "ALTER TABLE productos ALTER COLUMN costo_promedio TYPE NUMERIC(14,4) USING costo_promedio::NUMERIC(14,4)",
+        "ALTER TABLE productos ALTER COLUMN stock_actual TYPE NUMERIC(14,4) USING stock_actual::NUMERIC(14,4)",
+        "ALTER TABLE productos ALTER COLUMN stock_minimo TYPE NUMERIC(14,4) USING stock_minimo::NUMERIC(14,4)",
+        "ALTER TABLE productos ALTER COLUMN stock_maximo TYPE NUMERIC(14,4) USING stock_maximo::NUMERIC(14,4)",
+        "ALTER TABLE movimientos_inventario ALTER COLUMN cantidad TYPE NUMERIC(14,4) USING cantidad::NUMERIC(14,4)",
+        "ALTER TABLE movimientos_inventario ALTER COLUMN costo_unitario TYPE NUMERIC(14,4) USING costo_unitario::NUMERIC(14,4)",
+        "ALTER TABLE movimientos_inventario ALTER COLUMN costo_promedio_post TYPE NUMERIC(14,4) USING costo_promedio_post::NUMERIC(14,4)",
+        "ALTER TABLE movimientos_inventario ALTER COLUMN stock_post TYPE NUMERIC(14,4) USING stock_post::NUMERIC(14,4)",
+        # Ampliar tipo_doc de VARCHAR(5) a VARCHAR(10) para soportar DEV-GI
+        "ALTER TABLE movimientos_inventario ALTER COLUMN tipo_doc TYPE VARCHAR(10)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).

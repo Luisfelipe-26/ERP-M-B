@@ -118,11 +118,11 @@ class Producto(Base):
     producto = Column(String(200), nullable=False)
     tipo = Column(String(20), default="almacenable")    # almacenable / consumible / servicio
     unidad = Column(String(20))
-    costo_unitario = Column(Float)
-    costo_promedio = Column(Float)
-    stock_actual = Column(Float, default=0)
-    stock_minimo = Column(Float, default=0)
-    stock_maximo = Column(Float)
+    costo_unitario = Column(Numeric(14, 4))
+    costo_promedio = Column(Numeric(14, 4))
+    stock_actual = Column(Numeric(14, 4), default=0)
+    stock_minimo = Column(Numeric(14, 4), default=0)
+    stock_maximo = Column(Numeric(14, 4))
     proveedor = Column(String(200))
     proveedor_id = Column(Integer, ForeignKey("proveedores.id"))
     concentracion = Column(String(100))
@@ -269,15 +269,15 @@ class MovimientoInventario(Base):
     id = Column(Integer, primary_key=True, index=True)
     num_documento = Column(String(20), index=True)   # GR-0001, GI-0001, AJ-0001
     producto_id = Column(String(10), ForeignKey("productos.id_prod"), index=True)
-    # tipo_doc: GR=Entrada Mercancía, GI=Salida Mercancía, AJ=Ajuste/Recuento, OT=Consumo OT
-    tipo_doc = Column(String(5), default="GR")
+    # tipo_doc: GR=Entrada, GI=Salida, AJ=Ajuste, OT=Consumo OT, DEV-GI=Devolución GI
+    tipo_doc = Column(String(10), default="GR")
     # tipo legacy: "entrada" / "salida" (calculado del tipo_doc)
     tipo = Column(String(20))
     motivo = Column(String(100))            # Compra, Merma, Vencimiento, Ajuste Conteo, Consumo OT…
-    cantidad = Column(Float)
-    costo_unitario = Column(Float)          # precio de la transacción
-    costo_promedio_post = Column(Float)     # costo promedio después de este movimiento
-    stock_post = Column(Float)              # stock saldo después de este movimiento (kardex)
+    cantidad = Column(Numeric(14, 4))
+    costo_unitario = Column(Numeric(14, 4))
+    costo_promedio_post = Column(Numeric(14, 4))
+    stock_post = Column(Numeric(14, 4))
     lote = Column(String(100))
     vencimiento = Column(DateTime)
     proveedor = Column(String(200))
