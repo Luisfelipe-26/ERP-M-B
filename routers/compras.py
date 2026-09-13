@@ -9,7 +9,7 @@ import models, schemas, auth
 from routers.sequences import get_next, peek_next
 from routers.contabilidad import (_crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto,
                                   _registrar_mov_pres, _monto_presupuestario,
-                                  _reversar_devengado_cxp)
+                                  _reversar_devengado_cxp, ITBIS_RATES)
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -245,12 +245,24 @@ def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
     oc_id = get_next("OC", db)
     total = 0.0
 
+    # Sin proveedor válido la OC no puede generar CxP al recibirse, así que se
+    # rechaza aquí en vez de fallar más adelante en el ciclo.
     nombre_proveedor = data.proveedor
     prov_id = data.proveedor_id
-    if prov_id and not nombre_proveedor:
+    if prov_id:
         prov = db.query(models.Proveedor).filter(models.Proveedor.id == prov_id).first()
+        if not prov:
+            raise HTTPException(400, f"Proveedor ID {prov_id} no existe")
+        if not prov.activo:
+            raise HTTPException(400, f"El proveedor '{prov.nombre}' está inactivo")
+        nombre_proveedor = prov.nombre
+    elif nombre_proveedor:
+        prov = db.query(models.Proveedor).filter(
+            models.Proveedor.nombre == nombre_proveedor,
+            models.Proveedor.activo == True,
+        ).first()
         if prov:
-            nombre_proveedor = prov.nombre
+            prov_id = prov.id
 
     try:
         oc = models.OrdenCompra(
@@ -387,7 +399,8 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
 
 
 def _itbis_linea(subtotal: Decimal, impuesto: str) -> Decimal:
-    return subtotal * Decimal("0.18") if (impuesto or "itbis_18") == "itbis_18" else Decimal("0")
+    """ITBIS de una línea según su régimen. Una línea exenta no paga."""
+    return (subtotal * ITBIS_RATES.get(impuesto or "itbis_18", Decimal("0.18"))).quantize(Decimal("0.01"))
 
 
 def _entradas_presupuestarias_oc(db: Session, oc, prov, cuenta_fallback: int) -> list:
@@ -675,6 +688,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
 
         asiento_num = None
         cxp_numero = None
+        asiento = None
         if total_recibido_now > 0:
             monto = Decimal(str(round(total_recibido_now, 2)))
             r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
@@ -711,8 +725,16 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                 fecha_hoy = datetime.now().date()
                 vencimiento = fecha_hoy + timedelta(days=prov.condicion_pago_dias or 30)
 
-                itbis_pct = Decimal("0.18")
-                itbis_monto = round(monto * itbis_pct, 2)
+                # Por línea y no 18% plano sobre el total: una OC con líneas exentas
+                # generaba un encabezado de ITBIS que no cuadraba con sus propias líneas.
+                itbis_monto = Decimal("0")
+                for rl in received_lineas:
+                    oc_l = next((o for o in lineas_oc if o.id == rl["linea_id"]), None)
+                    if not oc_l:
+                        continue
+                    sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(oc_l.precio_unitario or 0))
+                    itbis_monto += _itbis_linea(sub_l, oc_l.impuesto)
+
                 isr_pct = Decimal(str(prov.retencion_isr_pct or 0))
                 itbis_ret_pct = Decimal(str(prov.retencion_itbis_pct or 0))
                 ret_isr = round(monto * isr_pct / 100, 2)
@@ -744,7 +766,6 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                     if oc_l:
                         sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(oc_l.precio_unitario or 0))
                         imp = oc_l.impuesto or "itbis_18"
-                        rate = Decimal("0.18") if imp == "itbis_18" else Decimal("0")
                         db.add(models.LineaCxP(
                             cxp_id=cxp.id,
                             producto_id=oc_l.producto_id,
@@ -753,7 +774,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                             precio_unitario=float(oc_l.precio_unitario or 0),
                             descuento_pct=float(oc_l.descuento_pct or 0),
                             impuesto=imp,
-                            monto_itbis=round(sub_l * rate, 2),
+                            monto_itbis=_itbis_linea(sub_l, imp),
                             subtotal=round(sub_l, 2),
                         ))
 
@@ -1006,6 +1027,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
 
     try:
         total_devuelto = Decimal("0")
+        itbis_devuelto = Decimal("0")
         lineas_devueltas = []
 
         for item in data.lineas:
@@ -1031,6 +1053,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
 
             monto_linea = Decimal(str(round(item.cantidad_devuelta * float(linea.precio_unitario), 4)))
             total_devuelto += monto_linea
+            itbis_devuelto += _itbis_linea(monto_linea, linea.impuesto)
 
             prod = db.query(models.Producto).filter(
                 models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
@@ -1081,7 +1104,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
             ).first()
 
         if prov and total_devuelto > 0:
-            itbis_monto = round(total_devuelto * Decimal("0.18"), 2)
+            itbis_monto = itbis_devuelto
             nc_total = total_devuelto + itbis_monto
             nc_numero = get_next("NC", db)
             cxp = db.query(models.CuentaPorPagar).filter(
