@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models, schemas, auth
 from routers.sequences import get_next, peek_next
-from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto, _registrar_mov_pres
+from routers.contabilidad import (_crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto,
+                                  _registrar_mov_pres, _monto_presupuestario,
+                                  _reversar_devengado_cxp)
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -154,7 +156,7 @@ def reporte_top_proveedores(
 
 @router.get("/reportes/compras-dimension")
 def reporte_compras_dimension(
-    dimension: str = Query("campo", regex="^(campo|unidad_negocio|departamento)$"),
+    dimension: str = Query("campo", pattern="^(campo|unidad_negocio|departamento)$"),
     anio: Optional[int] = None,
     mes: Optional[int] = None,
     db: Session = Depends(get_db), _=Depends(auth.get_current_user),
@@ -384,6 +386,46 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
     }
 
 
+def _itbis_linea(subtotal: Decimal, impuesto: str) -> Decimal:
+    return subtotal * Decimal("0.18") if (impuesto or "itbis_18") == "itbis_18" else Decimal("0")
+
+
+def _entradas_presupuestarias_oc(db: Session, oc, prov, cuenta_fallback: int) -> list:
+    """Desglosa una OC en las líneas presupuestarias que afecta.
+
+    Cada línea de OC puede llevar su propia cuenta y dimensiones; usar solo las del
+    encabezado imputaría toda la orden a un único centro de costo, que es lo que hacía antes.
+    """
+    entradas = []
+    for l in db.query(models.OrdenCompraLinea).filter(
+            models.OrdenCompraLinea.oc_id == oc.oc_id).order_by(models.OrdenCompraLinea.id).all():
+        sub = Decimal(str(l.subtotal or 0))
+        if sub <= 0:
+            continue
+        entradas.append({
+            "oc_linea_id": l.id,
+            "cuenta_id": l.cuenta_contable_id or cuenta_fallback,
+            "campo_id": oc.campo_id,
+            "unidad_negocio_id": l.unidad_negocio_id or oc.unidad_negocio_id,
+            "departamento_id": l.departamento_id or oc.departamento_id,
+            "monto": _monto_presupuestario(sub, _itbis_linea(sub, l.impuesto), prov)
+                     .quantize(Decimal("0.01")),
+        })
+
+    if not entradas:
+        sub = Decimal(str(oc.total_estimado or 0))
+        entradas.append({
+            "oc_linea_id": None,
+            "cuenta_id": cuenta_fallback,
+            "campo_id": oc.campo_id,
+            "unidad_negocio_id": oc.unidad_negocio_id,
+            "departamento_id": oc.departamento_id,
+            "monto": _monto_presupuestario(sub, _itbis_linea(sub, "itbis_18"), prov)
+                     .quantize(Decimal("0.01")),
+        })
+    return entradas
+
+
 @router.post("/{oc_id}/aprobar")
 def aprobar_oc(oc_id: str, override: bool = Query(False),
                db: Session = Depends(get_db),
@@ -401,44 +443,50 @@ def aprobar_oc(oc_id: str, override: bool = Query(False),
     if r_compra and total > 0:
         fecha_oc = oc.fecha or datetime.now()
         fecha_check = fecha_oc.date() if hasattr(fecha_oc, 'date') else fecha_oc
+        comp_anio = fecha_check.year
+        comp_mes = fecha_check.month
+
+        prov = db.query(models.Proveedor).get(oc.proveedor_id) if oc.proveedor_id else None
+        entradas = _entradas_presupuestarias_oc(db, oc, prov, r_compra[0])
+
         ver = _verificar_presupuesto(db, [{
-            "cuenta_id": r_compra[0], "debe": total, "haber": 0,
-            "campo_id": oc.campo_id,
-            "unidad_negocio_id": oc.unidad_negocio_id,
-            "departamento_id": oc.departamento_id,
-        }], fecha_check)
+            "cuenta_id": e["cuenta_id"], "debe": float(e["monto"]), "haber": 0,
+            "campo_id": e["campo_id"],
+            "unidad_negocio_id": e["unidad_negocio_id"],
+            "departamento_id": e["departamento_id"],
+        } for e in entradas], fecha_check)
 
         if ver.get("bloqueado") and not override:
             raise HTTPException(400, {
                 "detail": "Presupuesto insuficiente — aprobación bloqueada",
                 "alertas": ver.get("alertas", []),
+                "detalle": ver.get("detalle", []),
                 "requiere_override": True,
             })
         if ver.get("bloqueado") and override and current_user.rol != "admin":
             raise HTTPException(403, "Solo un administrador puede autorizar sobregiro presupuestario")
 
-        comp_anio = fecha_oc.year if hasattr(fecha_oc, 'year') else datetime.now().year
-        comp_mes = fecha_oc.month if hasattr(fecha_oc, 'month') else datetime.now().month
-        comp_monto = Decimal(str(round(total, 2)))
-        db.add(models.CompromisoPresupuestario(
-            anio=comp_anio, mes=comp_mes,
-            cuenta_id=r_compra[0],
-            campo_id=oc.campo_id,
-            unidad_negocio_id=oc.unidad_negocio_id,
-            departamento_id=oc.departamento_id,
-            monto=comp_monto,
-            origen_tipo="OC", origen_id=oc_id, estado="activo",
-        ))
-        _registrar_mov_pres(
-            db, tipo="COMPROMISO", fecha=fecha_check,
-            cuenta_id=r_compra[0], monto=comp_monto,
-            anio=comp_anio, mes=comp_mes,
-            campo_id=oc.campo_id, unidad_negocio_id=oc.unidad_negocio_id,
-            departamento_id=oc.departamento_id,
-            origen_tipo="OC", origen_id=oc_id,
-            notas=f"Compromiso OC {oc_id}",
-            usuario_id=current_user.id,
-        )
+        for e in entradas:
+            db.add(models.CompromisoPresupuestario(
+                anio=comp_anio, mes=comp_mes,
+                cuenta_id=e["cuenta_id"],
+                campo_id=e["campo_id"],
+                unidad_negocio_id=e["unidad_negocio_id"],
+                departamento_id=e["departamento_id"],
+                monto=e["monto"], monto_ejecutado=Decimal("0"),
+                oc_linea_id=e["oc_linea_id"],
+                origen_tipo="OC", origen_id=oc_id, estado="activo",
+            ))
+            _registrar_mov_pres(
+                db, tipo="COMPROMISO", fecha=fecha_check,
+                cuenta_id=e["cuenta_id"], monto=e["monto"],
+                anio=comp_anio, mes=comp_mes,
+                campo_id=e["campo_id"], unidad_negocio_id=e["unidad_negocio_id"],
+                departamento_id=e["departamento_id"],
+                origen_tipo="OC", origen_id=oc_id,
+                notas=f"Compromiso OC {oc_id}" + (f" línea {e['oc_linea_id']}" if e["oc_linea_id"] else ""),
+                usuario_id=current_user.id,
+            )
 
     oc.estado = "Aprobada"
     oc.aprobado_por = current_user.nombre
@@ -470,15 +518,19 @@ def cerrar_oc(oc_id: str, db: Session = Depends(get_db),
         models.CompromisoPresupuestario.estado == "activo",
     ).all()
     for comp in comps_cerrar:
+        # Solo el remanente: lo ya facturado se liberó al devengar.
+        remanente = Decimal(str(comp.monto or 0)) - Decimal(str(comp.monto_ejecutado or 0))
         comp.estado = "cancelado"
+        if remanente <= 0:
+            continue
         _registrar_mov_pres(
             db, tipo="LIBERACION", fecha=datetime.now().date(),
-            cuenta_id=comp.cuenta_id, monto=-comp.monto,
+            cuenta_id=comp.cuenta_id, monto=-remanente,
             anio=comp.anio, mes=comp.mes,
             campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
             departamento_id=comp.departamento_id,
             origen_tipo="OC", origen_id=oc_id,
-            notas=f"Liberación por cierre OC {oc_id}",
+            notas=f"Liberación de remanente por cierre OC {oc_id}",
             usuario_id=current_user.id,
         )
 
@@ -513,15 +565,18 @@ def update_oc_estado(oc_id: str, estado: str = Query(...),
             models.CompromisoPresupuestario.estado == "activo",
         ).all()
         for comp in comps_cancel:
+            remanente = Decimal(str(comp.monto or 0)) - Decimal(str(comp.monto_ejecutado or 0))
             comp.estado = "cancelado"
+            if remanente <= 0:
+                continue
             _registrar_mov_pres(
                 db, tipo="LIBERACION", fecha=datetime.now().date(),
-                cuenta_id=comp.cuenta_id, monto=-comp.monto,
+                cuenta_id=comp.cuenta_id, monto=-remanente,
                 anio=comp.anio, mes=comp.mes,
                 campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
                 departamento_id=comp.departamento_id,
                 origen_tipo="OC", origen_id=oc_id,
-                notas=f"Liberación por cancelación OC {oc_id}",
+                notas=f"Liberación de remanente por cancelación OC {oc_id}",
                 usuario_id=current_user.id,
             )
         oc.estado = "Cancelada"
@@ -1016,6 +1071,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
 
         nc_numero = None
         cxp_ajustada = None
+        presup_reversado = Decimal("0")
         prov = None
         if oc.proveedor_id:
             prov = db.query(models.Proveedor).get(oc.proveedor_id)
@@ -1055,6 +1111,13 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
                 elif cxp.saldo_pendiente < cxp.total:
                     cxp.estado = "parcial"
                 cxp_ajustada = cxp.numero
+                presup_reversado = _reversar_devengado_cxp(
+                    db, cxp, _monto_presupuestario(total_devuelto, itbis_monto, prov),
+                    datetime.now().date(),
+                    origen_tipo="DEV-GR", origen_id=nc_numero,
+                    notas=f"Reverso por devolución OC {oc_id} — NC {nc_numero}",
+                    user=current_user,
+                )
 
             r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
             if r_compra:
@@ -1094,6 +1157,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
         "total_devuelto": float(total_devuelto),
         "nc_numero": nc_numero,
         "cxp_ajustada": cxp_ajustada,
+        "presupuesto_reversado": float(presup_reversado),
     }
 
 

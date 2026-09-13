@@ -75,113 +75,157 @@ def _resolve_diario_id(db: Session, origen: str):
 
 _CLASES_PRESUPUESTABLES = {"4", "5", "6"}
 
+MESES_NOMBRE = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+                "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+
+def _apropiacion_ytd(db: Session, cfg, *, anio: int, hasta_mes: int, cuenta_id: int,
+                     campo_id=None, unidad_negocio_id=None, departamento_id=None,
+                     escenario: str = "principal") -> float:
+    """Apropiación acumulada de enero hasta `hasta_mes` para una línea presupuestaria."""
+    expr = None
+    for mk in MK_PRES[:hasta_mes]:
+        col = sqlfunc.coalesce(getattr(models.Presupuesto, mk), 0)
+        expr = col if expr is None else expr + col
+
+    q = db.query(sqlfunc.coalesce(sqlfunc.sum(expr), 0)).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.cuenta_id == cuenta_id,
+        models.Presupuesto.estado == "aprobado",
+        models.Presupuesto.escenario == escenario,
+    )
+    if cfg.dim_campo and campo_id:
+        q = q.filter(models.Presupuesto.campo_id == campo_id)
+    if cfg.dim_unidad_negocio and unidad_negocio_id:
+        q = q.filter(models.Presupuesto.unidad_negocio_id == unidad_negocio_id)
+    if cfg.dim_departamento and departamento_id:
+        q = q.filter(models.Presupuesto.departamento_id == departamento_id)
+    return float(q.scalar() or 0)
+
+
+def _consumo_ytd(db: Session, cfg, *, anio: int, hasta_mes: int, cuenta_id: int,
+                 campo_id=None, unidad_negocio_id=None, departamento_id=None) -> float:
+    """Consumo acumulado YTD: compromiso vigente (neto de liberaciones) + devengado.
+
+    PAGADO no suma: es un sub-estado del devengado, no consumo adicional.
+    """
+    q = db.query(sqlfunc.coalesce(sqlfunc.sum(models.MovimientoPresupuestario.monto), 0)).filter(
+        models.MovimientoPresupuestario.anio == anio,
+        models.MovimientoPresupuestario.mes <= hasta_mes,
+        models.MovimientoPresupuestario.cuenta_id == cuenta_id,
+        models.MovimientoPresupuestario.tipo.in_(("COMPROMISO", "LIBERACION", "DEVENGADO")),
+    )
+    if cfg.dim_campo and campo_id:
+        q = q.filter(models.MovimientoPresupuestario.campo_id == campo_id)
+    if cfg.dim_unidad_negocio and unidad_negocio_id:
+        q = q.filter(models.MovimientoPresupuestario.unidad_negocio_id == unidad_negocio_id)
+    if cfg.dim_departamento and departamento_id:
+        q = q.filter(models.MovimientoPresupuestario.departamento_id == departamento_id)
+    return float(q.scalar() or 0)
+
+
+def _monto_presupuestario(subtotal, itbis, proveedor) -> Decimal:
+    """Monto que consume presupuesto.
+
+    El ITBIS de un proveedor formal es crédito fiscal recuperable y no es costo, así que
+    no consume. El de un informal no da derecho a crédito: es costo real y sí consume.
+    """
+    base = Decimal(str(subtotal or 0))
+    if (getattr(proveedor, "tipo_contribuyente", None) or "").lower() == "informal":
+        base += Decimal(str(itbis or 0))
+    return base
+
 
 def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
-    """Check budget availability for expense/cost/revenue lines.
-    Returns dict with 'alertas' (warnings) and 'bloqueado' (bool).
+    """Verifica disponibilidad presupuestaria acumulada (YTD) de enero al mes de `fecha`.
+
+    El consumo se lee de MovimientoPresupuestario —única fuente de verdad— y no del mayor
+    contable: el presupuesto se ejecuta con el compromiso y la factura, no al contabilizar
+    un asiento, que de otro modo contaría el mismo gasto dos veces.
+
+    Devuelve {'alertas', 'bloqueado', 'detalle'}.
     """
     cfg = db.query(models.ConfigPresupuesto).first()
     if not cfg or not cfg.control_habilitado:
-        return {"alertas": [], "bloqueado": False}
+        return {"alertas": [], "bloqueado": False, "detalle": []}
 
     anio = fecha.year
-    mes_idx = fecha.month - 1
-    mk = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may",
-           "monto_jun", "monto_jul", "monto_ago", "monto_sep", "monto_oct",
-           "monto_nov", "monto_dic"][mes_idx]
+    hasta_mes = fecha.month
 
-    alertas = []
+    # Agrupar por línea presupuestaria: varias líneas del mismo asiento pueden
+    # apuntar a la misma cuenta y deben pesar juntas contra el disponible.
+    agrupado: dict = {}
+    for l in lineas_data:
+        cta_id = l.get("cuenta_id")
+        if not cta_id:
+            continue
+        cuenta = db.query(models.CuentaContable).get(cta_id)
+        if not cuenta or (cuenta.codigo or "")[0:1] not in _CLASES_PRESUPUESTABLES:
+            continue
+        col = "haber" if cuenta.naturaleza == "acreedora" else "debe"
+        monto = float(l.get(col) or 0)
+        if monto <= 0:
+            continue
+        key = (cuenta.id, l.get("campo_id"), l.get("unidad_negocio_id"), l.get("departamento_id"))
+        agrupado[key] = agrupado.get(key, 0.0) + monto
+
+    alertas, detalle = [], []
     bloqueado = False
 
-    for l in lineas_data:
-        cuenta = db.query(models.CuentaContable).get(l.get("cuenta_id") or getattr(l, "cuenta_id", None))
-        if not cuenta:
-            continue
-        clase = (cuenta.codigo or "")[0:1]
-        if clase not in _CLASES_PRESUPUESTABLES:
-            continue
+    for (cta_id, campo_id, un_id, dep_id), monto_nuevo in agrupado.items():
+        nivel = "linea"
+        apropiado = _apropiacion_ytd(
+            db, cfg, anio=anio, hasta_mes=hasta_mes, cuenta_id=cta_id,
+            campo_id=campo_id, unidad_negocio_id=un_id, departamento_id=dep_id)
 
-        cta_id = cuenta.id
-        es_acreedora = cuenta.naturaleza == "acreedora"
-        col_linea = "haber" if es_acreedora else "debe"
-        monto_linea = float(l.get(col_linea, 0) or getattr(l, col_linea, 0) or 0)
-        if monto_linea <= 0:
-            continue
+        if apropiado > 0:
+            consumido = _consumo_ytd(
+                db, cfg, anio=anio, hasta_mes=hasta_mes, cuenta_id=cta_id,
+                campo_id=campo_id, unidad_negocio_id=un_id, departamento_id=dep_id)
+        else:
+            # El presupuesto puede estar fijado por cuenta sin abrirse por dimensión.
+            # Sin este roll-up, un gasto con centro de costo no presupuestado pasaría
+            # sin control alguno en vez de medirse contra el total de la cuenta.
+            nivel = "cuenta"
+            apropiado = _apropiacion_ytd(
+                db, cfg, anio=anio, hasta_mes=hasta_mes, cuenta_id=cta_id)
+            if apropiado <= 0:
+                continue
+            consumido = _consumo_ytd(
+                db, cfg, anio=anio, hasta_mes=hasta_mes, cuenta_id=cta_id)
 
-        campo_id = l.get("campo_id") or getattr(l, "campo_id", None)
-        un_id = l.get("unidad_negocio_id") or getattr(l, "unidad_negocio_id", None)
-        dep_id = l.get("departamento_id") or getattr(l, "departamento_id", None)
+        proyectado = consumido + monto_nuevo
+        pct = (proyectado / apropiado) * 100
+        cuenta = db.query(models.CuentaContable).get(cta_id)
 
-        pq = db.query(
-            sqlfunc.coalesce(sqlfunc.sum(getattr(models.Presupuesto, mk)), 0)
-        ).filter(
-            models.Presupuesto.anio == anio,
-            models.Presupuesto.cuenta_id == cta_id,
-            models.Presupuesto.estado == "aprobado",
-        )
-        if cfg.dim_campo and campo_id:
-            pq = pq.filter(models.Presupuesto.campo_id == campo_id)
-        if cfg.dim_unidad_negocio and un_id:
-            pq = pq.filter(models.Presupuesto.unidad_negocio_id == un_id)
-        if cfg.dim_departamento and dep_id:
-            pq = pq.filter(models.Presupuesto.departamento_id == dep_id)
-
-        presupuesto_mes = float(pq.scalar() or 0)
-        if presupuesto_mes <= 0:
-            continue
-
-        col_real = models.LineaAsiento.haber if es_acreedora else models.LineaAsiento.debe
-        lq = db.query(
-            sqlfunc.coalesce(sqlfunc.sum(col_real), 0)
-        ).join(
-            models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
-        ).filter(
-            models.LineaAsiento.cuenta_id == cta_id,
-            models.AsientoContable.estado == "contabilizado",
-            extract("year", models.AsientoContable.fecha) == anio,
-            extract("month", models.AsientoContable.fecha) == fecha.month,
-        )
-        if cfg.dim_campo and campo_id:
-            lq = lq.filter(models.LineaAsiento.campo_id == campo_id)
-        if cfg.dim_unidad_negocio and un_id:
-            lq = lq.filter(models.LineaAsiento.unidad_negocio_id == un_id)
-        if cfg.dim_departamento and dep_id:
-            lq = lq.filter(models.LineaAsiento.departamento_id == dep_id)
-
-        real_actual = float(lq.scalar() or 0)
-
-        cq = db.query(
-            sqlfunc.coalesce(sqlfunc.sum(models.CompromisoPresupuestario.monto), 0)
-        ).filter(
-            models.CompromisoPresupuestario.anio == anio,
-            models.CompromisoPresupuestario.mes == fecha.month,
-            models.CompromisoPresupuestario.cuenta_id == cta_id,
-            models.CompromisoPresupuestario.estado == "activo",
-        )
-        if cfg.dim_campo and campo_id:
-            cq = cq.filter(models.CompromisoPresupuestario.campo_id == campo_id)
-        if cfg.dim_unidad_negocio and un_id:
-            cq = cq.filter(models.CompromisoPresupuestario.unidad_negocio_id == un_id)
-        if cfg.dim_departamento and dep_id:
-            cq = cq.filter(models.CompromisoPresupuestario.departamento_id == dep_id)
-        comprometido = float(cq.scalar() or 0)
-
-        real_proyectado = real_actual + comprometido + monto_linea
-        pct = (real_proyectado / presupuesto_mes) * 100
+        detalle.append({
+            "cuenta_id": cta_id,
+            "cuenta_codigo": cuenta.codigo if cuenta else None,
+            "cuenta_nombre": cuenta.nombre if cuenta else None,
+            "campo_id": campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
+            "nivel_control": nivel,
+            "apropiado_ytd": round(apropiado, 2),
+            "consumido_ytd": round(consumido, 2),
+            "monto_solicitado": round(monto_nuevo, 2),
+            "disponible": round(apropiado - consumido, 2),
+            "pct_proyectado": round(pct, 1),
+        })
 
         if pct >= (cfg.umbral_bloqueo or 100):
             bloqueado = True
-            alertas.append(
-                f"{cuenta.codigo} {cuenta.nombre}: {pct:.0f}% del presupuesto "
-                f"(RD$ {real_proyectado:,.2f} / {presupuesto_mes:,.2f}) — EXCEDIDO"
-            )
+            estado = "EXCEDIDO"
         elif pct >= (cfg.umbral_alerta or 85):
-            alertas.append(
-                f"{cuenta.codigo} {cuenta.nombre}: {pct:.0f}% del presupuesto "
-                f"(RD$ {real_proyectado:,.2f} / {presupuesto_mes:,.2f}) — ALERTA"
-            )
+            estado = "ALERTA"
+        else:
+            continue
 
-    return {"alertas": alertas, "bloqueado": bloqueado}
+        alertas.append(
+            f"{cuenta.codigo if cuenta else cta_id} {cuenta.nombre if cuenta else ''}: "
+            f"{pct:.0f}% del presupuesto acumulado a {MESES_NOMBRE[hasta_mes]} "
+            f"(RD$ {proyectado:,.2f} / {apropiado:,.2f}, disponible {apropiado - consumido:,.2f}) — {estado}"
+        )
+
+    return {"alertas": alertas, "bloqueado": bloqueado, "detalle": detalle}
 
 
 def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: str,
@@ -904,6 +948,26 @@ def contabilizar_asiento(numero: str, db: Session = Depends(get_db), user=Depend
         a.contabilizado_por = user.nombre
         a.contabilizado_en = datetime.utcnow()
         _actualizar_saldos(db, a, 1)
+        # Un asiento manual no pasó por OC ni factura, así que nada devengó por él: si no
+        # consumiera aquí, dos asientos manuales seguidos no se verían entre sí. Los
+        # automáticos quedan fuera porque su módulo de origen ya devenga por su cuenta.
+        if a.tipo != "automatico":
+            for l in a.lineas:
+                cuenta = db.query(models.CuentaContable).get(l.cuenta_id)
+                if not cuenta or (cuenta.codigo or "")[0:1] not in _CLASES_PRESUPUESTABLES:
+                    continue
+                monto = Decimal(str((l.haber if cuenta.naturaleza == "acreedora" else l.debe) or 0))
+                if monto <= 0:
+                    continue
+                _registrar_mov_pres(
+                    db, tipo="DEVENGADO", fecha=a.fecha,
+                    cuenta_id=l.cuenta_id, monto=monto,
+                    campo_id=l.campo_id, unidad_negocio_id=l.unidad_negocio_id,
+                    departamento_id=l.departamento_id,
+                    origen_tipo="ASIENTO", origen_id=numero,
+                    notas=f"Devengado asiento manual {numero}",
+                    usuario_id=user.id,
+                )
         _audit(db, user, "ESTADO", "ASIENTO", numero, f"Contabilizado — total {a.total_debe}")
         db.commit()
     except Exception:
@@ -1558,7 +1622,8 @@ def _calcular_cxp_desde_lineas(lineas_data, prov):
 
 
 @router.post("/cxp")
-def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
+def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
+              db: Session = Depends(get_db),
               user=Depends(get_current_user)):
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
@@ -1576,6 +1641,32 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
         ret_itbis = Decimal(str(data.retencion_itbis or 0))
         total = subtotal + itbis - ret_isr - ret_itbis
         lineas_calc = []
+
+    # Una factura sin OC no pasó por la aprobación de compra, así que no tiene compromiso
+    # que reserve el presupuesto: el control se aplica aquí o la OC sería evadible.
+    monto_presup = _monto_presupuestario(subtotal, itbis, prov)
+    cuenta_gasto_presup = None
+    if not data.oc_id and monto_presup > 0:
+        r_pre = _get_regla_cuentas(db, "compra", "factura_proveedor")
+        cuenta_gasto_presup = next(
+            (lc["data"].cuenta_contable_id for lc in lineas_calc
+             if getattr(lc["data"], "cuenta_contable_id", None)),
+            r_pre[0] if r_pre else None,
+        )
+        if cuenta_gasto_presup:
+            ver = _verificar_presupuesto(db, [{
+                "cuenta_id": cuenta_gasto_presup,
+                "debe": float(monto_presup), "haber": 0,
+            }], data.fecha_factura)
+            if ver["bloqueado"] and not override:
+                raise HTTPException(400, {
+                    "detail": "Presupuesto insuficiente — factura sin OC bloqueada",
+                    "alertas": ver["alertas"],
+                    "detalle": ver["detalle"],
+                    "requiere_override": True,
+                })
+            if ver["bloqueado"] and override and user.rol != "admin":
+                raise HTTPException(403, "Solo un administrador puede autorizar sobregiro presupuestario")
 
     numero = get_next("CXP", db)
     cxp = models.CuentaPorPagar(
@@ -1658,6 +1749,14 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
             )
             if asiento:
                 cxp.asiento_id = asiento.id
+        if cuenta_gasto_presup and monto_presup > 0:
+            _registrar_mov_pres(
+                db, tipo="DEVENGADO", fecha=data.fecha_factura,
+                cuenta_id=cuenta_gasto_presup, monto=monto_presup,
+                origen_tipo="CXP", origen_id=numero,
+                notas=f"Devengado factura sin OC {numero} — {prov.nombre}",
+                usuario_id=user.id,
+            )
         _audit(db, user, "CREAR", "CXP", numero,
                f"Factura {prov.nombre} sub={subtotal} itbis={itbis} ret_isr={ret_isr} ret_itbis={ret_itbis} total={total}")
         db.commit()
@@ -1668,6 +1767,127 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, db: Session = Depends(get_db),
     db.refresh(cxp)
     return {"ok": True, "numero": numero, "id": cxp.id,
             "asiento": asiento.numero if asiento else None}
+
+
+def _reversar_devengado_cxp(db: Session, cxp, monto: Decimal, fecha, *,
+                            origen_tipo: str, origen_id: str, notas: str, user) -> Decimal:
+    """Reversa devengado de una CxP en la misma proporción en que se devengó.
+
+    Una nota de crédito o devolución debe devolver presupuesto a las mismas líneas que lo
+    consumieron; repartirlo de otro modo dejaría un centro de costo sobregirado y otro con
+    holgura que nunca usó. Si la factura aún no se devengó, no hay nada que reversar.
+    """
+    monto = Decimal(str(monto or 0))
+    if monto <= 0:
+        return Decimal("0")
+
+    movs = db.query(models.MovimientoPresupuestario).filter(
+        models.MovimientoPresupuestario.tipo == "DEVENGADO",
+        models.MovimientoPresupuestario.origen_tipo == "CXP",
+        models.MovimientoPresupuestario.origen_id == cxp.numero,
+        models.MovimientoPresupuestario.monto > 0,
+    ).all()
+    base = sum((Decimal(str(m.monto)) for m in movs), Decimal("0"))
+    if not movs or base <= 0:
+        return Decimal("0")
+
+    monto = min(monto, base)
+    reversado = Decimal("0")
+    for m in movs:
+        parte = (monto * Decimal(str(m.monto)) / base).quantize(Decimal("0.01"))
+        if parte <= 0:
+            continue
+        _registrar_mov_pres(
+            db, tipo="DEVENGADO", fecha=fecha,
+            cuenta_id=m.cuenta_id, monto=-parte,
+            anio=m.anio, mes=m.mes,
+            campo_id=m.campo_id, unidad_negocio_id=m.unidad_negocio_id,
+            departamento_id=m.departamento_id,
+            origen_tipo=origen_tipo, origen_id=origen_id,
+            notas=notas, usuario_id=user.id,
+        )
+        reversado += parte
+    return reversado
+
+
+def _devengar_cxp_contra_compromisos(db: Session, cxp, user) -> Decimal:
+    """Devenga una factura contra los compromisos de su OC, línea por línea.
+
+    Libera de cada compromiso solo lo que esa factura consume, no su total: una OC con
+    recepciones parciales genera varias facturas y cada una debe tomar su parte, dejando
+    el resto reservado hasta que la OC se cierre.
+    """
+    prov = db.query(models.Proveedor).get(cxp.proveedor_id) if cxp.proveedor_id else None
+    comps = db.query(models.CompromisoPresupuestario).filter(
+        models.CompromisoPresupuestario.origen_tipo == "OC",
+        models.CompromisoPresupuestario.origen_id == cxp.oc_id,
+        models.CompromisoPresupuestario.estado == "activo",
+    ).all()
+    if not comps:
+        return Decimal("0")
+
+    por_linea = {c.oc_linea_id: c for c in comps if c.oc_linea_id}
+    cxp_lineas = db.query(models.LineaCxP).filter(models.LineaCxP.cxp_id == cxp.id).all()
+
+    def _saldo(c):
+        return Decimal(str(c.monto or 0)) - Decimal(str(c.monto_ejecutado or 0))
+
+    reparto, sin_compromiso = [], Decimal("0")
+    for cl in cxp_lineas:
+        monto_l = _monto_presupuestario(cl.subtotal, cl.monto_itbis, prov)
+        if monto_l <= 0:
+            continue
+        comp = por_linea.get(cl.oc_linea_id)
+        if comp:
+            reparto.append((comp, monto_l))
+        else:
+            sin_compromiso += monto_l
+
+    # Factura de cabecera, o líneas que no mapean a una línea de OC: prorratear
+    # entre los compromisos abiertos según el saldo que le queda a cada uno.
+    pendiente = sin_compromiso if cxp_lineas else _monto_presupuestario(cxp.subtotal, cxp.itbis, prov)
+    if pendiente > 0:
+        abiertos = [c for c in comps if _saldo(c) > 0]
+        saldo_total = sum((_saldo(c) for c in abiertos), Decimal("0"))
+        if abiertos and saldo_total > 0:
+            for c in abiertos:
+                reparto.append((c, pendiente * _saldo(c) / saldo_total))
+
+    devengado_total = Decimal("0")
+    for comp, monto_fact in reparto:
+        monto_fact = monto_fact.quantize(Decimal("0.01"))
+        if monto_fact <= 0:
+            continue
+        liberar = min(monto_fact, max(Decimal("0"), _saldo(comp)))
+
+        if liberar > 0:
+            comp.monto_ejecutado = Decimal(str(comp.monto_ejecutado or 0)) + liberar
+            _registrar_mov_pres(
+                db, tipo="LIBERACION", fecha=cxp.fecha_factura,
+                cuenta_id=comp.cuenta_id, monto=-liberar,
+                anio=comp.anio, mes=comp.mes,
+                campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+                departamento_id=comp.departamento_id,
+                origen_tipo="CXP", origen_id=cxp.numero,
+                notas=f"Liberación compromiso OC {cxp.oc_id} por factura {cxp.numero}",
+                usuario_id=user.id,
+            )
+        if _saldo(comp) <= Decimal("0.005"):
+            comp.estado = "ejecutado"
+
+        _registrar_mov_pres(
+            db, tipo="DEVENGADO", fecha=cxp.fecha_factura,
+            cuenta_id=comp.cuenta_id, monto=monto_fact,
+            anio=comp.anio, mes=comp.mes,
+            campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+            departamento_id=comp.departamento_id,
+            origen_tipo="CXP", origen_id=cxp.numero,
+            notas=f"Devengado factura {cxp.numero}",
+            usuario_id=user.id,
+        )
+        devengado_total += monto_fact
+
+    return devengado_total
 
 
 @router.post("/cxp/{cxp_id}/validar")
@@ -1733,30 +1953,16 @@ def validar_cxp(cxp_id: int, db: Session = Depends(get_db),
         return {"ok": False, "errores": errores, "alertas": alertas,
                 "mensaje": "Three-way match falló — corrija las diferencias"}
 
+    devengado_total = Decimal("0")
     if cxp.oc_id:
-        comps = db.query(models.CompromisoPresupuestario).filter(
-            models.CompromisoPresupuestario.origen_tipo == "OC",
-            models.CompromisoPresupuestario.origen_id == cxp.oc_id,
-            models.CompromisoPresupuestario.estado == "activo",
-        ).all()
-        for comp in comps:
-            comp.estado = "ejecutado"
-            _registrar_mov_pres(
-                db, tipo="DEVENGADO", fecha=cxp.fecha_factura,
-                cuenta_id=comp.cuenta_id, monto=comp.monto,
-                anio=comp.anio, mes=comp.mes,
-                campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
-                departamento_id=comp.departamento_id,
-                origen_tipo="CXP", origen_id=cxp.numero,
-                notas=f"Devengado desde factura {cxp.numero}",
-                usuario_id=user.id,
-            )
+        devengado_total = _devengar_cxp_contra_compromisos(db, cxp, user)
 
     _audit(db, user, "VALIDAR", "CXP", cxp.numero,
-           f"Three-way match OK — compromiso ejecutado" + (f" (alertas: {len(alertas)})" if alertas else ""))
+           f"Three-way match OK — devengado RD$ {devengado_total:,.2f}" +
+           (f" (alertas: {len(alertas)})" if alertas else ""))
     db.commit()
-    return {"ok": True, "alertas": alertas,
-            "mensaje": "Factura validada — compromiso presupuestario ejecutado"}
+    return {"ok": True, "alertas": alertas, "devengado": float(devengado_total),
+            "mensaje": "Factura validada — presupuesto devengado"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1903,6 +2109,7 @@ def crear_nota_credito(data: schemas.NotaCreditoCreate, db: Session = Depends(ge
     db.flush()
 
     cxp_numero = None
+    presup_reversado = Decimal("0")
     if data.cxp_id:
         cxp = db.query(models.CuentaPorPagar).get(data.cxp_id)
         if cxp:
@@ -1913,6 +2120,11 @@ def crear_nota_credito(data: schemas.NotaCreditoCreate, db: Session = Depends(ge
                 cxp.estado = "parcial"
             cxp_numero = cxp.numero
             nc.referencia_id = cxp.id
+            presup_reversado = _reversar_devengado_cxp(
+                db, cxp, _monto_presupuestario(subtotal, itbis, prov), data.fecha,
+                origen_tipo="NC", origen_id=numero,
+                notas=f"Reverso por nota de crédito {numero}", user=user,
+            )
 
     asiento = None
     r_factura = _get_regla_cuentas(db, "compra", "factura_proveedor")
@@ -1955,7 +2167,8 @@ def crear_nota_credito(data: schemas.NotaCreditoCreate, db: Session = Depends(ge
     db.refresh(nc)
     return {"ok": True, "numero": numero, "id": nc.id,
             "asiento": asiento.numero if asiento else None,
-            "cxp_ajustada": cxp_numero}
+            "cxp_ajustada": cxp_numero,
+            "presupuesto_reversado": float(presup_reversado)}
 
 
 @router.get("/notas-credito")
@@ -2714,8 +2927,8 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
         lq = db.query(
             models.LineaAsiento.cuenta_id,
             extract("month", models.AsientoContable.fecha).label("mes"),
-            func.coalesce(func.sum(models.LineaAsiento.debe), 0).label("total_debe"),
-            func.coalesce(func.sum(models.LineaAsiento.haber), 0).label("total_haber"),
+            sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.debe), 0).label("total_debe"),
+            sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.haber), 0).label("total_haber"),
         ).join(
             models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
         ).filter(
@@ -2746,7 +2959,7 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
     compromisos_raw = db.query(
         models.CompromisoPresupuestario.cuenta_id,
         models.CompromisoPresupuestario.mes,
-        func.coalesce(func.sum(models.CompromisoPresupuestario.monto), 0).label("total"),
+        sqlfunc.coalesce(sqlfunc.sum(models.CompromisoPresupuestario.monto), 0).label("total"),
     ).filter(
         models.CompromisoPresupuestario.anio == anio,
         models.CompromisoPresupuestario.estado == "activo",
@@ -3056,34 +3269,69 @@ def listar_mov_pres(anio: int = Query(...), tipo: str = None, cuenta_id: int = N
 
 
 @router.get("/ejecucion-presupuestaria")
-def ejecucion_presupuestaria(anio: int = Query(...), campo_id: str = None,
+def ejecucion_presupuestaria(anio: int = Query(...),
+                              mes: int = Query(None, ge=1, le=12),
+                              campo_id: str = None,
                               unidad_negocio_id: int = None, departamento_id: int = None,
+                              escenario: str = "principal",
                               db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Resumen de ejecución: apropiado, comprometido, devengado, pagado, disponible por cuenta."""
+    """Ejecución presupuestaria acumulada: apropiado, comprometido, devengado, pagado, disponible.
+
+    El apropiado se lee de Presupuesto, que es la fuente autoritativa de la apropiación;
+    el consumo, de MovimientoPresupuestario. `mes=N` acumula enero..N (YTD); sin `mes`, el año completo.
+    """
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
-    q = db.query(
+
+    hasta_mes = mes or 12
+    acum: dict = {}
+
+    def _slot(cta_id):
+        if cta_id not in acum:
+            acum[cta_id] = {"apropiado": 0.0, "COMPROMISO": 0.0, "LIBERACION": 0.0,
+                            "DEVENGADO": 0.0, "PAGADO": 0.0}
+        return acum[cta_id]
+
+    pq = db.query(models.Presupuesto).filter(
+        models.Presupuesto.anio == anio,
+        models.Presupuesto.estado == "aprobado",
+        models.Presupuesto.escenario == escenario,
+    )
+    if campo_id:
+        pq = pq.filter(models.Presupuesto.campo_id == campo_id)
+    if unidad_negocio_id:
+        pq = pq.filter(models.Presupuesto.unidad_negocio_id == unidad_negocio_id)
+    if departamento_id:
+        pq = pq.filter(models.Presupuesto.departamento_id == departamento_id)
+
+    for p in pq.all():
+        slot = _slot(p.cuenta_id)
+        for mk in MK_PRES[:hasta_mes]:
+            slot["apropiado"] += float(getattr(p, mk) or 0)
+
+    mq = db.query(
         models.MovimientoPresupuestario.cuenta_id,
         models.MovimientoPresupuestario.tipo,
-        func.coalesce(func.sum(models.MovimientoPresupuestario.monto), 0).label("total"),
-    ).filter(models.MovimientoPresupuestario.anio == anio)
+        sqlfunc.coalesce(sqlfunc.sum(models.MovimientoPresupuestario.monto), 0).label("total"),
+    ).filter(
+        models.MovimientoPresupuestario.anio == anio,
+        models.MovimientoPresupuestario.mes <= hasta_mes,
+    )
     if campo_id:
-        q = q.filter(models.MovimientoPresupuestario.campo_id == campo_id)
+        mq = mq.filter(models.MovimientoPresupuestario.campo_id == campo_id)
     if unidad_negocio_id:
-        q = q.filter(models.MovimientoPresupuestario.unidad_negocio_id == unidad_negocio_id)
+        mq = mq.filter(models.MovimientoPresupuestario.unidad_negocio_id == unidad_negocio_id)
     if departamento_id:
-        q = q.filter(models.MovimientoPresupuestario.departamento_id == departamento_id)
-    rows = q.group_by(
+        mq = mq.filter(models.MovimientoPresupuestario.departamento_id == departamento_id)
+    rows = mq.group_by(
         models.MovimientoPresupuestario.cuenta_id,
         models.MovimientoPresupuestario.tipo,
     ).all()
 
-    acum: dict = {}
     for r in rows:
-        if r.cuenta_id not in acum:
-            acum[r.cuenta_id] = {"APROPIACION": 0, "MODIFICACION": 0, "COMPROMISO": 0,
-                                 "DEVENGADO": 0, "PAGADO": 0, "TRANSFERENCIA": 0, "LIBERACION": 0}
-        acum[r.cuenta_id][r.tipo] = float(r.total)
+        slot = _slot(r.cuenta_id)
+        if r.tipo in slot:
+            slot[r.tipo] = float(r.total)
 
     cta_ids = set(acum.keys())
     ctas = {c.id: c for c in db.query(models.CuentaContable).filter(
@@ -3092,11 +3340,12 @@ def ejecucion_presupuestaria(anio: int = Query(...), campo_id: str = None,
     result = []
     for cta_id, tots in acum.items():
         cta = ctas.get(cta_id)
-        apropiado = tots["APROPIACION"] + tots["MODIFICACION"] + tots["TRANSFERENCIA"]
+        apropiado = tots["apropiado"]
         comprometido = tots["COMPROMISO"] + tots["LIBERACION"]
         devengado = tots["DEVENGADO"]
         pagado = tots["PAGADO"]
         disponible = apropiado - comprometido - devengado
+        pct = ((comprometido + devengado) / apropiado * 100) if apropiado else 0.0
         result.append({
             "cuenta_id": cta_id,
             "cuenta_codigo": cta.codigo if cta else None,
@@ -3106,6 +3355,7 @@ def ejecucion_presupuestaria(anio: int = Query(...), campo_id: str = None,
             "devengado": round(devengado, 2),
             "pagado": round(pagado, 2),
             "disponible": round(disponible, 2),
+            "pct_ejecucion": round(pct, 1),
         })
     result.sort(key=lambda r: r.get("cuenta_codigo") or "")
     return result
@@ -3176,6 +3426,70 @@ def liberar_compromisos_por_origen(origen_id: str, db: Session = Depends(get_db)
     ).update({"estado": "liberado"})
     db.commit()
     return {"ok": True, "liberados": n}
+
+
+@router.post("/compromisos-presupuestarios/backfill-liberaciones")
+def backfill_liberaciones(anio: int = Query(None), dry_run: bool = Query(True),
+                          db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Emite las LIBERACION faltantes de compromisos ya ejecutados/cancelados.
+
+    Antes de este fix, ejecutar un compromiso registraba DEVENGADO sin liberar el
+    COMPROMISO, por lo que el consumo se contaba dos veces. Es idempotente: cada
+    liberación de respaldo lleva un token estable en `notas` y no se vuelve a emitir.
+    Corre con dry_run=true primero para ver el impacto.
+    """
+    q = db.query(models.CompromisoPresupuestario).filter(
+        models.CompromisoPresupuestario.estado.in_(("ejecutado", "cancelado", "liberado"))
+    )
+    if anio:
+        q = q.filter(models.CompromisoPresupuestario.anio == anio)
+
+    creados, omitidos, total = [], 0, Decimal("0")
+    for comp in q.all():
+        token = f"[backfill:comp:{comp.id}]"
+        ya = db.query(models.MovimientoPresupuestario.id).filter(
+            models.MovimientoPresupuestario.tipo == "LIBERACION",
+            models.MovimientoPresupuestario.notas.like(f"%{token}%"),
+        ).first()
+        if ya:
+            omitidos += 1
+            continue
+
+        existente = db.query(models.MovimientoPresupuestario.id).filter(
+            models.MovimientoPresupuestario.tipo == "LIBERACION",
+            models.MovimientoPresupuestario.anio == comp.anio,
+            models.MovimientoPresupuestario.mes == comp.mes,
+            models.MovimientoPresupuestario.cuenta_id == comp.cuenta_id,
+            models.MovimientoPresupuestario.origen_id == comp.origen_id,
+        ).first()
+        if existente:
+            omitidos += 1
+            continue
+
+        total += Decimal(str(comp.monto or 0))
+        creados.append({"compromiso_id": comp.id, "origen_id": comp.origen_id,
+                        "cuenta_id": comp.cuenta_id, "anio": comp.anio, "mes": comp.mes,
+                        "monto": float(comp.monto or 0), "estado": comp.estado})
+        if not dry_run:
+            _registrar_mov_pres(
+                db, tipo="LIBERACION",
+                fecha=date(comp.anio, comp.mes, 1),
+                cuenta_id=comp.cuenta_id, monto=-Decimal(str(comp.monto or 0)),
+                anio=comp.anio, mes=comp.mes,
+                campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+                departamento_id=comp.departamento_id,
+                origen_tipo=comp.origen_tipo, origen_id=comp.origen_id,
+                notas=f"Liberación de respaldo compromiso {comp.estado} {token}",
+                usuario_id=user.id,
+            )
+
+    if not dry_run and creados:
+        _audit(db, user, "BACKFILL", "COMPROMISO", str(anio or "todos"),
+               f"{len(creados)} liberaciones emitidas por RD$ {total:,.2f}")
+        db.commit()
+
+    return {"ok": True, "dry_run": dry_run, "creados": len(creados),
+            "omitidos": omitidos, "monto_liberado": float(total), "detalle": creados[:100]}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3408,7 +3722,7 @@ def listar_escenarios(anio: int = Query(...), db: Session = Depends(get_db),
                       user=Depends(get_current_user)):
     rows = db.query(
         models.Presupuesto.escenario,
-        func.count(models.Presupuesto.id).label("cantidad"),
+        sqlfunc.count(models.Presupuesto.id).label("cantidad"),
     ).filter(models.Presupuesto.anio == anio).group_by(
         models.Presupuesto.escenario).all()
     return [{"escenario": r.escenario, "cantidad": r.cantidad} for r in rows]

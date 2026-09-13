@@ -1125,6 +1125,8 @@ class CompromisoPresupuestario(Base):
     unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"))
     departamento_id = Column(Integer, ForeignKey("departamentos.id"))
     monto = Column(Numeric(14, 2), nullable=False)
+    monto_ejecutado = Column(Numeric(14, 2), default=0)
+    oc_linea_id = Column(Integer, ForeignKey("ordenes_compra_lineas.id"), index=True)
     origen_tipo = Column(String(20))
     origen_id = Column(String(20), index=True)
     estado = Column(String(20), default="activo")

@@ -131,6 +131,10 @@ def run_migrations():
         )""",
         "CREATE INDEX IF NOT EXISTS ix_compromisos_origen ON compromisos_presupuestarios(origen_id)",
         "CREATE INDEX IF NOT EXISTS ix_compromisos_cuenta_anio ON compromisos_presupuestarios(cuenta_id, anio)",
+        # Compromiso por línea de OC + ejecución parcial
+        "ALTER TABLE compromisos_presupuestarios ADD COLUMN IF NOT EXISTS oc_linea_id INTEGER REFERENCES ordenes_compra_lineas(id)",
+        "ALTER TABLE compromisos_presupuestarios ADD COLUMN IF NOT EXISTS monto_ejecutado NUMERIC(14,2) DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS ix_compromisos_oc_linea ON compromisos_presupuestarios(oc_linea_id)",
         # Presupuesto Documento (presupuesto maestro con nombre y período)
         """CREATE TABLE IF NOT EXISTS presupuestos_documento (
             id SERIAL PRIMARY KEY,
