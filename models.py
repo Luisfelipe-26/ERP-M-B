@@ -1060,7 +1060,10 @@ class DepreciacionHistorial(Base):
 
 class PresupuestoDocumento(Base):
     __tablename__ = "presupuestos_documento"
-    id = Column(Integer, primary_key=True, index=True)
+    # Sin index=True: la PK ya está indexada, y el índice implícito chocaba de nombre
+    # con el de presupuestos.documento_id (ambos "ix_presupuestos_documento_id"),
+    # lo que impedía construir el esquema desde los modelos.
+    id = Column(Integer, primary_key=True)
     numero = Column(String(20), unique=True, index=True)
     nombre = Column(String(200), nullable=False)
     descripcion = Column(Text)

@@ -1,0 +1,4 @@
+# Dependencias solo de desarrollo — NO se instalan en producción (Render usa requirements.txt)
+-r requirements.txt
+
+pytest>=8.0
