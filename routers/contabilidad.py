@@ -3274,23 +3274,27 @@ def ejecucion_presupuestaria(anio: int = Query(...),
                               campo_id: str = None,
                               unidad_negocio_id: int = None, departamento_id: int = None,
                               escenario: str = "principal",
+                              agrupar: str = Query("linea", pattern="^(linea|cuenta)$"),
                               db: Session = Depends(get_db), user=Depends(get_current_user)):
     """Ejecución presupuestaria acumulada: apropiado, comprometido, devengado, pagado, disponible.
 
     El apropiado se lee de Presupuesto, que es la fuente autoritativa de la apropiación;
     el consumo, de MovimientoPresupuestario. `mes=N` acumula enero..N (YTD); sin `mes`, el año completo.
+    `agrupar=linea` abre por cuenta + dimensiones; `agrupar=cuenta` consolida por cuenta.
     """
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
 
     hasta_mes = mes or 12
+    por_linea = agrupar == "linea"
     acum: dict = {}
 
-    def _slot(cta_id):
-        if cta_id not in acum:
-            acum[cta_id] = {"apropiado": 0.0, "COMPROMISO": 0.0, "LIBERACION": 0.0,
-                            "DEVENGADO": 0.0, "PAGADO": 0.0}
-        return acum[cta_id]
+    def _slot(cta_id, c_id, un_id, dep_id):
+        key = (cta_id, c_id, un_id, dep_id) if por_linea else (cta_id, None, None, None)
+        if key not in acum:
+            acum[key] = {"apropiado": 0.0, "COMPROMISO": 0.0, "LIBERACION": 0.0,
+                         "DEVENGADO": 0.0, "PAGADO": 0.0}
+        return acum[key]
 
     pq = db.query(models.Presupuesto).filter(
         models.Presupuesto.anio == anio,
@@ -3305,60 +3309,195 @@ def ejecucion_presupuestaria(anio: int = Query(...),
         pq = pq.filter(models.Presupuesto.departamento_id == departamento_id)
 
     for p in pq.all():
-        slot = _slot(p.cuenta_id)
+        slot = _slot(p.cuenta_id, p.campo_id, p.unidad_negocio_id, p.departamento_id)
         for mk in MK_PRES[:hasta_mes]:
             slot["apropiado"] += float(getattr(p, mk) or 0)
 
+    M = models.MovimientoPresupuestario
     mq = db.query(
-        models.MovimientoPresupuestario.cuenta_id,
-        models.MovimientoPresupuestario.tipo,
-        sqlfunc.coalesce(sqlfunc.sum(models.MovimientoPresupuestario.monto), 0).label("total"),
-    ).filter(
-        models.MovimientoPresupuestario.anio == anio,
-        models.MovimientoPresupuestario.mes <= hasta_mes,
-    )
+        M.cuenta_id, M.campo_id, M.unidad_negocio_id, M.departamento_id, M.tipo,
+        sqlfunc.coalesce(sqlfunc.sum(M.monto), 0).label("total"),
+    ).filter(M.anio == anio, M.mes <= hasta_mes)
     if campo_id:
-        mq = mq.filter(models.MovimientoPresupuestario.campo_id == campo_id)
+        mq = mq.filter(M.campo_id == campo_id)
     if unidad_negocio_id:
-        mq = mq.filter(models.MovimientoPresupuestario.unidad_negocio_id == unidad_negocio_id)
+        mq = mq.filter(M.unidad_negocio_id == unidad_negocio_id)
     if departamento_id:
-        mq = mq.filter(models.MovimientoPresupuestario.departamento_id == departamento_id)
-    rows = mq.group_by(
-        models.MovimientoPresupuestario.cuenta_id,
-        models.MovimientoPresupuestario.tipo,
-    ).all()
+        mq = mq.filter(M.departamento_id == departamento_id)
+    rows = mq.group_by(M.cuenta_id, M.campo_id, M.unidad_negocio_id,
+                       M.departamento_id, M.tipo).all()
 
     for r in rows:
-        slot = _slot(r.cuenta_id)
+        slot = _slot(r.cuenta_id, r.campo_id, r.unidad_negocio_id, r.departamento_id)
         if r.tipo in slot:
-            slot[r.tipo] = float(r.total)
+            slot[r.tipo] += float(r.total)
 
-    cta_ids = set(acum.keys())
     ctas = {c.id: c for c in db.query(models.CuentaContable).filter(
-        models.CuentaContable.id.in_(cta_ids)).all()} if cta_ids else {}
+        models.CuentaContable.id.in_({k[0] for k in acum})).all()} if acum else {}
+    campos = {c.id_campo: c.nombre for c in db.query(models.Campo).all()}
+    unids = {u.id: u.nombre for u in db.query(models.UnidadNegocio).all()}
+    deptos = {d.id: d.nombre for d in db.query(models.Departamento).all()}
 
     result = []
-    for cta_id, tots in acum.items():
+    for (cta_id, c_id, un_id, dep_id), tots in acum.items():
         cta = ctas.get(cta_id)
         apropiado = tots["apropiado"]
         comprometido = tots["COMPROMISO"] + tots["LIBERACION"]
         devengado = tots["DEVENGADO"]
-        pagado = tots["PAGADO"]
         disponible = apropiado - comprometido - devengado
         pct = ((comprometido + devengado) / apropiado * 100) if apropiado else 0.0
         result.append({
             "cuenta_id": cta_id,
             "cuenta_codigo": cta.codigo if cta else None,
             "cuenta_nombre": cta.nombre if cta else None,
+            "campo_id": c_id, "campo_nombre": campos.get(c_id),
+            "unidad_negocio_id": un_id, "unidad_negocio_nombre": unids.get(un_id),
+            "departamento_id": dep_id, "departamento_nombre": deptos.get(dep_id),
             "apropiado": round(apropiado, 2),
             "comprometido": round(comprometido, 2),
             "devengado": round(devengado, 2),
-            "pagado": round(pagado, 2),
+            "pagado": round(tots["PAGADO"], 2),
             "disponible": round(disponible, 2),
             "pct_ejecucion": round(pct, 1),
+            # Consumo sobre una combinación que nadie presupuestó: no es ruido,
+            # es gasto fuera de presupuesto y debe verse.
+            "sin_presupuesto": apropiado <= 0 and (comprometido + devengado) > 0,
         })
-    result.sort(key=lambda r: r.get("cuenta_codigo") or "")
+    result.sort(key=lambda r: (r.get("cuenta_codigo") or "", r.get("campo_id") or "",
+                               r.get("departamento_nombre") or ""))
     return result
+
+
+@router.get("/ejecucion-presupuestaria/detalle")
+def ejecucion_presupuestaria_detalle(
+    anio: int = Query(...), cuenta_id: int = Query(...),
+    mes: int = Query(None, ge=1, le=12),
+    campo_id: str = None, unidad_negocio_id: int = None, departamento_id: int = None,
+    db: Session = Depends(get_db), user=Depends(get_current_user),
+):
+    """Documentos que componen una línea presupuestaria: las OC y facturas detrás del saldo."""
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
+
+    M = models.MovimientoPresupuestario
+    q = db.query(M).filter(M.anio == anio, M.mes <= (mes or 12), M.cuenta_id == cuenta_id)
+    for col, val in ((M.campo_id, campo_id), (M.unidad_negocio_id, unidad_negocio_id),
+                     (M.departamento_id, departamento_id)):
+        q = q.filter(col == val) if val else q.filter(col.is_(None))
+
+    movs = q.order_by(M.fecha, M.id).all()
+    if not movs:
+        return {"total": 0, "items": []}
+
+    oc_ids = {m.origen_id for m in movs if m.origen_tipo == "OC"}
+    cxp_nums = {m.origen_id for m in movs if m.origen_tipo in ("CXP", "NC", "DEV-GR")}
+    ocs = {o.oc_id: o for o in db.query(models.OrdenCompra).filter(
+        models.OrdenCompra.oc_id.in_(oc_ids)).all()} if oc_ids else {}
+    cxps = {c.numero: c for c in db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.numero.in_(cxp_nums)).all()} if cxp_nums else {}
+    prov_ids = {c.proveedor_id for c in cxps.values() if c.proveedor_id}
+    provs = {p.id: p.nombre for p in db.query(models.Proveedor).filter(
+        models.Proveedor.id.in_(prov_ids)).all()} if prov_ids else {}
+
+    items = []
+    for m in movs:
+        oc = ocs.get(m.origen_id)
+        cxp = cxps.get(m.origen_id)
+        items.append({
+            "id": m.id, "fecha": m.fecha, "tipo": m.tipo,
+            "origen_tipo": m.origen_tipo, "origen_id": m.origen_id,
+            "monto": float(m.monto or 0), "notas": m.notas,
+            "documento": oc.oc_id if oc else (cxp.numero if cxp else m.origen_id),
+            "proveedor": (oc.proveedor if oc else provs.get(cxp.proveedor_id) if cxp else None),
+            "estado_documento": (oc.estado if oc else cxp.estado if cxp else None),
+            "oc_vinculada": cxp.oc_id if cxp else None,
+        })
+
+    return {
+        "total": len(items),
+        "comprometido": round(sum(i["monto"] for i in items
+                                  if i["tipo"] in ("COMPROMISO", "LIBERACION")), 2),
+        "devengado": round(sum(i["monto"] for i in items if i["tipo"] == "DEVENGADO"), 2),
+        "pagado": round(sum(i["monto"] for i in items if i["tipo"] == "PAGADO"), 2),
+        "items": items,
+    }
+
+
+@router.get("/ejecucion-presupuestaria/export")
+def exportar_ejecucion_presupuestaria(
+    anio: int = Query(...), mes: int = Query(None, ge=1, le=12),
+    campo_id: str = None, unidad_negocio_id: int = None, departamento_id: int = None,
+    escenario: str = "principal",
+    agrupar: str = Query("linea", pattern="^(linea|cuenta)$"),
+    db: Session = Depends(get_db), user=Depends(get_current_user),
+):
+    """Descarga la ejecución presupuestaria como .xlsx."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from fastapi import Response
+    from io import BytesIO
+
+    filas = ejecucion_presupuestaria(
+        anio=anio, mes=mes, campo_id=campo_id, unidad_negocio_id=unidad_negocio_id,
+        departamento_id=departamento_id, escenario=escenario, agrupar=agrupar,
+        db=db, user=user,
+    )
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"Ejecución {anio}"
+
+    periodo = f"acumulado a {MESES_NOMBRE[mes]}" if mes else "año completo"
+    ws.append([f"Ejecución presupuestaria {anio} — {periodo}"])
+    ws["A1"].font = Font(bold=True, size=13)
+    ws.append([])
+
+    cols = ["Cuenta", "Descripción", "Campo", "Unidad de negocio", "Departamento",
+            "Presupuestado", "Comprometido", "Ejecutado", "Disponible", "% Ejecución", "Pagado"]
+    ws.append(cols)
+    cab = ws[ws.max_row]
+    for c in cab:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="2D6A4F")
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    rojo = Font(color="C00000", bold=True)
+    for f in filas:
+        ws.append([
+            f["cuenta_codigo"], f["cuenta_nombre"],
+            f.get("campo_nombre") or f.get("campo_id") or "",
+            f.get("unidad_negocio_nombre") or "", f.get("departamento_nombre") or "",
+            f["apropiado"], f["comprometido"], f["devengado"], f["disponible"],
+            f["pct_ejecucion"] / 100, f["pagado"],
+        ])
+        fila = ws.max_row
+        for col in range(6, 12):
+            ws.cell(fila, col).number_format = '#,##0.00' if col != 10 else '0.0%'
+        if f["disponible"] < 0:
+            ws.cell(fila, 9).font = rojo
+
+    n = ws.max_row
+    ws.append(["TOTAL", "", "", "", "",
+               *[f"=SUM({get_column_letter(c)}4:{get_column_letter(c)}{n})" for c in (6, 7, 8, 9)],
+               "", f"=SUM(K4:K{n})"])
+    for c in ws[ws.max_row]:
+        c.font = Font(bold=True)
+        if c.column >= 6:
+            c.number_format = '#,##0.00'
+
+    for i, w in enumerate([12, 34, 16, 20, 20, 15, 15, 15, 15, 12, 15], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A4"
+
+    buf = BytesIO()
+    wb.save(buf)
+    nombre = f"ejecucion_presupuestaria_{anio}{'_m' + str(mes) if mes else ''}.xlsx"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nombre}"'},
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
