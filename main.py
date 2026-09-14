@@ -9,7 +9,7 @@ from routers import (
     auth, campos, trabajadores, actividades, productos,
     contabilidad, sequences, admin, roles,
     ordenes, dashboard, inventario, reportes, compras,
-    audit_log, tipos_producto, proveedores,
+    audit_log, tipos_producto, categorias_producto, proveedores,
     clima, sanidad, riego, analytics,
     clientes, cuentas_bancarias,
 )
@@ -568,6 +568,7 @@ app.include_router(reportes.router)
 app.include_router(compras.router)
 app.include_router(audit_log.router)
 app.include_router(tipos_producto.router)
+app.include_router(categorias_producto.router)
 app.include_router(proveedores.router)
 app.include_router(clima.router)
 app.include_router(sanidad.router)

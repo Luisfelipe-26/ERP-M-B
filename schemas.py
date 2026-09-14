@@ -1,7 +1,9 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime, date
 from decimal import Decimal
+
+REGIMENES_ITBIS = ("itbis_18", "itbis_0", "exento")
 
 
 # Auth
@@ -157,6 +159,24 @@ class ProductoCreate(BaseModel):
     cuenta_inventario_id: Optional[int] = None
     cuenta_costo_id: Optional[int] = None
     cuenta_ingreso_id: Optional[int] = None
+    categoria_id: Optional[int] = None
+    impuesto_compra: Optional[str] = "itbis_18"   # régimen con el que nacen sus líneas de OC
+    unidad_produccion: Optional[str] = None
+    factor_conversion: Optional[float] = 1
+
+    @field_validator("impuesto_compra")
+    @classmethod
+    def _regimen_valido(cls, v):
+        if v is not None and v not in REGIMENES_ITBIS:
+            raise ValueError(f"impuesto_compra debe ser uno de {REGIMENES_ITBIS}")
+        return v
+
+    @field_validator("factor_conversion")
+    @classmethod
+    def _factor_positivo(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("factor_conversion debe ser mayor a 0")
+        return v
 
 class ProductoOut(ProductoCreate):
     id: int
