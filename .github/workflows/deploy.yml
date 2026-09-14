@@ -32,4 +32,5 @@ jobs:
           resp=$(curl -sS -X POST "$HOOK" -w "\n%{http_code}")
           code=$(echo "$resp" | tail -1)
           echo "${{ matrix.empresa }}: HTTP $code — $(echo "$resp" | head -1)"
-          [ "$code" = "200" ] || exit 1
+          # 200 = deploy creado; 202 = aceptado y en cola porque ya había uno en curso
+          case "$code" in 2*) ;; *) exit 1 ;; esac
