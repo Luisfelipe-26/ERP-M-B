@@ -30,8 +30,17 @@ def db():
 
 
 @pytest.fixture
-def user():
-    return types.SimpleNamespace(id=1, rol="admin", nombre="test")
+def user(db):
+    """Usuario real: el sistema de permisos recorre `roles`, que un stub no tiene."""
+    return usuario(db, "admin")
+
+
+def usuario(db, rol: str):
+    u = models.Usuario(nombre=f"test-{rol}", email=f"{rol}@test.local",
+                       hashed_password="x", rol=rol, activo=True)
+    db.add(u)
+    db.commit()
+    return u
 
 
 @pytest.fixture

@@ -18,10 +18,18 @@ router = APIRouter(prefix="/api/inventario", tags=["inventario"])
 MOTIVOS_GI = ["Merma", "Vencimiento", "Devolucion Proveedor", "Muestra", "Uso No Productivo", "Otro"]
 
 
+def _f(v) -> float:
+    """Stock y costos son NUMERIC y vuelven como Decimal, mientras las cantidades llegan
+    del request como float. Sumarlos lanza TypeError, así que la aritmética de inventario
+    se hace toda en float."""
+    return float(v or 0)
+
+
 def _recalc_avg_cost(producto: models.Producto, qty_in: float, precio_compra: float) -> float:
     """Weighted average cost recalculation on goods receipt."""
-    stock = producto.stock_actual or 0
-    costo_actual = producto.costo_promedio or producto.costo_unitario or 0
+    stock = _f(producto.stock_actual)
+    costo_actual = _f(producto.costo_promedio) or _f(producto.costo_unitario)
+    qty_in, precio_compra = _f(qty_in), _f(precio_compra)
     if stock + qty_in == 0:
         return precio_compra
     return ((stock * costo_actual) + (qty_in * precio_compra)) / (stock + qty_in)
@@ -82,7 +90,7 @@ def list_articulos(db: Session = Depends(get_db), _=Depends(auth.get_current_use
     productos = db.query(models.Producto).filter(models.Producto.activo == True).order_by(models.Producto.tipo, models.Producto.producto).all()
     result = []
     for p in productos:
-        cp = p.costo_promedio or p.costo_unitario or 0
+        cp = _f(p.costo_promedio) or _f(p.costo_unitario)
         result.append({
             "id": p.id,
             "id_prod": p.id_prod,
@@ -98,7 +106,7 @@ def list_articulos(db: Session = Depends(get_db), _=Depends(auth.get_current_use
             "concentracion": p.concentracion,
             "activo": p.activo,
             "es_inventariable": p.es_inventariable if p.es_inventariable is not None else True,
-            "valor_inventario": round((p.stock_actual or 0) * cp, 2),
+            "valor_inventario": round(_f(p.stock_actual) * cp, 2),
             "bajo_minimo": bool(p.stock_minimo and p.stock_actual is not None and p.stock_actual <= p.stock_minimo),
         })
     return result
@@ -177,7 +185,7 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=f"'{p.producto}' es un servicio — no transacciona en inventario")
 
     nuevo_costo_promedio = _recalc_avg_cost(p, data.cantidad, data.precio_compra)
-    nuevo_stock = (p.stock_actual or 0) + data.cantidad
+    nuevo_stock = _f(p.stock_actual) + _f(data.cantidad)
     num_doc = get_next("GR", db)
 
     mov = models.MovimientoInventario(
@@ -289,11 +297,11 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
     if not p.es_inventariable:
         raise HTTPException(status_code=400, detail=f"'{p.producto}' es un servicio — no transacciona en inventario")
 
-    if (p.stock_actual or 0) < data.cantidad:
+    if _f(p.stock_actual) < _f(data.cantidad):
         raise HTTPException(status_code=400, detail=f"Stock insuficiente. Disponible: {p.stock_actual} {p.unidad}")
 
-    nuevo_stock = (p.stock_actual or 0) - data.cantidad
-    cp = p.costo_promedio or p.costo_unitario or 0
+    nuevo_stock = _f(p.stock_actual) - _f(data.cantidad)
+    cp = _f(p.costo_promedio) or _f(p.costo_unitario)
     num_doc = get_next("GI", db)
 
     mov = models.MovimientoInventario(
@@ -321,7 +329,7 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
               {"producto": data.producto_id, "cantidad": data.cantidad, "motivo": data.motivo,
                "ot_id": data.ot_id})
 
-    monto = round(data.cantidad * cp, 2)
+    monto = round(_f(data.cantidad) * cp, 2)
     if monto > 0 and p.cuenta_inventario_id and p.cuenta_costo_id:
         r_inv = _get_regla_cuentas(db, "inventario", "salida")
         cta_debe = r_inv[0] if r_inv else p.cuenta_costo_id
@@ -368,11 +376,11 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
     if not p.es_inventariable:
         raise HTTPException(status_code=400, detail=f"'{p.producto}' es un servicio — no transacciona en inventario")
 
-    diferencia = data.cantidad_contada - (p.stock_actual or 0)
+    diferencia = _f(data.cantidad_contada) - _f(p.stock_actual)
     if diferencia == 0:
         raise HTTPException(status_code=400, detail="No hay diferencia entre el conteo y el stock del sistema")
 
-    cp = p.costo_promedio or p.costo_unitario or 0
+    cp = _f(p.costo_promedio) or _f(p.costo_unitario)
     tipo = "entrada" if diferencia > 0 else "salida"
     num_doc = get_next("AJ", db)
 
@@ -402,7 +410,7 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
               {"producto": data.producto_id, "stock_sistema": float(stock_anterior),
                "conteo": data.cantidad_contada, "diferencia": diferencia})
 
-    monto_ajuste = round(abs(diferencia) * cp, 2)
+    monto_ajuste = round(abs(_f(diferencia)) * cp, 2)
     if monto_ajuste > 0 and p.cuenta_inventario_id:
         r_aj = _get_regla_cuentas(db, "inventario", "ajuste")
         cta_ajuste = r_aj[0] if r_aj else p.cuenta_costo_id
@@ -480,8 +488,8 @@ def devolucion_gi(
     if not p:
         raise HTTPException(404, "Producto no encontrado")
 
-    nuevo_stock = (p.stock_actual or 0) + qty
-    cp = gi.costo_unitario or p.costo_promedio or p.costo_unitario or 0
+    nuevo_stock = _f(p.stock_actual) + _f(qty)
+    cp = _f(gi.costo_unitario) or _f(p.costo_promedio) or _f(p.costo_unitario)
     num_doc = get_next("DEV", db)
 
     mov = models.MovimientoInventario(
@@ -508,7 +516,7 @@ def devolucion_gi(
               {"gi_original": gi.num_documento, "producto": gi.producto_id,
                "cantidad": qty, "disponible_antes": disponible})
 
-    monto = round(qty * cp, 2)
+    monto = round(_f(qty) * cp, 2)
     if monto > 0 and p.cuenta_inventario_id and p.cuenta_costo_id:
         r_inv = _get_regla_cuentas(db, "inventario", "entrada")
         cta_debe = p.cuenta_inventario_id
@@ -678,9 +686,9 @@ def valoracion_inventario(db: Session = Depends(get_db), _=Depends(auth.get_curr
         # Los servicios (no inventariables) no forman parte del valor de inventario
         if p.es_inventariable is False:
             continue
-        cp = p.costo_promedio or p.costo_unitario or 0
+        cp = _f(p.costo_promedio) or _f(p.costo_unitario)
         stock = p.stock_actual or 0
-        valor = round(stock * cp, 2)
+        valor = round(_f(stock) * cp, 2)
         total_valor += valor
 
         tipo = p.tipo or "Sin clasificar"
@@ -1443,8 +1451,8 @@ def reconciliacion_gl(db: Session = Depends(get_db), _=Depends(auth.require_admi
     prods_sin_cuenta = []
     cuentas_inv = set()
     for p in productos:
-        cp = p.costo_promedio or p.costo_unitario or 0
-        v = round((p.stock_actual or 0) * cp, 2)
+        cp = _f(p.costo_promedio) or _f(p.costo_unitario)
+        v = round(_f(p.stock_actual) * cp, 2)
         if p.cuenta_inventario_id:
             val_con_cuenta += v
             cuentas_inv.add(p.cuenta_inventario_id)

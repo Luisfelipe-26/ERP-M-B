@@ -50,40 +50,47 @@ def delete_producto(id_prod: str, db: Session = Depends(get_db), _=Depends(auth.
     return {"ok": True}
 
 
-@router.post("/{id_prod}/movimiento", response_model=schemas.MovimientoOut)
+@router.post("/{id_prod}/movimiento")
 def registrar_movimiento(id_prod: str, data: schemas.MovimientoCreate, db: Session = Depends(get_db),
-                          current_user: models.Usuario = Depends(auth.get_current_user)):
+                          current_user: models.Usuario = Depends(auth.require_operador)):
+    """Atajo desde la ficha del producto — delega en el módulo de inventario.
+
+    Antes registraba el movimiento por su cuenta, sin número de documento, sin
+    tipo_doc, sin recalcular el costo promedio y sin asiento contable: cada uso
+    descuadraba el inventario contra contabilidad. Ahora pasa por el mismo camino
+    que /inventario/gr y /inventario/gi, que sí hacen las cuatro cosas.
+    """
+    from routers.inventario import goods_receipt, goods_issue
+
     if data.tipo not in TIPOS_MOVIMIENTO:
         raise HTTPException(status_code=400, detail=f"Tipo debe ser: {TIPOS_MOVIMIENTO}")
-    if not data.cantidad or data.cantidad <= 0:
-        raise HTTPException(status_code=400, detail="La cantidad debe ser mayor a 0")
 
-    p = db.query(models.Producto).filter(models.Producto.id_prod == id_prod, models.Producto.activo == True).first()
+    p = db.query(models.Producto).filter(
+        models.Producto.id_prod == id_prod, models.Producto.activo == True).first()
     if not p:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
-    if data.tipo == "salida" and (p.stock_actual or 0) < data.cantidad:
-        raise HTTPException(status_code=400, detail=f"Stock insuficiente. Stock actual: {p.stock_actual} {p.unidad}")
+    if data.tipo == "entrada":
+        precio = data.costo_unitario
+        if precio is None:
+            precio = float(p.costo_promedio or p.costo_unitario or 0)
+        return goods_receipt(schemas.GRCreate(
+            producto_id=id_prod,
+            cantidad=data.cantidad,
+            precio_compra=precio,
+            num_factura=data.referencia,
+            observacion=data.observacion,
+        ), db=db, current_user=current_user)
 
-    mov = models.MovimientoInventario(
+    # Una salida mueve stock y genera asiento: exige el mismo rol que /inventario/gi.
+    auth.require_supervisor(current_user)
+    return goods_issue(schemas.GICreate(
         producto_id=id_prod,
-        tipo=data.tipo,
         cantidad=data.cantidad,
-        costo_unitario=data.costo_unitario or p.costo_unitario,
+        motivo=data.motivo or "Otro",
         referencia=data.referencia,
         observacion=data.observacion,
-        usuario_id=current_user.id
-    )
-    db.add(mov)
-
-    if data.tipo == "entrada":
-        p.stock_actual = (p.stock_actual or 0) + data.cantidad
-    else:
-        p.stock_actual = (p.stock_actual or 0) - data.cantidad
-
-    db.commit()
-    db.refresh(mov)
-    return mov
+    ), db=db, current_user=current_user)
 
 
 @router.get("/{id_prod}/movimientos", response_model=List[schemas.MovimientoOut])

@@ -253,6 +253,7 @@ class MovimientoCreate(BaseModel):
     tipo: str  # entrada, salida
     cantidad: float
     costo_unitario: Optional[float] = None
+    motivo: Optional[str] = None      # lo exige el GI al que delega una salida
     referencia: Optional[str] = None
     observacion: Optional[str] = None
 
