@@ -1,7 +1,7 @@
 """Proveedores — CRUD + resumen financiero."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func as sqlfunc
+from sqlalchemy import func as sqlfunc, or_, and_
 from database import get_db
 import models, auth, re
 from pydantic import BaseModel, field_validator
@@ -10,6 +10,19 @@ from typing import Optional, List
 router = APIRouter(prefix="/api/proveedores", tags=["proveedores"])
 
 RNC_RE = re.compile(r"^\d{9}$|^\d{11}$|^\d{3}-\d{7}-\d$")
+
+
+def _de_proveedor(modelo, prov):
+    """Filtro de pertenencia a un proveedor, por FK.
+
+    El nombre queda solo como respaldo para filas anteriores al FK que la migración
+    no haya podido vincular. Filtrar por nombre obligaba a bloquear renombrados y a
+    reescribir masivamente las OCs cada vez que cambiaba.
+    """
+    return or_(
+        modelo.proveedor_id == prov.id,
+        and_(modelo.proveedor_id.is_(None), modelo.proveedor == prov.nombre),
+    )
 
 
 RETENCIONES_DEFAULT = {
@@ -131,22 +144,17 @@ def update_proveedor(prov_id: int, data: ProveedorCreate, db: Session = Depends(
     if not prov:
         raise HTTPException(404, "Proveedor no encontrado")
 
-    nombre_viejo = prov.nombre
     nombre_nuevo = data.nombre.strip()
-    if nombre_nuevo != nombre_viejo:
-        ocs_vinculadas = db.query(models.OrdenCompra).filter(
-            models.OrdenCompra.proveedor == nombre_viejo,
-            models.OrdenCompra.estado.in_(["Borrador", "Aprobada", "Parcial"]),
-        ).count()
-        if ocs_vinculadas > 0:
-            raise HTTPException(
-                400,
-                f"No se puede renombrar: tiene {ocs_vinculadas} OC(s) pendientes vinculadas por nombre. "
-                "Cierre o cancele las OCs primero.",
-            )
-        db.query(models.OrdenCompra).filter(
-            models.OrdenCompra.proveedor == nombre_viejo,
-        ).update({"proveedor": nombre_nuevo}, synchronize_session=False)
+    if nombre_nuevo != prov.nombre:
+        otro = db.query(models.Proveedor).filter(
+            models.Proveedor.nombre == nombre_nuevo, models.Proveedor.id != prov_id).first()
+        if otro:
+            raise HTTPException(400, f"Ya existe otro proveedor llamado '{nombre_nuevo}'")
+        # El vínculo es por FK, así que renombrar es seguro; se propaga el nombre
+        # denormalizado para que los listados sigan mostrando el actual.
+        for modelo in (models.OrdenCompra, models.Producto):
+            db.query(modelo).filter(_de_proveedor(modelo, prov)).update(
+                {"proveedor": nombre_nuevo, "proveedor_id": prov.id}, synchronize_session=False)
 
     for k, v in data.model_dump().items():
         setattr(prov, k, v)
@@ -174,7 +182,7 @@ def delete_proveedor(prov_id: int, db: Session = Depends(get_db),
         )
 
     ocs_abiertas = db.query(models.OrdenCompra).filter(
-        models.OrdenCompra.proveedor == prov.nombre,
+        _de_proveedor(models.OrdenCompra, prov),
         models.OrdenCompra.estado.in_(["Borrador", "Aprobada", "Parcial"]),
     ).count()
     if ocs_abiertas > 0:
@@ -182,7 +190,7 @@ def delete_proveedor(prov_id: int, db: Session = Depends(get_db),
             400, f"No se puede desactivar: tiene {ocs_abiertas} OC(s) pendientes"
         )
 
-    count = db.query(models.Producto).filter(models.Producto.proveedor == prov.nombre).count()
+    count = db.query(models.Producto).filter(_de_proveedor(models.Producto, prov)).count()
     cxp_count = db.query(models.CuentaPorPagar).filter(
         models.CuentaPorPagar.proveedor_id == prov_id
     ).count()
@@ -208,7 +216,7 @@ def resumen_proveedor(prov_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Proveedor no encontrado")
 
     ocs = db.query(models.OrdenCompra).filter(
-        models.OrdenCompra.proveedor == prov.nombre,
+        _de_proveedor(models.OrdenCompra, prov),
     ).order_by(models.OrdenCompra.fecha.desc()).limit(10).all()
 
     ocs_out = [{
@@ -225,10 +233,10 @@ def resumen_proveedor(prov_id: int, db: Session = Depends(get_db),
 
     total_compras = float(db.query(
         sqlfunc.coalesce(sqlfunc.sum(models.OrdenCompra.total_estimado), 0)
-    ).filter(models.OrdenCompra.proveedor == prov.nombre).scalar() or 0)
+    ).filter(_de_proveedor(models.OrdenCompra, prov)).scalar() or 0)
 
     num_ocs = db.query(models.OrdenCompra).filter(
-        models.OrdenCompra.proveedor == prov.nombre
+        _de_proveedor(models.OrdenCompra, prov)
     ).count()
 
     cxp_items = db.query(models.CuentaPorPagar).filter(

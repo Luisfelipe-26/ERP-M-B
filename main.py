@@ -21,6 +21,7 @@ def run_migrations():
     migrations = [
         # Producto — new GL account columns
         "ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INTEGER REFERENCES proveedores(id)",
+        "UPDATE productos SET proveedor_id = p.id FROM proveedores p WHERE productos.proveedor = p.nombre AND productos.proveedor_id IS NULL",
         "ALTER TABLE productos ADD COLUMN IF NOT EXISTS cuenta_inventario_id INTEGER REFERENCES cuentas_contables(id)",
         "ALTER TABLE productos ADD COLUMN IF NOT EXISTS cuenta_costo_id INTEGER REFERENCES cuentas_contables(id)",
         "ALTER TABLE productos ADD COLUMN IF NOT EXISTS cuenta_ingreso_id INTEGER REFERENCES cuentas_contables(id)",
