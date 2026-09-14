@@ -1,0 +1,35 @@
+name: Deploy a Render (ambas empresas)
+
+# Un push a main despliega el backend de las dos empresas a la vez.
+# Desplegar solo una abre una ventana donde backend y frontend no se hablan.
+# Los hooks son URLs secretas de Render y viven en Settings → Secrets del repo.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - empresa: CORVUS
+            hook: RENDER_HOOK_CORVUS
+          - empresa: Vision Agricola
+            hook: RENDER_HOOK_VISION
+    steps:
+      - name: Disparar deploy — ${{ matrix.empresa }}
+        env:
+          HOOK: ${{ secrets[matrix.hook] }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::Falta el secreto ${{ matrix.hook }}"
+            exit 1
+          fi
+          resp=$(curl -sS -X POST "$HOOK" -w "\n%{http_code}")
+          code=$(echo "$resp" | tail -1)
+          echo "${{ matrix.empresa }}: HTTP $code — $(echo "$resp" | head -1)"
+          [ "$code" = "200" ] || exit 1
