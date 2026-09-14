@@ -52,6 +52,27 @@ def test_el_itbis_de_la_cxp_cuadra_con_el_de_sus_lineas(db, proveedor, user):
         f"el ITBIS del encabezado ({cxp.itbis}) no cuadra con el de sus líneas ({itbis_lineas})")
 
 
+def test_a_un_informal_no_se_le_carga_itbis(db, user):
+    """No es contribuyente inscrito: se le paga el subtotal, sin el 18% que antes se sumaba."""
+    informal = models.Proveedor(nombre="Vivero Don José", tipo_contribuyente="informal",
+                                retencion_isr_pct=2, retencion_itbis_pct=0)
+    db.add(informal)
+    db.commit()
+    oc, gravada, exenta = _oc_mixta(db, informal)
+
+    recibir_oc("OC-001",
+               RecepcionPayload(lineas=[RecepcionLinea(linea_id=gravada.id, cantidad_recibida=10)]),
+               db=db, current_user=user)
+
+    cxp = db.query(models.CuentaPorPagar).filter_by(oc_id="OC-001").one()
+    assert Decimal(str(cxp.subtotal)) == Decimal("50000")
+    assert Decimal(str(cxp.itbis)) == Decimal("0")
+    assert Decimal(str(cxp.retencion_isr)) == Decimal("1000")           # 2% ISR sí aplica
+    assert Decimal(str(cxp.total)) == Decimal("49000")
+    linea = db.query(models.LineaCxP).filter_by(cxp_id=cxp.id).one()
+    assert Decimal(str(linea.monto_itbis)) == Decimal("0")
+
+
 def test_el_total_de_la_cxp_es_coherente(db, proveedor, user):
     oc, gravada, exenta = _oc_mixta(db, proveedor)
 

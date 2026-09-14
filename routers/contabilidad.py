@@ -1597,6 +1597,22 @@ def detalle_cxp(cxp_id: int, db: Session = Depends(get_db),
 ITBIS_RATES = {"itbis_18": Decimal("0.18"), "itbis_0": Decimal("0"), "exento": Decimal("0")}
 
 
+def _es_informal(proveedor) -> bool:
+    return (getattr(proveedor, "tipo_contribuyente", None) or "").lower() == "informal"
+
+
+def _itbis_compra(subtotal, impuesto: str, proveedor) -> Decimal:
+    """ITBIS de una línea de compra según su régimen y quién vende.
+
+    Un proveedor informal no es contribuyente inscrito y no cobra ITBIS: sumárselo
+    lo sobrepagaba un 18% que la finca tampoco podía recuperar como crédito fiscal.
+    """
+    if _es_informal(proveedor):
+        return Decimal("0")
+    tasa = ITBIS_RATES.get(impuesto or "itbis_18", Decimal("0.18"))
+    return (Decimal(str(subtotal or 0)) * tasa).quantize(Decimal("0.01"))
+
+
 def _calcular_cxp_desde_lineas(lineas_data, prov):
     """Calculate CxP totals from line items + proveedor retenciones."""
     subtotal = Decimal("0")
@@ -1607,8 +1623,7 @@ def _calcular_cxp_desde_lineas(lineas_data, prov):
         precio = Decimal(str(l.precio_unitario or 0))
         desc = Decimal(str(l.descuento_pct or 0))
         sub = round(cant * precio * (1 - desc / 100), 2)
-        rate = ITBIS_RATES.get(l.impuesto, Decimal("0.18"))
-        mitbis = round(sub * rate, 2)
+        mitbis = _itbis_compra(sub, l.impuesto, prov)
         subtotal += sub
         itbis_total += mitbis
         lineas_out.append({"sub": sub, "mitbis": mitbis, "data": l})
@@ -1636,9 +1651,9 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
         subtotal, itbis, ret_isr, ret_itbis, total, lineas_calc = _calcular_cxp_desde_lineas(data.lineas, prov)
     else:
         subtotal = Decimal(str(data.subtotal or 0))
-        itbis = Decimal(str(data.itbis or 0))
+        itbis = Decimal("0") if _es_informal(prov) else Decimal(str(data.itbis or 0))
         ret_isr = Decimal(str(data.retencion_isr or 0))
-        ret_itbis = Decimal(str(data.retencion_itbis or 0))
+        ret_itbis = Decimal("0") if _es_informal(prov) else Decimal(str(data.retencion_itbis or 0))
         total = subtotal + itbis - ret_isr - ret_itbis
         lineas_calc = []
 

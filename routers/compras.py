@@ -9,7 +9,7 @@ import models, schemas, auth
 from routers.sequences import get_next, peek_next
 from routers.contabilidad import (_crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto,
                                   _registrar_mov_pres, _monto_presupuestario,
-                                  _reversar_devengado_cxp, ITBIS_RATES)
+                                  _reversar_devengado_cxp, _itbis_compra)
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -398,11 +398,6 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
     }
 
 
-def _itbis_linea(subtotal: Decimal, impuesto: str) -> Decimal:
-    """ITBIS de una línea según su régimen. Una línea exenta no paga."""
-    return (subtotal * ITBIS_RATES.get(impuesto or "itbis_18", Decimal("0.18"))).quantize(Decimal("0.01"))
-
-
 def _entradas_presupuestarias_oc(db: Session, oc, prov, cuenta_fallback: int) -> list:
     """Desglosa una OC en las líneas presupuestarias que afecta.
 
@@ -421,7 +416,7 @@ def _entradas_presupuestarias_oc(db: Session, oc, prov, cuenta_fallback: int) ->
             "campo_id": oc.campo_id,
             "unidad_negocio_id": l.unidad_negocio_id or oc.unidad_negocio_id,
             "departamento_id": l.departamento_id or oc.departamento_id,
-            "monto": _monto_presupuestario(sub, _itbis_linea(sub, l.impuesto), prov)
+            "monto": _monto_presupuestario(sub, _itbis_compra(sub, l.impuesto, prov), prov)
                      .quantize(Decimal("0.01")),
         })
 
@@ -433,7 +428,7 @@ def _entradas_presupuestarias_oc(db: Session, oc, prov, cuenta_fallback: int) ->
             "campo_id": oc.campo_id,
             "unidad_negocio_id": oc.unidad_negocio_id,
             "departamento_id": oc.departamento_id,
-            "monto": _monto_presupuestario(sub, _itbis_linea(sub, "itbis_18"), prov)
+            "monto": _monto_presupuestario(sub, _itbis_compra(sub, "itbis_18", prov), prov)
                      .quantize(Decimal("0.01")),
         })
     return entradas
@@ -733,7 +728,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                     if not oc_l:
                         continue
                     sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(oc_l.precio_unitario or 0))
-                    itbis_monto += _itbis_linea(sub_l, oc_l.impuesto)
+                    itbis_monto += _itbis_compra(sub_l, oc_l.impuesto, prov)
 
                 isr_pct = Decimal(str(prov.retencion_isr_pct or 0))
                 itbis_ret_pct = Decimal(str(prov.retencion_itbis_pct or 0))
@@ -774,7 +769,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                             precio_unitario=float(oc_l.precio_unitario or 0),
                             descuento_pct=float(oc_l.descuento_pct or 0),
                             impuesto=imp,
-                            monto_itbis=_itbis_linea(sub_l, imp),
+                            monto_itbis=_itbis_compra(sub_l, imp, prov),
                             subtotal=round(sub_l, 2),
                         ))
 
@@ -1027,7 +1022,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
 
     try:
         total_devuelto = Decimal("0")
-        itbis_devuelto = Decimal("0")
+        lineas_itbis = []
         lineas_devueltas = []
 
         for item in data.lineas:
@@ -1053,7 +1048,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
 
             monto_linea = Decimal(str(round(item.cantidad_devuelta * float(linea.precio_unitario), 4)))
             total_devuelto += monto_linea
-            itbis_devuelto += _itbis_linea(monto_linea, linea.impuesto)
+            lineas_itbis.append((monto_linea, linea.impuesto))
 
             prod = db.query(models.Producto).filter(
                 models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
@@ -1104,7 +1099,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
             ).first()
 
         if prov and total_devuelto > 0:
-            itbis_monto = itbis_devuelto
+            itbis_monto = sum((_itbis_compra(m, imp, prov) for m, imp in lineas_itbis), Decimal("0"))
             nc_total = total_devuelto + itbis_monto
             nc_numero = get_next("NC", db)
             cxp = db.query(models.CuentaPorPagar).filter(

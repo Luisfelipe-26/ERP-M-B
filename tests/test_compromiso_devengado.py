@@ -79,7 +79,8 @@ def test_cada_linea_de_oc_genera_su_propia_linea_presupuestaria(db, proveedor, c
     assert {e["monto"] for e in entradas} == {Decimal("50000.00"), Decimal("30000.00")}
 
 
-def test_el_itbis_del_informal_entra_al_compromiso(db, proveedor, cuenta):
+def test_un_informal_compromete_solo_el_subtotal(db, proveedor, cuenta):
+    """El informal no cobra ITBIS, así que la OC no reserva presupuesto por él."""
     oc, _, _ = _oc_dos_lineas(db, proveedor, cuenta, cuenta)
     informal = models.Proveedor(nombre="Vivero", tipo_contribuyente="informal")
     db.add(informal)
@@ -87,7 +88,7 @@ def test_el_itbis_del_informal_entra_al_compromiso(db, proveedor, cuenta):
 
     entradas = _entradas_presupuestarias_oc(db, oc, informal, cuenta.id)
 
-    assert entradas[0]["monto"] == Decimal("59000.00")  # 50.000 + 18%
+    assert entradas[0]["monto"] == Decimal("50000.00")
 
 
 def test_factura_parcial_deja_el_resto_comprometido(db, config, proveedor, cuenta, user):
