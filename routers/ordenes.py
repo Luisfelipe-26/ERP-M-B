@@ -15,6 +15,13 @@ import audit
 router = APIRouter(prefix="/api/ordenes", tags=["ordenes"])
 
 
+def _f(v) -> float:
+    """Stock y costos son NUMERIC y vuelven como Decimal; las cantidades llegan como float.
+    Mezclarlos lanza TypeError, así que la aritmética se hace en float. (Misma coerción
+    que en inventario.py; no se importa de allí por el import circular entre ambos.)"""
+    return float(v or 0)
+
+
 def _next_ot_id(db: Session) -> int:
     """Use atomic sequence for OT numbering."""
     return int(get_next("OT", db))
@@ -45,10 +52,10 @@ def _crear_movimiento_consumo_ot(db: Session, ot_id: int, producto: models.Produ
     H-1 FIX: Genera un MovimientoInventario tipo OT por cada línea de insumo consumido.
     Esto garantiza trazabilidad completa en el kardex.
     """
-    nuevo_stock = max(0.0, (producto.stock_actual or 0) - cantidad)
+    nuevo_stock = max(0.0, _f(producto.stock_actual) - _f(cantidad))
     # Inventario manda: el consumo sale valuado al costo promedio ponderado del
     # producto (Valor INV). La OTDetalle se alinea a este mismo valor.
-    cp = producto.costo_promedio or producto.costo_unitario or 0
+    cp = _f(producto.costo_promedio) or _f(producto.costo_unitario)
 
     mov = models.MovimientoInventario(
         num_documento=f"OT-{ot_id}",
@@ -77,8 +84,8 @@ def _crear_movimiento_reversion_ot(db: Session, ot_id: int, producto: models.Pro
     Restaura stock con documento auditable.
     Valúa al mismo costo que la salida original (costo_unitario) para netear a cero.
     """
-    nuevo_stock = (producto.stock_actual or 0) + cantidad
-    cp = producto.costo_promedio or producto.costo_unitario or 0
+    nuevo_stock = _f(producto.stock_actual) + _f(cantidad)
+    cp = _f(producto.costo_promedio) or _f(producto.costo_unitario)
     costo_mov = costo_unitario if costo_unitario else cp
 
     mov = models.MovimientoInventario(
@@ -379,7 +386,7 @@ def create_orden(data: schemas.OrdenTrabajoCreate, db: Session = Depends(get_db)
         cantidad = max(0.0, float(det_data.cantidad_usada or 0))
 
         # H-6 FIX: Validar stock suficiente antes de consumir (solo inventariables)
-        if cantidad > 0 and prod.es_inventariable and (prod.stock_actual or 0) < cantidad:
+        if cantidad > 0 and prod.es_inventariable and _f(prod.stock_actual) < _f(cantidad):
             raise HTTPException(status_code=400,
                 detail=f"Stock insuficiente para '{prod.producto}'. "
                        f"Disponible: {prod.stock_actual} {prod.unidad}, Requerido: {cantidad} {prod.unidad}")
@@ -388,7 +395,7 @@ def create_orden(data: schemas.OrdenTrabajoCreate, db: Session = Depends(get_db)
         # promedio del inventario, no al costo tecleado. Los no inventariables no pasan
         # por inventario, así que usan el costo tecleado o el de lista.
         if prod.es_inventariable:
-            costo_unit = prod.costo_promedio or prod.costo_unitario or 0
+            costo_unit = _f(prod.costo_promedio) or _f(prod.costo_unitario)
         else:
             costo_unit = det_data.costo_unitario if det_data.costo_unitario is not None else (prod.costo_unitario or 0)
         costo_real = max(0.0, round(cantidad * costo_unit, 2))
@@ -476,7 +483,7 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
         if det.producto_id and det.cantidad_usada and det.cantidad_usada > 0:
             prod = db.query(models.Producto).filter(models.Producto.id_prod == det.producto_id).first()
             if prod and prod.es_inventariable:
-                prod.stock_actual = (prod.stock_actual or 0) + det.cantidad_usada
+                prod.stock_actual = _f(prod.stock_actual) + _f(det.cantidad_usada)
 
     # Delete old MO and detalles
     db.query(models.OTManoObra).filter(models.OTManoObra.ot_id == ot_id).delete()
@@ -531,13 +538,13 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
         if not prod:
             raise HTTPException(status_code=400, detail=f"Producto '{det_data.producto_id}' no existe")
         cantidad = max(0.0, float(det_data.cantidad_usada or 0))
-        if cantidad > 0 and prod.es_inventariable and (prod.stock_actual or 0) < cantidad:
+        if cantidad > 0 and prod.es_inventariable and _f(prod.stock_actual) < _f(cantidad):
             raise HTTPException(status_code=400,
                 detail=f"Stock insuficiente para '{prod.producto}'. Disponible: {prod.stock_actual}")
         # Inventario manda (Valor INV): inventariables al costo promedio; no
         # inventariables al costo tecleado o de lista.
         if prod.es_inventariable:
-            costo_unit = prod.costo_promedio or prod.costo_unitario or 0
+            costo_unit = _f(prod.costo_promedio) or _f(prod.costo_unitario)
         else:
             costo_unit = det_data.costo_unitario if det_data.costo_unitario is not None else (prod.costo_unitario or 0)
         costo_real = max(0.0, round(cantidad * costo_unit, 2))

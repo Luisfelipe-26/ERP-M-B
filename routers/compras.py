@@ -398,6 +398,11 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
     }
 
 
+def _precio_neto(linea) -> float:
+    """Precio unitario de una línea de OC después de su descuento."""
+    return float(linea.precio_unitario or 0) * (1 - float(linea.descuento_pct or 0) / 100)
+
+
 def _entradas_presupuestarias_oc(db: Session, oc, prov, cuenta_fallback: int) -> list:
     """Desglosa una OC en las líneas presupuestarias que afecta.
 
@@ -636,16 +641,20 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
             if not linea:
                 continue
 
-            linea.cantidad_recibida = (linea.cantidad_recibida or 0) + item.cantidad_recibida
-            total_recibido_now += item.cantidad_recibida * linea.precio_unitario
-            received_lineas.append({"linea_id": linea.id, "cantidad_recibida": item.cantidad_recibida})
+            # El costo real es el neto: con 10% de descuento cada unidad cuesta 900, no 1.000.
+            # Usar el precio bruto inflaba el inventario y facturaba al proveedor de más.
+            precio_neto = _precio_neto(linea)
+            linea.cantidad_recibida = float(linea.cantidad_recibida or 0) + item.cantidad_recibida
+            total_recibido_now += item.cantidad_recibida * precio_neto
+            received_lineas.append({"linea_id": linea.id, "cantidad_recibida": item.cantidad_recibida,
+                                    "precio_neto": precio_neto})
 
             prod = db.query(models.Producto).filter(
                 models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
             ).first()
             if prod and prod.es_inventariable:
-                nuevo_costo = _recalc_avg_cost(prod, item.cantidad_recibida, linea.precio_unitario)
-                nuevo_stock = (prod.stock_actual or 0) + item.cantidad_recibida
+                nuevo_costo = _recalc_avg_cost(prod, item.cantidad_recibida, precio_neto)
+                nuevo_stock = float(prod.stock_actual or 0) + item.cantidad_recibida
                 num_doc = get_next("GR", db)
 
                 mov = models.MovimientoInventario(
@@ -655,7 +664,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                     tipo="entrada",
                     motivo="Compra",
                     cantidad=item.cantidad_recibida,
-                    costo_unitario=linea.precio_unitario,
+                    costo_unitario=round(precio_neto, 4),
                     costo_promedio_post=round(nuevo_costo, 4),
                     stock_post=round(nuevo_stock, 4),
                     proveedor=oc.proveedor,
@@ -727,7 +736,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                     oc_l = next((o for o in lineas_oc if o.id == rl["linea_id"]), None)
                     if not oc_l:
                         continue
-                    sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(oc_l.precio_unitario or 0))
+                    sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(rl["precio_neto"]))
                     itbis_monto += _itbis_compra(sub_l, oc_l.impuesto, prov)
 
                 isr_pct = Decimal(str(prov.retencion_isr_pct or 0))
@@ -759,7 +768,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                 for rl in received_lineas:
                     oc_l = next((o for o in lineas_oc if o.id == rl["linea_id"]), None)
                     if oc_l:
-                        sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(oc_l.precio_unitario or 0))
+                        sub_l = Decimal(str(rl["cantidad_recibida"])) * Decimal(str(rl["precio_neto"]))
                         imp = oc_l.impuesto or "itbis_18"
                         db.add(models.LineaCxP(
                             cxp_id=cxp.id,
@@ -1046,7 +1055,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
                 raise HTTPException(400,
                     f"Producto {linea.producto_id}: disponible para devolver={disponible}, solicitado={item.cantidad_devuelta}")
 
-            monto_linea = Decimal(str(round(item.cantidad_devuelta * float(linea.precio_unitario), 4)))
+            monto_linea = Decimal(str(round(item.cantidad_devuelta * _precio_neto(linea), 4)))
             total_devuelto += monto_linea
             lineas_itbis.append((monto_linea, linea.impuesto))
 
@@ -1054,7 +1063,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
                 models.Producto.id_prod == linea.producto_id, models.Producto.activo == True
             ).first()
             if prod and prod.es_inventariable:
-                nuevo_stock = max(0, (prod.stock_actual or 0) - item.cantidad_devuelta)
+                nuevo_stock = max(0.0, float(prod.stock_actual or 0) - item.cantidad_devuelta)
                 num_doc = get_next("DEV-GR", db)
                 mov = models.MovimientoInventario(
                     num_documento=num_doc,
@@ -1063,7 +1072,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
                     tipo="salida",
                     motivo=data.motivo,
                     cantidad=item.cantidad_devuelta,
-                    costo_unitario=float(linea.precio_unitario),
+                    costo_unitario=round(_precio_neto(linea), 4),
                     stock_post=round(nuevo_stock, 4),
                     proveedor=oc.proveedor,
                     fecha=datetime.now(),

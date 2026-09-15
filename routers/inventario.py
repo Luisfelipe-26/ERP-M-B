@@ -622,7 +622,7 @@ def get_kardex(id_prod: str, limit: int = Query(200, le=500),
             "unidad": p.unidad,
             "stock_actual": p.stock_actual,
             "costo_promedio": p.costo_promedio or p.costo_unitario,
-            "valor_inventario": round((p.stock_actual or 0) * (p.costo_promedio or p.costo_unitario or 0), 2),
+            "valor_inventario": round(_f(p.stock_actual) * (_f(p.costo_promedio) or _f(p.costo_unitario)), 2),
         },
         "movimientos": [_mov_out(m) for m in movs],
     }
@@ -895,10 +895,10 @@ def reconciliar_ot(
         if cantidad <= 0:
             continue
 
-        cp = prod.costo_promedio or prod.costo_unitario or 0
+        cp = _f(prod.costo_promedio) or _f(prod.costo_unitario)
         # Inventario manda: valuar el backfill al costo promedio actual (mejor
         # aproximación disponible; luego resincronizar alinea la OTDetalle).
-        nuevo_stock = round(max(0.0, (prod.stock_actual or 0) - cantidad), 4)
+        nuevo_stock = round(max(0.0, _f(prod.stock_actual) - _f(cantidad)), 4)
 
         mov = models.MovimientoInventario(
             num_documento=f"OT-{info['ot_id']}",
@@ -1212,7 +1212,7 @@ def reconstruir_movimientos_ot(
         for m in info["movs"]:
             db.delete(m)
 
-        cp = prod.costo_promedio or prod.costo_unitario or 0
+        cp = _f(prod.costo_promedio) or _f(prod.costo_unitario)
         mov = models.MovimientoInventario(
             num_documento=f"OT-{key[0]}",
             producto_id=key[1],
