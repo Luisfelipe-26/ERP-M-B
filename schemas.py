@@ -378,8 +378,15 @@ class OCLineaCreate(BaseModel):
     cantidad: float
     precio_unitario: float
     descuento_pct: float = 0
-    impuesto: str = "itbis_18"
+    impuesto: Optional[str] = None   # None -> hereda el impuesto_compra del producto
     cuenta_contable_id: Optional[int] = None
+
+    @field_validator("impuesto")
+    @classmethod
+    def _regimen_valido(cls, v):
+        if v is not None and v not in REGIMENES_ITBIS:
+            raise ValueError(f"impuesto debe ser uno de {REGIMENES_ITBIS}")
+        return v
     unidad_negocio_id: Optional[int] = None
     departamento_id: Optional[int] = None
     almacen_id: Optional[int] = None
