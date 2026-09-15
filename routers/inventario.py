@@ -7,7 +7,7 @@ from routers.sequences import get_next, peek_next
 from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
 from routers.ordenes import _revaluar_asiento_ot
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, date
 import audit
 
 router = APIRouter(prefix="/api/inventario", tags=["inventario"])
@@ -85,12 +85,38 @@ def list_ocs_for_select(db: Session = Depends(get_db), _=Depends(auth.get_curren
 
 # ─── Listado de productos (artículos maestros) ──────────────────────────────
 
+def _snapshot_a_fecha(db: Session, hasta: date) -> dict:
+    """Último movimiento de cada producto hasta la fecha de corte, inclusive.
+
+    Cada movimiento guarda stock_post y costo_promedio_post justo para reconstruir el
+    inventario a cualquier fecha sin recalcular el kardex.
+    """
+    corte = datetime.combine(hasta, datetime.max.time())
+    ultimo = db.query(
+        models.MovimientoInventario.producto_id,
+        func.max(models.MovimientoInventario.id).label("mov_id"),
+    ).filter(models.MovimientoInventario.fecha <= corte).group_by(
+        models.MovimientoInventario.producto_id).subquery()
+    movs = db.query(models.MovimientoInventario).join(
+        ultimo, models.MovimientoInventario.id == ultimo.c.mov_id).all()
+    return {m.producto_id: m for m in movs}
+
+
 @router.get("/articulos")
-def list_articulos(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
+def list_articulos(hasta: date = Query(None, description="Inventario a esta fecha de corte"),
+                   db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
     productos = db.query(models.Producto).filter(models.Producto.activo == True).order_by(models.Producto.tipo, models.Producto.producto).all()
+    snapshot = _snapshot_a_fecha(db, hasta) if hasta else None
     result = []
     for p in productos:
-        cp = _f(p.costo_promedio) or _f(p.costo_unitario)
+        if snapshot is not None:
+            m = snapshot.get(p.id_prod)
+            stock = _f(m.stock_post) if m is not None and m.stock_post is not None else 0.0
+            cp = (_f(m.costo_promedio_post) if m is not None and m.costo_promedio_post is not None
+                  else (_f(p.costo_promedio) or _f(p.costo_unitario)))
+        else:
+            stock = _f(p.stock_actual)
+            cp = _f(p.costo_promedio) or _f(p.costo_unitario)
         result.append({
             "id": p.id,
             "id_prod": p.id_prod,
@@ -99,15 +125,15 @@ def list_articulos(db: Session = Depends(get_db), _=Depends(auth.get_current_use
             "unidad": p.unidad,
             "costo_unitario": p.costo_unitario,
             "costo_promedio": round(cp, 4),
-            "stock_actual": p.stock_actual or 0,
+            "stock_actual": round(stock, 4),
             "stock_minimo": p.stock_minimo or 0,
             "stock_maximo": p.stock_maximo,
             "proveedor": p.proveedor,
             "concentracion": p.concentracion,
             "activo": p.activo,
             "es_inventariable": p.es_inventariable if p.es_inventariable is not None else True,
-            "valor_inventario": round(_f(p.stock_actual) * cp, 2),
-            "bajo_minimo": bool(p.stock_minimo and p.stock_actual is not None and p.stock_actual <= p.stock_minimo),
+            "valor_inventario": round(stock * cp, 2),
+            "bajo_minimo": bool(p.stock_minimo and stock <= _f(p.stock_minimo)),
         })
     return result
 
