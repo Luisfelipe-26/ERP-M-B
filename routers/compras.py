@@ -236,6 +236,76 @@ def reporte_productos_frecuentes(
     } for r in rows]
 
 
+@router.get("/auditoria/descuentos-brutos")
+def auditoria_descuentos_brutos(db: Session = Depends(get_db),
+                                _=Depends(auth.require_admin)):
+    """Recepciones que entraron al precio bruto ignorando el descuento de la línea.
+
+    Hasta el fix, recibir_oc valuaba el GR y la CxP con precio_unitario sin aplicar
+    descuento_pct. Lista cada línea afectada con lo registrado, lo correcto y la
+    diferencia, para decidir qué corregir.
+    """
+    lineas = db.query(models.OrdenCompraLinea).filter(
+        models.OrdenCompraLinea.descuento_pct > 0,
+        models.OrdenCompraLinea.cantidad_recibida > 0,
+    ).all()
+
+    items, sobre_inv, sobre_cxp = [], Decimal("0"), Decimal("0")
+    for l in lineas:
+        bruto = float(l.precio_unitario or 0)
+        neto = _precio_neto(l)
+        if abs(bruto - neto) < 0.0001:
+            continue
+
+        grs = db.query(models.MovimientoInventario).filter(
+            models.MovimientoInventario.oc_referencia == l.oc_id,
+            models.MovimientoInventario.producto_id == l.producto_id,
+            models.MovimientoInventario.tipo_doc == "GR",
+        ).all()
+        grs_mal = [g for g in grs if abs(float(g.costo_unitario or 0) - bruto) < 0.0001]
+
+        lcxps = db.query(models.LineaCxP).filter(models.LineaCxP.oc_linea_id == l.id).all()
+        cxps_mal = []
+        for lc in lcxps:
+            esperado_bruto = round(float(lc.cantidad or 0) * bruto, 2)
+            if abs(float(lc.subtotal or 0) - esperado_bruto) < 0.01:
+                cxp = db.query(models.CuentaPorPagar).get(lc.cxp_id)
+                cxps_mal.append((lc, cxp))
+
+        if not grs_mal and not cxps_mal:
+            continue
+
+        dif_inv = sum(round(float(g.cantidad or 0) * (bruto - neto), 2) for g in grs_mal)
+        dif_cxp = sum(round(float(lc.cantidad or 0) * (bruto - neto), 2) for lc, _ in cxps_mal)
+        sobre_inv += Decimal(str(dif_inv))
+        sobre_cxp += Decimal(str(dif_cxp))
+
+        items.append({
+            "oc_id": l.oc_id, "linea_id": l.id, "producto_id": l.producto_id,
+            "descuento_pct": float(l.descuento_pct), "cantidad_recibida": float(l.cantidad_recibida),
+            "precio_bruto": round(bruto, 4), "precio_neto": round(neto, 4),
+            "inventario": [{"num_documento": g.num_documento, "fecha": g.fecha,
+                            "cantidad": float(g.cantidad or 0),
+                            "costo_registrado": float(g.costo_unitario or 0),
+                            "costo_correcto": round(neto, 4)} for g in grs_mal],
+            "sobrecosto_inventario": dif_inv,
+            "cxp": [{"numero": c.numero, "estado": c.estado,
+                     "subtotal_registrado": float(lc.subtotal or 0),
+                     "subtotal_correcto": round(float(lc.cantidad or 0) * neto, 2),
+                     "ya_pagada": c.estado == "pagada",
+                     "saldo_pendiente": float(c.saldo_pendiente or 0)} for lc, c in cxps_mal],
+            "sobrepago_cxp": dif_cxp,
+        })
+
+    return {
+        "lineas_afectadas": len(items),
+        "sobrecosto_inventario_total": float(sobre_inv),
+        "sobrepago_cxp_total": float(sobre_cxp),
+        "cxp_ya_pagadas": sum(1 for i in items for c in i["cxp"] if c["ya_pagada"]),
+        "items": items,
+    }
+
+
 @router.post("")
 def create_oc(data: schemas.OrdenCompraCreate, db: Session = Depends(get_db),
               current_user: models.Usuario = Depends(auth.require_supervisor)):
