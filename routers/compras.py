@@ -779,7 +779,8 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                          **dim,
                          "descripcion_linea": f"CxP recepción OC {oc_id}"},
                     ],
-                    current_user.nombre
+                    current_user.nombre,
+                    requerido=True,
                 )
                 if asiento:
                     asiento_num = asiento.numero
@@ -862,6 +863,9 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
 
         db.commit()
         db.refresh(oc)
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         _logging.getLogger(__name__).exception("Error en recepción OC %s", oc_id)

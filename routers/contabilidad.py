@@ -230,17 +230,27 @@ def _verificar_presupuesto(db: Session, lineas_data: list, fecha: date):
 
 def _crear_asiento_auto(db: Session, fecha: date, origen: str, referencia_id: str,
                         descripcion: str, lineas_data: list, user_nombre: str,
-                        origen_id: int = None):
+                        origen_id: int = None, requerido: bool = False):
     """Create and immediately post an automatic journal entry.
     lineas_data: list of dicts {cuenta_id, debe, haber, campo_id?, tercero_id?, descripcion_linea?,
                                 unidad_negocio_id?, departamento_id?, almacen_id?}
-    Returns the AsientoContable or None if periodo missing/closed.
+    Returns the AsientoContable, or None if the period is missing/closed and not `requerido`.
+
+    Con `requerido=True` un período ausente o cerrado aborta la operación: un documento
+    financiero (recepción, factura, pago) sin su asiento deja inventario o CxP movidos y
+    contabilidad sin enterarse, que es como se descuadran.
     """
     periodo = find_periodo(db, fecha)
     if not periodo:
+        if requerido:
+            raise HTTPException(400, f"No existe un período contable para {fecha:%d/%m/%Y}. "
+                                     "Créalo en Contabilidad → Períodos antes de registrar la operación.")
         logger.warning("Asiento auto %s/%s omitido: no existe período para %s", origen, referencia_id, fecha)
         return None
     if periodo.estado == "cerrado":
+        if requerido:
+            raise HTTPException(400, f"El período {periodo.nombre or f'{periodo.mes}/{periodo.anio}'} está cerrado: "
+                                     "no se puede registrar la operación en esa fecha.")
         logger.warning("Asiento auto %s/%s omitido: período %s-%s cerrado", origen, referencia_id, periodo.anio, periodo.mes)
         return None
 
@@ -1760,10 +1770,9 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
             asiento = _crear_asiento_auto(
                 db, data.fecha_factura, "CXP", numero,
                 f"Factura proveedor {prov.nombre} — {numero}",
-                asiento_lineas, user.nombre
+                asiento_lineas, user.nombre, requerido=True,
             )
-            if asiento:
-                cxp.asiento_id = asiento.id
+            cxp.asiento_id = asiento.id
         if cuenta_gasto_presup and monto_presup > 0:
             _registrar_mov_pres(
                 db, tipo="DEVENGADO", fecha=data.fecha_factura,
@@ -1775,6 +1784,9 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
         _audit(db, user, "CREAR", "CXP", numero,
                f"Factura {prov.nombre} sub={subtotal} itbis={itbis} ret_isr={ret_isr} ret_itbis={ret_itbis} total={total}")
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         logger.exception("Error creando CxP %s", numero)
@@ -2041,7 +2053,7 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
                     {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
                      "descripcion_linea": f"Salida banco — {data.metodo_pago or 'transferencia'}"},
                 ],
-                user.nombre
+                user.nombre, requerido=True,
             )
             if asiento:
                 pago.asiento_id = asiento.id
@@ -2062,6 +2074,9 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
                 )
         _audit(db, user, "CREAR", "PAGO", numero, f"Pago CxP {cxp.numero} monto={monto}")
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         logger.exception("Error registrando pago %s", numero)
@@ -2159,16 +2174,12 @@ def crear_nota_credito(data: schemas.NotaCreditoCreate, db: Session = Depends(ge
                                    "descripcion_linea": f"NC ITBIS {prov.nombre}"})
             asiento_lineas.append({"cuenta_id": r_itbis[0], "debe": 0, "haber": itbis,
                                    "descripcion_linea": "Reverso ITBIS crédito fiscal"})
-        try:
-            asiento = _crear_asiento_auto(
-                db, data.fecha, "NC", numero,
-                f"Nota de crédito {prov.nombre} — {numero}",
-                asiento_lineas, user.nombre
-            )
-            if asiento:
-                nc.asiento_id = asiento.id
-        except Exception:
-            logger.exception("Error creando asiento para NC %s", numero)
+        asiento = _crear_asiento_auto(
+            db, data.fecha, "NC", numero,
+            f"Nota de crédito {prov.nombre} — {numero}",
+            asiento_lineas, user.nombre, requerido=True,
+        )
+        nc.asiento_id = asiento.id
 
     _audit(db, user, "CREAR", "NC", numero,
            f"Nota de crédito {prov.nombre} sub={subtotal} itbis={itbis} total={total}" +
@@ -2176,6 +2187,9 @@ def crear_nota_credito(data: schemas.NotaCreditoCreate, db: Session = Depends(ge
 
     try:
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise HTTPException(500, "Error al crear nota de crédito")
