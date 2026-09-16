@@ -284,7 +284,7 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
                     {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
                      "descripcion_linea": f"Contrapartida GR {num_doc}"},
                 ],
-                current_user.nombre, origen_id=mov.id
+                current_user.nombre, origen_id=mov.id, requerido=True
             )
             if asiento:
                 mov.asiento_id = asiento.id
@@ -292,6 +292,9 @@ def goods_receipt(data: schemas.GRCreate, db: Session = Depends(get_db),
     try:
         db.commit()
         db.refresh(mov)
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         import logging
@@ -372,7 +375,7 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
                  "almacen_id": mov.almacen_id,
                  "descripcion_linea": f"Inventario salida {num_doc}"},
             ],
-            current_user.nombre, origen_id=mov.id
+            current_user.nombre, origen_id=mov.id, requerido=True
         )
         if asiento:
             mov.asiento_id = asiento.id
@@ -380,6 +383,9 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
     try:
         db.commit()
         db.refresh(mov)
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         import logging
@@ -462,7 +468,7 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
             asiento = _crear_asiento_auto(
                 db, fecha_asiento_aj, "AJ", num_doc,
                 f"Ajuste inventario {num_doc} — {p.producto} (dif: {diferencia:+.2f})",
-                lineas, current_user.nombre, origen_id=mov.id
+                lineas, current_user.nombre, origen_id=mov.id, requerido=True
             )
             if asiento:
                 mov.asiento_id = asiento.id
@@ -470,6 +476,9 @@ def ajuste_inventario(data: schemas.AjusteCreate, db: Session = Depends(get_db),
     try:
         db.commit()
         db.refresh(mov)
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         import logging
@@ -558,7 +567,7 @@ def devolucion_gi(
                     {"cuenta_id": cta_haber, "debe": 0, "haber": monto,
                      "descripcion_linea": f"Contrapartida devolución GI {num_doc}"},
                 ],
-                current_user.nombre, origen_id=mov.id
+                current_user.nombre, origen_id=mov.id, requerido=True
             )
             if asiento:
                 mov.asiento_id = asiento.id
@@ -566,6 +575,9 @@ def devolucion_gi(
     try:
         db.commit()
         db.refresh(mov)
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise HTTPException(500, "Error al registrar devolución de GI")

@@ -88,3 +88,26 @@ def test_rechaza_un_tipo_invalido(db, articulo, user):
             producto_id="P1", tipo="transferencia", cantidad=1),
             db=db, current_user=user)
     assert e.value.status_code == 400
+
+
+def test_una_entrada_sin_periodo_contable_no_mueve_el_stock(db, articulo, user, cuenta):
+    """Con regla contable pero sin período para hoy, el GR no puede asentarse: aborta entero."""
+    otra = models.CuentaContable(codigo="2.1.01", nombre="CxP", naturaleza="acreedora", tipo="pasivo")
+    db.add(otra)
+    db.flush()
+    db.add(models.ReglaContabilizacion(evento="inventario", concepto="entrada", activo=True,
+                                       cuenta_debe_id=cuenta.id, cuenta_haber_id=otra.id))
+    articulo.cuenta_inventario_id = cuenta.id   # sin cuenta de inventario el GR no asienta
+    db.commit()
+
+    with pytest.raises(HTTPException) as e:
+        registrar_movimiento("P1", schemas.MovimientoCreate(
+            producto_id="P1", tipo="entrada", cantidad=10, costo_unitario=100),
+            db=db, current_user=user)
+
+    assert e.value.status_code == 400
+    assert "período contable" in e.value.detail
+
+    db.rollback()
+    assert float(db.query(models.Producto).filter_by(id_prod="P1").one().stock_actual) == 50
+    assert db.query(models.MovimientoInventario).count() == 0
