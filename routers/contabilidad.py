@@ -1796,6 +1796,61 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
             "asiento": asiento.numero if asiento else None}
 
 
+def _registrar_pagado_cxp(db: Session, cxp, monto: Decimal, fecha, numero: str, user) -> Decimal:
+    """Registra PAGADO repartido en la misma proporción en que la factura se devengó.
+
+    Imputarlo al primer compromiso de la OC cargaba todo el pago a una sola cuenta
+    aunque la factura tuviera varias, y una factura sin OC no registraba pago alguno.
+    Si la factura aún no se devengó no hay base de reparto: se registra contra el
+    compromiso de su OC si lo tiene, y si no, no hay línea presupuestaria que pagar.
+    """
+    monto = Decimal(str(monto or 0))
+    if monto <= 0:
+        return Decimal("0")
+
+    base_movs = db.query(models.MovimientoPresupuestario).filter(
+        models.MovimientoPresupuestario.tipo == "DEVENGADO",
+        models.MovimientoPresupuestario.origen_tipo == "CXP",
+        models.MovimientoPresupuestario.origen_id == cxp.numero,
+        models.MovimientoPresupuestario.monto > 0,
+    ).all()
+    base = sum((Decimal(str(m.monto)) for m in base_movs), Decimal("0"))
+
+    if not base_movs or base <= 0:
+        if not cxp.oc_id:
+            return Decimal("0")
+        comp = db.query(models.CompromisoPresupuestario).filter(
+            models.CompromisoPresupuestario.origen_tipo == "OC",
+            models.CompromisoPresupuestario.origen_id == cxp.oc_id,
+        ).first()
+        if not comp:
+            return Decimal("0")
+        _registrar_mov_pres(
+            db, tipo="PAGADO", fecha=fecha, cuenta_id=comp.cuenta_id, monto=monto,
+            campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
+            departamento_id=comp.departamento_id,
+            origen_tipo="PAGO", origen_id=numero,
+            notas=f"Pago {numero} CxP {cxp.numero} (sin devengar aún)", usuario_id=user.id,
+        )
+        return monto
+
+    registrado = Decimal("0")
+    for m in base_movs:
+        parte = (monto * Decimal(str(m.monto)) / base).quantize(Decimal("0.01"))
+        if parte <= 0:
+            continue
+        _registrar_mov_pres(
+            db, tipo="PAGADO", fecha=fecha, cuenta_id=m.cuenta_id, monto=parte,
+            anio=m.anio, mes=m.mes,
+            campo_id=m.campo_id, unidad_negocio_id=m.unidad_negocio_id,
+            departamento_id=m.departamento_id,
+            origen_tipo="PAGO", origen_id=numero,
+            notas=f"Pago {numero} CxP {cxp.numero}", usuario_id=user.id,
+        )
+        registrado += parte
+    return registrado
+
+
 def _reversar_devengado_cxp(db: Session, cxp, monto: Decimal, fecha, *,
                             origen_tipo: str, origen_id: str, notas: str, user) -> Decimal:
     """Reversa devengado de una CxP en la misma proporción en que se devengó.
@@ -2057,21 +2112,7 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
             )
             if asiento:
                 pago.asiento_id = asiento.id
-        if cxp.oc_id:
-            comp = db.query(models.CompromisoPresupuestario).filter(
-                models.CompromisoPresupuestario.origen_tipo == "OC",
-                models.CompromisoPresupuestario.origen_id == cxp.oc_id,
-            ).first()
-            if comp:
-                _registrar_mov_pres(
-                    db, tipo="PAGADO", fecha=data.fecha,
-                    cuenta_id=comp.cuenta_id, monto=monto,
-                    campo_id=comp.campo_id, unidad_negocio_id=comp.unidad_negocio_id,
-                    departamento_id=comp.departamento_id,
-                    origen_tipo="PAGO", origen_id=numero,
-                    notas=f"Pago {numero} CxP {cxp.numero}",
-                    usuario_id=user.id,
-                )
+        _registrar_pagado_cxp(db, cxp, monto, data.fecha, numero, user)
         _audit(db, user, "CREAR", "PAGO", numero, f"Pago CxP {cxp.numero} monto={monto}")
         db.commit()
     except HTTPException:
