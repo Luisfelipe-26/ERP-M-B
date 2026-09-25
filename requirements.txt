@@ -2,7 +2,7 @@
 
 fastapi>=0.115
 uvicorn>=0.34
-sqlalchemy>=2.0
+sqlalchemy>=2.0,<2.1   # 2.1 cambia el driver por defecto y no está probada
 psycopg2-binary>=2.9
 python-jose[cryptography]>=3.3
 

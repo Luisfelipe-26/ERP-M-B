@@ -9,6 +9,13 @@ DATABASE_URL = os.environ.get(
     "postgresql://postgres:Corvus2024!@127.0.0.1:5432/corvus_finca"
 )
 
+# Driver explícito: SQLAlchemy 2.1 cambió el de por defecto para "postgresql://" de
+# psycopg2 a psycopg (v3), que no está instalado, y el arranque moría sin conectar.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = "postgresql+psycopg2://" + DATABASE_URL[len("postgresql://"):]
+
 # Fallback to SQLite if PostgreSQL is not available
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
