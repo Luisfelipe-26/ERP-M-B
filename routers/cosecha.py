@@ -471,3 +471,264 @@ def anular_cosecha(cosecha_id: int, motivo: str = Query(..., min_length=5),
         db.rollback()
         raise HTTPException(500, "Error al anular la cosecha")
     return {"ok": True, "numero": cos.numero, "estado": "anulada"}
+
+
+# ─── Libro de precios ───────────────────────────────────────────────────────
+
+MONEDAS = ("DOP", "USD")
+
+
+class PrecioLineaIn(BaseModel):
+    calibre_id: int
+    precio: float
+
+
+class ListaPreciosIn(BaseModel):
+    cliente_id: Optional[int] = None          # None = precio base para todos
+    moneda: str = "DOP"
+    fecha_desde: date
+    fecha_hasta: Optional[date] = None
+    notas: Optional[str] = None
+    lineas: List[PrecioLineaIn]
+
+
+class PrecioUpdate(BaseModel):
+    precio: Optional[float] = None
+    fecha_hasta: Optional[date] = None
+    notas: Optional[str] = None
+
+
+def _estado_vigencia(p: models.PrecioCalibre, hoy: date) -> str:
+    if not p.activo:
+        return "anulado"
+    if p.fecha_desde > hoy:
+        return "futuro"
+    if p.fecha_hasta and p.fecha_hasta < hoy:
+        return "vencido"
+    return "vigente"
+
+
+def _precio_out(p: models.PrecioCalibre, hoy: Optional[date] = None) -> dict:
+    return {
+        "id": p.id, "cliente_id": p.cliente_id,
+        "cliente_nombre": p.cliente.nombre if p.cliente else "Precio base",
+        "calibre_id": p.calibre_id, "calibre": p.calibre.nombre if p.calibre else None,
+        "moneda": p.moneda, "precio": _f(p.precio),
+        "fecha_desde": p.fecha_desde, "fecha_hasta": p.fecha_hasta, "notas": p.notas,
+        "estado": _estado_vigencia(p, hoy or date.today()), "creado_en": p.creado_en,
+    }
+
+
+def _mismo_tramo(db: Session, cliente_id, calibre_id, moneda=None):
+    """Precios activos del mismo cliente (o base) y calibre, y de la moneda si se indica."""
+    q = db.query(models.PrecioCalibre).filter(
+        models.PrecioCalibre.calibre_id == calibre_id,
+        models.PrecioCalibre.activo == True,
+    )
+    if moneda:
+        q = q.filter(models.PrecioCalibre.moneda == moneda)
+    return q.filter(models.PrecioCalibre.cliente_id == cliente_id) if cliente_id else \
+        q.filter(models.PrecioCalibre.cliente_id.is_(None))
+
+
+def _se_solapan(a_desde, a_hasta, b_desde, b_hasta) -> bool:
+    return a_desde <= (b_hasta or date.max) and b_desde <= (a_hasta or date.max)
+
+
+def precio_vigente(db: Session, calibre_id: int, fecha: date, cliente_id: Optional[int] = None,
+                   moneda: Optional[str] = None):
+    """Precio que rige para un cliente y calibre en una fecha: el suyo, o si no tiene, el base."""
+    for cid in ([cliente_id] if cliente_id else []) + [None]:
+        p = _mismo_tramo(db, cid, calibre_id, moneda).filter(
+            models.PrecioCalibre.fecha_desde <= fecha,
+            (models.PrecioCalibre.fecha_hasta.is_(None)) | (models.PrecioCalibre.fecha_hasta >= fecha),
+        ).order_by(models.PrecioCalibre.fecha_desde.desc()).first()
+        if p:
+            return p
+    return None
+
+
+@router.post("/precios/lista")
+def registrar_lista_precios(data: ListaPreciosIn, db: Session = Depends(get_db),
+                            current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Registra la lista que dio un cliente: un precio por kg para cada calibre.
+
+    Si ya había un precio abierto para ese cliente y calibre, se cierra el día anterior
+    a la nueva vigencia; el historial se conserva.
+    """
+    from datetime import timedelta
+    moneda = (data.moneda or "DOP").upper()
+    if moneda not in MONEDAS:
+        raise HTTPException(400, f"Moneda debe ser una de {MONEDAS}")
+    if data.fecha_hasta and data.fecha_hasta < data.fecha_desde:
+        raise HTTPException(400, "La fecha hasta no puede ser anterior a la fecha desde")
+    cli = None
+    if data.cliente_id:
+        cli = db.query(models.Cliente).get(data.cliente_id)
+        if not cli or cli.activo is False:
+            raise HTTPException(400, f"Cliente {data.cliente_id} no existe o está inactivo")
+
+    lineas = [l for l in data.lineas if l.precio is not None]
+    if not lineas:
+        raise HTTPException(400, "Indique el precio de al menos un calibre")
+    if len({l.calibre_id for l in lineas}) != len(lineas):
+        raise HTTPException(400, "Un calibre aparece dos veces en la lista")
+    calibres = {c.id: c for c in db.query(models.Calibre).filter(
+        models.Calibre.id.in_([l.calibre_id for l in lineas])).all()}
+    for l in lineas:
+        if l.calibre_id not in calibres:
+            raise HTTPException(400, f"Calibre {l.calibre_id} no existe")
+        if l.precio <= 0:
+            raise HTTPException(400, f"El precio de {calibres[l.calibre_id].nombre} debe ser mayor a 0")
+
+    # Validar todo antes de tocar nada: la lista entra entera o no entra.
+    cierres = []
+    for l in lineas:
+        for p in _mismo_tramo(db, data.cliente_id, l.calibre_id, moneda).all():
+            if not _se_solapan(p.fecha_desde, p.fecha_hasta, data.fecha_desde, data.fecha_hasta):
+                continue
+            if p.fecha_desde < data.fecha_desde:
+                cierres.append(p)
+            else:
+                raise HTTPException(400, (
+                    f"{calibres[l.calibre_id].nombre}: ya hay un precio de {moneda} {_f(p.precio):,.2f} "
+                    f"vigente desde {p.fecha_desde:%d/%m/%Y}. Edítelo o anúlelo antes de registrar otro."))
+
+    for p in cierres:
+        p.fecha_hasta = data.fecha_desde - timedelta(days=1)
+    creados = []
+    for l in lineas:
+        p = models.PrecioCalibre(cliente_id=data.cliente_id, calibre_id=l.calibre_id, moneda=moneda,
+                                 precio=round(l.precio, 4), fecha_desde=data.fecha_desde,
+                                 fecha_hasta=data.fecha_hasta, notas=data.notas, usuario_id=current_user.id)
+        db.add(p)
+        creados.append(p)
+    db.flush()
+    quien = cli.nombre if cli else "precio base"
+    audit.log(db, current_user, "CREAR", "PRECIOS", str(data.cliente_id or "base"),
+              f"Lista de precios {quien} ({moneda}) desde {data.fecha_desde:%d/%m/%Y}: {len(creados)} calibres",
+              {"precios": {calibres[l.calibre_id].nombre: l.precio for l in lineas},
+               "cerrados": [p.id for p in cierres]})
+    db.commit()
+    return {"ok": True, "creados": len(creados), "cerrados": len(cierres),
+            "precios": [_precio_out(p) for p in creados]}
+
+
+@router.get("/precios")
+def list_precios(cliente_id: Optional[int] = None, solo_base: bool = False,
+                 calibre_id: Optional[int] = None, moneda: Optional[str] = None,
+                 incluir_anulados: bool = False, db: Session = Depends(get_db),
+                 _=Depends(auth.get_current_user)):
+    q = db.query(models.PrecioCalibre)
+    if solo_base:
+        q = q.filter(models.PrecioCalibre.cliente_id.is_(None))
+    elif cliente_id:
+        q = q.filter(models.PrecioCalibre.cliente_id == cliente_id)
+    if calibre_id:
+        q = q.filter(models.PrecioCalibre.calibre_id == calibre_id)
+    if moneda:
+        q = q.filter(models.PrecioCalibre.moneda == moneda.upper())
+    if not incluir_anulados:
+        q = q.filter(models.PrecioCalibre.activo == True)
+    hoy = date.today()
+    return [_precio_out(p, hoy) for p in
+            q.order_by(models.PrecioCalibre.fecha_desde.desc(), models.PrecioCalibre.id.desc()).all()]
+
+
+@router.get("/precios/matriz")
+def matriz_precios(fecha: Optional[date] = None, moneda: str = "DOP", db: Session = Depends(get_db),
+                   _=Depends(auth.get_current_user)):
+    """Precio vigente a una fecha para cada cliente (y el base) en cada calibre.
+
+    Donde un cliente no tiene precio propio se muestra el base, marcado como tal.
+    """
+    fecha = fecha or date.today()
+    moneda = moneda.upper()
+    calibres = db.query(models.Calibre).filter(models.Calibre.activo == True).order_by(
+        models.Calibre.orden, models.Calibre.nombre).all()
+    cliente_ids = [r[0] for r in db.query(models.PrecioCalibre.cliente_id).filter(
+        models.PrecioCalibre.activo == True, models.PrecioCalibre.moneda == moneda,
+        models.PrecioCalibre.cliente_id.isnot(None)).distinct().all()]
+    clientes = {c.id: c for c in db.query(models.Cliente).filter(models.Cliente.id.in_(cliente_ids)).all()} \
+        if cliente_ids else {}
+
+    def fila(cid):
+        precios = {}
+        for cal in calibres:
+            p = precio_vigente(db, cal.id, fecha, cid, moneda)
+            if p:
+                precios[str(cal.id)] = {"id": p.id, "precio": _f(p.precio), "desde": p.fecha_desde,
+                                        "hasta": p.fecha_hasta,
+                                        "origen": "propio" if cid and p.cliente_id == cid else "base"}
+        return precios
+
+    filas = [{"cliente_id": None, "cliente_nombre": "Precio base", "precios": fila(None)}]
+    for cid in sorted(clientes, key=lambda i: clientes[i].nombre):
+        filas.append({"cliente_id": cid, "cliente_nombre": clientes[cid].nombre, "precios": fila(cid)})
+    return {"fecha": fecha, "moneda": moneda,
+            "calibres": [{"id": c.id, "nombre": c.nombre} for c in calibres], "filas": filas}
+
+
+@router.get("/precios/vigente")
+def get_precio_vigente(calibre_id: int, fecha: Optional[date] = None, cliente_id: Optional[int] = None,
+                       moneda: Optional[str] = None, db: Session = Depends(get_db),
+                       _=Depends(auth.get_current_user)):
+    p = precio_vigente(db, calibre_id, fecha or date.today(), cliente_id, moneda.upper() if moneda else None)
+    if not p:
+        raise HTTPException(404, "No hay precio vigente para ese calibre en esa fecha")
+    out = _precio_out(p)
+    out["origen"] = "propio" if cliente_id and p.cliente_id == cliente_id else "base"
+    return out
+
+
+@router.put("/precios/{precio_id}")
+def update_precio(precio_id: int, data: PrecioUpdate, db: Session = Depends(get_db),
+                  current_user: models.Usuario = Depends(auth.require_supervisor)):
+    p = db.query(models.PrecioCalibre).get(precio_id)
+    if not p or not p.activo:
+        raise HTTPException(404, "Precio no encontrado")
+    antes = {"precio": _f(p.precio), "fecha_hasta": str(p.fecha_hasta) if p.fecha_hasta else None}
+    if data.precio is not None:
+        if data.precio <= 0:
+            raise HTTPException(400, "El precio debe ser mayor a 0")
+        p.precio = round(data.precio, 4)
+    if "fecha_hasta" in data.model_fields_set:
+        if data.fecha_hasta and data.fecha_hasta < p.fecha_desde:
+            raise HTTPException(400, "La fecha hasta no puede ser anterior a la fecha desde")
+        otros = [o for o in _mismo_tramo(db, p.cliente_id, p.calibre_id, p.moneda).all() if o.id != p.id]
+        choque = next((o for o in otros
+                       if _se_solapan(p.fecha_desde, data.fecha_hasta, o.fecha_desde, o.fecha_hasta)), None)
+        if choque:
+            raise HTTPException(400, f"Se solaparía con el precio vigente desde {choque.fecha_desde:%d/%m/%Y}")
+        p.fecha_hasta = data.fecha_hasta
+    if "notas" in data.model_fields_set:
+        p.notas = data.notas
+    audit.log(db, current_user, "EDITAR", "PRECIOS", str(p.id),
+              f"Precio {p.calibre.nombre if p.calibre else p.calibre_id} editado",
+              {"antes": antes, "despues": {"precio": _f(p.precio),
+                                           "fecha_hasta": str(p.fecha_hasta) if p.fecha_hasta else None}})
+    db.commit()
+    db.refresh(p)
+    return _precio_out(p)
+
+
+@router.delete("/precios/{precio_id}")
+def anular_precio(precio_id: int, db: Session = Depends(get_db),
+                  current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Anula un precio. Si al registrarse había cerrado al anterior, este recupera la vigencia."""
+    from datetime import timedelta
+    p = db.query(models.PrecioCalibre).get(precio_id)
+    if not p or not p.activo:
+        raise HTTPException(404, "Precio no encontrado")
+    p.activo = False
+    previo = _mismo_tramo(db, p.cliente_id, p.calibre_id, p.moneda).filter(
+        models.PrecioCalibre.id != p.id,
+        models.PrecioCalibre.fecha_hasta == p.fecha_desde - timedelta(days=1),
+    ).first()
+    if previo:
+        previo.fecha_hasta = p.fecha_hasta
+    audit.log(db, current_user, "ANULAR", "PRECIOS", str(p.id),
+              f"Precio {p.calibre.nombre if p.calibre else p.calibre_id} de {_f(p.precio):,.2f} anulado",
+              {"reabre": previo.id if previo else None})
+    db.commit()
+    return {"ok": True, "reabierto": previo.id if previo else None}

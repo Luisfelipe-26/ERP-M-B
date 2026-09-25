@@ -1254,6 +1254,28 @@ class CosechaLinea(Base):
     calibre = relationship("Calibre")
 
 
+class PrecioCalibre(Base):
+    """Libro de precios: precio por kg que da un cliente para un calibre, con vigencia.
+
+    Sin cliente es el precio base, que aplica a quien no tenga precio propio. Se guarda
+    el historial completo: una lista nueva cierra la vigencia de la anterior, no la pisa.
+    """
+    __tablename__ = "precios_calibre"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"), index=True)     # None = precio base
+    calibre_id = Column(Integer, ForeignKey("calibres.id"), nullable=False, index=True)
+    moneda = Column(String(5), default="DOP", nullable=False)
+    precio = Column(Numeric(14, 4), nullable=False)                         # por kg
+    fecha_desde = Column(Date, nullable=False, index=True)
+    fecha_hasta = Column(Date)                                              # None = sin fin
+    notas = Column(String(300))
+    activo = Column(Boolean, default=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    calibre = relationship("Calibre")
+    cliente = relationship("Cliente")
+
+
 class CosechaLiquidacion(Base):
     __tablename__ = "cosecha_liquidaciones"
     id = Column(Integer, primary_key=True, index=True)
