@@ -1208,6 +1208,52 @@ class LineaRegistroPresupuestario(Base):
     descripcion = Column(String(200))
 
 
+class Calibre(Base):
+    """Clasificación de la fruta al cosechar. Cada calibre apunta al producto de
+    inventario donde entran sus kg; sin producto (p. ej. rechazo) se registra pero
+    no entra a inventario."""
+    __tablename__ = "calibres"
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(50), unique=True, nullable=False)
+    orden = Column(Integer, default=0)
+    producto_id = Column(String(10), ForeignKey("productos.id_prod"))
+    activo = Column(Boolean, default=True)
+    producto = relationship("Producto", foreign_keys=[producto_id])
+
+
+class Cosecha(Base):
+    """Registro de cosecha: kg de un campo en una fecha, desglosados por calibre."""
+    __tablename__ = "cosechas"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    fecha = Column(Date, nullable=False, index=True)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"), nullable=False, index=True)
+    temporada = Column(String(20), nullable=False, index=True)
+    ot_id = Column(Integer, index=True)            # número de OT (como MovimientoInventario.ot_referencia)
+    total_kg = Column(Numeric(12, 2), default=0)
+    observaciones = Column(Text)
+    estado = Column(String(20), default="registrada")   # registrada, anulada
+    carencia_forzada = Column(Boolean, default=False)
+    justificacion_carencia = Column(Text)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    lineas = relationship("CosechaLinea", cascade="all, delete-orphan", backref="cosecha",
+                          order_by="CosechaLinea.id")
+
+
+class CosechaLinea(Base):
+    __tablename__ = "cosecha_lineas"
+    id = Column(Integer, primary_key=True, index=True)
+    cosecha_id = Column(Integer, ForeignKey("cosechas.id", ondelete="CASCADE"), nullable=False, index=True)
+    calibre_id = Column(Integer, ForeignKey("calibres.id"), nullable=False)
+    producto_id = Column(String(10), ForeignKey("productos.id_prod"))   # snapshot del calibre al registrar
+    kg = Column(Numeric(12, 2), nullable=False)
+    costo_unitario = Column(Numeric(14, 4), default=0)
+    movimiento_id = Column(Integer, ForeignKey("movimientos_inventario.id"))
+    calibre = relationship("Calibre")
+
+
 class CosechaLiquidacion(Base):
     __tablename__ = "cosecha_liquidaciones"
     id = Column(Integer, primary_key=True, index=True)

@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/inventario", tags=["inventario"])
 # "Consumo OT" NO es motivo de GI: el consumo por OT se registra desde el módulo de
 # órdenes (crea OTDetalle + movimiento OT); una GI con ese motivo descontaría
 # inventario sin llegar jamás al costo de la OT → divergencia silenciosa.
-MOTIVOS_GI = ["Merma", "Vencimiento", "Devolucion Proveedor", "Muestra", "Uso No Productivo", "Otro"]
+MOTIVOS_GI = ["Venta", "Merma", "Vencimiento", "Devolucion Proveedor", "Muestra", "Uso No Productivo", "Otro"]
 
 
 def _f(v) -> float:
@@ -361,7 +361,8 @@ def goods_issue(data: schemas.GICreate, db: Session = Depends(get_db),
     monto = round(_f(data.cantidad) * cp, 2)
     if monto > 0 and p.cuenta_inventario_id and p.cuenta_costo_id:
         r_inv = _get_regla_cuentas(db, "inventario", "salida")
-        cta_debe = r_inv[0] if r_inv else p.cuenta_costo_id
+        # Una venta va a costo de ventas del producto, no a la cuenta genérica de salidas.
+        cta_debe = p.cuenta_costo_id if data.motivo == "Venta" else (r_inv[0] if r_inv else p.cuenta_costo_id)
         cta_haber = p.cuenta_inventario_id
         fecha_gi = data.fecha or datetime.now()
         fecha_asiento = fecha_gi.date() if hasattr(fecha_gi, 'date') else fecha_gi

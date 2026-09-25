@@ -9,7 +9,7 @@ from routers import (
     auth, campos, trabajadores, actividades, productos,
     contabilidad, sequences, admin, roles,
     ordenes, dashboard, inventario, reportes, compras,
-    audit_log, tipos_producto, categorias_producto, proveedores,
+    audit_log, tipos_producto, categorias_producto, proveedores, cosecha,
     clima, sanidad, riego, analytics,
     clientes, cuentas_bancarias,
 )
@@ -417,6 +417,7 @@ def seed_rbac():
             ("inventario", "Inventario"),
             ("actividades", "Actividades"),
             ("compras", "Compras"),
+            ("cosecha", "Cosecha"),
             ("configuracion", "Configuración"),
             ("admin", "Administración"),
         ]
@@ -427,6 +428,7 @@ def seed_rbac():
             ("delete", "Eliminar"),
         ]
         # Create permission catalog
+        nuevos = set()
         for mod, mod_label in MODULOS:
             for accion, accion_label in ACCIONES:
                 codigo = f"{mod}.{accion}"
@@ -436,6 +438,7 @@ def seed_rbac():
                         codigo=codigo, modulo=mod, accion=accion,
                         descripcion=f"Permite {accion_label.lower()} en {mod_label}",
                     ))
+                    nuevos.add(codigo)
         db.commit()
 
         perms = {p.codigo: p for p in db.query(models.Permiso).all()}
@@ -450,17 +453,17 @@ def seed_rbac():
             "dashboard", "ordenes", "costos", "analytics", "nomina", "clima",
             "sanidad", "riego", "contabilidad", "activos_fijos", "presupuesto",
             "clientes", "proveedores", "efectivo_banco", "campos", "trabajadores",
-            "productos", "inventario", "actividades", "compras",
+            "productos", "inventario", "actividades", "compras", "cosecha",
             "configuracion", "admin",
         ]
         SUPERVISOR_READ_WRITE = [
             "dashboard", "ordenes", "costos", "analytics", "clima", "sanidad",
             "riego", "contabilidad", "campos", "trabajadores", "productos",
             "inventario", "actividades", "compras", "clientes", "proveedores",
-            "efectivo_banco", "activos_fijos", "presupuesto",
+            "efectivo_banco", "activos_fijos", "presupuesto", "cosecha",
         ]
         SUPERVISOR_READ = ["nomina"]
-        OPERADOR_READ_WRITE = ["ordenes", "dashboard", "costos", "inventario", "actividades", "campos"]
+        OPERADOR_READ_WRITE = ["ordenes", "dashboard", "costos", "inventario", "actividades", "campos", "cosecha"]
         OPERADOR_READ = [
             "analytics", "nomina", "clima", "sanidad", "riego", "trabajadores",
             "productos", "contabilidad", "clientes", "proveedores", "presupuesto",
@@ -483,6 +486,14 @@ def seed_rbac():
                 rol.permisos = db.query(models.Permiso).filter(models.Permiso.id.in_(perm_ids)).all()
             elif not rol.permisos:
                 rol.permisos = db.query(models.Permiso).filter(models.Permiso.id.in_(perm_ids)).all()
+            elif nuevos:
+                # Un rol existente solo recibía permisos al crearse: un módulo nuevo quedaba
+                # invisible hasta para el admin. Se le añaden los permisos recién creados que
+                # le tocan, sin reponer ninguno que un admin haya quitado a mano.
+                agregar = [p for p in db.query(models.Permiso).filter(
+                    models.Permiso.id.in_(perm_ids), models.Permiso.codigo.in_(nuevos)).all()
+                    if p not in rol.permisos]
+                rol.permisos.extend(agregar)
         db.commit()
 
         # Assign existing users to matching roles
@@ -569,6 +580,7 @@ app.include_router(compras.router)
 app.include_router(audit_log.router)
 app.include_router(tipos_producto.router)
 app.include_router(categorias_producto.router)
+app.include_router(cosecha.router)
 app.include_router(proveedores.router)
 app.include_router(clima.router)
 app.include_router(sanidad.router)
