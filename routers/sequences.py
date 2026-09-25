@@ -29,6 +29,10 @@ SEQUENCE_CONFIG = {
     'COB':   ('COB-', 4),
     'RP':    ('RP-',  4),
     'PRES':  ('PRES-', 4),
+    'NC':    ('NC-',  4),
+    'DEV':   ('DEV-', 4),
+    'DEV-GR': ('DGR-', 4),
+    'COS':   ('COS-', 4),
 }
 
 SEQUENCE_TABLE_MAP = {
@@ -39,7 +43,9 @@ SEQUENCE_TABLE_MAP = {
 
 
 def _fmt(tipo: str, num: int) -> str:
-    prefix, padding = SEQUENCE_CONFIG[tipo]
+    # Un tipo sin registrar reventaba con KeyError y tumbaba la operación entera
+    # (así fallaron notas de crédito y devoluciones): mejor un formato genérico.
+    prefix, padding = SEQUENCE_CONFIG.get(tipo, (f"{tipo}-", 4))
     if padding == 0:
         return str(num)  # OT: plain integer
     return f"{prefix}{str(num).zfill(padding)}"
