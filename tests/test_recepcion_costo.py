@@ -3,7 +3,12 @@ import datetime as dt
 
 import models
 from conftest import ANIO
+import pytest
+
 from routers.compras import RecepcionLinea, RecepcionPayload, recibir_oc
+
+# Una recepción siempre contabiliza: sin regla ni período abierto no se puede recibir.
+pytestmark = pytest.mark.usefixtures("reglas_compra")
 
 
 def _oc_con_descuento(db, proveedor, descuento_pct):

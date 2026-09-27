@@ -56,7 +56,7 @@ def test_detecta_una_recepcion_valuada_al_bruto(db, proveedor, user):
     assert r["sobrepago_cxp_total"] == 1_000
 
 
-def test_una_recepcion_correcta_no_aparece(db, proveedor, user):
+def test_una_recepcion_correcta_no_aparece(db, proveedor, user, reglas_compra):
     """Con el fix, recibir_oc ya valúa al neto: la auditoría debe quedar vacía."""
     db.add(models.Producto(id_prod="P1", producto="Urea", unidad="kg", costo_promedio=0,
                            stock_actual=0, es_inventariable=True, activo=True))

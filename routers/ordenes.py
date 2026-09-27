@@ -108,6 +108,35 @@ def _crear_movimiento_reversion_ot(db: Session, ot_id: int, producto: models.Pro
     return mov
 
 
+def _creditos_insumos_ot(db: Session, ot_id, costo_ins: Decimal, cuenta_regla) -> dict:
+    """Reparte la salida de insumos de una OT entre las cuentas por las que entraron.
+
+    Cada insumo sale de la cuenta de inventario de su producto: la misma que debita la
+    recepción de compras y que usa la conciliación con el mayor. Acreditarlo todo a la
+    cuenta de la regla dejaba una cuenta de inventario sin salidas y otra en negativo.
+    Un servicio no pasó por inventario: se reclasifica desde su cuenta de gasto al costo
+    de la OT. Si el detalle no explica el costo total, se usa la regla como antes.
+    """
+    from routers.compras import _cuentas_producto   # local: evita el import circular
+    por_cuenta: dict = {}
+    asignado = Decimal("0")
+    for d in db.query(models.OTDetalle).filter(models.OTDetalle.ot_id == ot_id).all():
+        monto = Decimal(str(d.costo_real or 0)).quantize(Decimal("0.01"))
+        if monto <= 0:
+            continue
+        inv, costo = _cuentas_producto(d.producto)
+        es_servicio = d.producto is not None and d.producto.es_inventariable is False
+        cta = (costo if es_servicio else inv) or cuenta_regla
+        por_cuenta[cta] = por_cuenta.get(cta, Decimal("0")) + monto
+        asignado += monto
+    if not por_cuenta or abs(costo_ins - asignado) > Decimal("0.05"):
+        return {cuenta_regla: costo_ins}
+    if costo_ins != asignado:   # centavos de redondeo: a la cuenta de mayor monto
+        mayor = max(por_cuenta, key=por_cuenta.get)
+        por_cuenta[mayor] += costo_ins - asignado
+    return por_cuenta
+
+
 def _lineas_cierre_ot(db: Session, orden: models.OrdenTrabajo) -> list:
     """Construye las líneas del asiento de cierre de una OT desde sus costos actuales.
     Única fuente para el cierre y la re-valuación, así ambos generan lo mismo."""
@@ -132,8 +161,9 @@ def _lineas_cierre_ot(db: Session, orden: models.OrdenTrabajo) -> list:
         lineas.append({"cuenta_id": r_ins[0], "debe": costo_ins, "haber": 0,
                        "campo_id": orden.campo_id, "unidad_negocio_id": un_id, "departamento_id": dep_id,
                        "descripcion_linea": f"Insumos OT #{ot_id}"})
-        lineas.append({"cuenta_id": r_ins[1], "debe": 0, "haber": costo_ins,
-                       "descripcion_linea": f"Salida inventario OT #{ot_id}"})
+        for cta, monto in _creditos_insumos_ot(db, ot_id, costo_ins, r_ins[1]).items():
+            lineas.append({"cuenta_id": cta, "debe": 0, "haber": monto,
+                           "descripcion_linea": f"Salida inventario OT #{ot_id}"})
 
     if costo_eq > 0:
         cta_eq = db.query(models.CuentaContable).filter(

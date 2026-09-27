@@ -4671,31 +4671,42 @@ def dgii_606(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(ge
         if cxp.proveedor_id not in provs:
             provs[cxp.proveedor_id] = db.query(models.Proveedor).get(cxp.proveedor_id)
 
+    # Fecha del último pago de cada factura: la DGII la pide cuando hay retenciones.
+    ultimo_pago = dict(db.query(models.Pago.cxp_id, sqlfunc.max(models.Pago.fecha)).filter(
+        models.Pago.cxp_id.in_([c.id for c in items] or [0])).group_by(models.Pago.cxp_id).all())
+
     rows = []
     for cxp in items:
         prov = provs.get(cxp.proveedor_id)
+        pagada = ultimo_pago.get(cxp.id)
         rows.append({
+            "cxp": cxp.numero,
             "rnc_cedula": prov.rnc if prov else "",
             "tipo_id": "1" if prov and prov.rnc and len(prov.rnc) == 9 else "2",
             "tipo_bienes_servicios": "02",
             "ncf": cxp.ncf or "",
             "ncf_modificado": "",
             "fecha_comprobante": str(cxp.fecha_factura) if cxp.fecha_factura else "",
-            "fecha_pago": "",
+            "fecha_pago": str(pagada) if pagada else "",
             "monto_facturado": float(cxp.subtotal or 0),
             "itbis_facturado": float(cxp.itbis or 0),
-            "itbis_retenido": 0,
+            "itbis_retenido": float(cxp.retencion_itbis or 0),
             "isr_retenido": float(cxp.retencion_isr or 0),
             "total": float(cxp.total or 0),
             "proveedor": prov.nombre if prov else "—",
         })
+    sin_ncf = [r["cxp"] for r in rows if not r["ncf"]]
     return {
         "rnc_empresa": rnc_empresa,
         "periodo": f"{anio}{mes:02d}",
         "cantidad_registros": len(rows),
         "total_monto": round(sum(r["monto_facturado"] for r in rows), 2),
         "total_itbis": round(sum(r["itbis_facturado"] for r in rows), 2),
+        "total_itbis_retenido": round(sum(r["itbis_retenido"] for r in rows), 2),
         "total_retencion_isr": round(sum(r["isr_retenido"] for r in rows), 2),
+        "sin_ncf": sin_ncf,
+        "alertas": ([f"{len(sin_ncf)} factura(s) sin NCF: la DGII rechaza esos registros. "
+                     "Complete el NCF antes de enviar el formato."] if sin_ncf else []),
         "registros": rows,
     }
 

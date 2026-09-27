@@ -71,6 +71,31 @@ def proveedor(db):
     return p
 
 
+def periodo_abierto(db, d: dt.date):
+    """Período contable abierto para el mes de `d` (si no existe ya)."""
+    import calendar
+    if not db.query(models.PeriodoContable).filter_by(anio=d.year, mes=d.month).first():
+        fin = dt.date(d.year, d.month, calendar.monthrange(d.year, d.month)[1])
+        db.add(models.PeriodoContable(anio=d.year, mes=d.month, nombre=f"{d.month:02d}-{d.year}",
+                                      estado="abierto", fecha_inicio=dt.date(d.year, d.month, 1),
+                                      fecha_fin=fin))
+        db.flush()
+
+
+@pytest.fixture
+def reglas_compra(db):
+    """Lo mínimo para que una recepción contabilice: regla de compra y período de hoy."""
+    inv = models.CuentaContable(codigo="1.1.03.01", nombre="Inventario insumos", naturaleza="deudora", tipo="activo")
+    cxp = models.CuentaContable(codigo="2.1.01.01", nombre="CxP proveedores", naturaleza="acreedora", tipo="pasivo")
+    db.add_all([inv, cxp])
+    db.flush()
+    db.add(models.ReglaContabilizacion(evento="compra", concepto="factura_proveedor", activo=True,
+                                       cuenta_debe_id=inv.id, cuenta_haber_id=cxp.id))
+    periodo_abierto(db, dt.date.today())
+    db.commit()
+    return {"inventario": inv, "cxp": cxp}
+
+
 def presupuestar(db, cuenta_id, monto_mensual, *, meses=12, departamento_id=None,
                  campo_id=None, unidad_negocio_id=None, escenario="principal"):
     """Crea una línea de presupuesto aprobada con el mismo monto en los primeros N meses."""
