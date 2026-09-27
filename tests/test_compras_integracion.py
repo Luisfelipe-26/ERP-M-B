@@ -11,11 +11,12 @@ from fastapi import HTTPException
 
 import models
 import schemas
-from conftest import ANIO, periodo_abierto, presupuestar
-from routers.compras import (DevolucionLinea, DevolucionPayload, RecepcionLinea, RecepcionPayload,
-                             aprobar_oc, create_oc, delete_oc, devolver_oc, recibir_oc,
+from conftest import ANIO, cuentas_compra, periodo_abierto, presupuestar
+from routers.compras import (DevolucionLinea, DevolucionPayload, FacturaDatos, FacturaPayload,
+                             RecepcionLinea, RecepcionPayload, aprobar_oc, create_oc, delete_oc,
+                             devolver_oc, recibir_oc, registrar_factura_oc, reporte_por_facturar,
                              update_oc, update_oc_estado)
-from routers.contabilidad import dgii_606, registrar_pago
+from routers.contabilidad import crear_cxp, dgii_606, registrar_pago
 from routers.ordenes import _lineas_cierre_ot
 
 ENERO = dt.date(ANIO, 1, 15)
@@ -24,12 +25,10 @@ ENERO = dt.date(ANIO, 1, 15)
 @pytest.fixture
 def e(db, config, proveedor):
     """Plan de cuentas con reglas por defecto: la compra debita Inventario (clase 1)."""
-    c = {}
+    c = cuentas_compra(db)
     for cod, nom, nat, tipo in [
         ("1.1.01", "Banco", "deudora", "activo"),
-        ("1.1.03.01", "Inventario insumos", "deudora", "activo"),
         ("1.1.03.02", "Inventario combustibles", "deudora", "activo"),
-        ("2.1.01.01", "CxP proveedores", "acreedora", "pasivo"),
         ("5.1.02", "Costo insumos", "deudora", "costo"),
         ("5.1.04", "Servicios contratados", "deudora", "costo"),
     ]:
@@ -37,8 +36,6 @@ def e(db, config, proveedor):
         db.add(c[cod])
     db.flush()
     db.add_all([
-        models.ReglaContabilizacion(evento="compra", concepto="factura_proveedor", activo=True,
-                                    cuenta_debe_id=c["1.1.03.01"].id, cuenta_haber_id=c["2.1.01.01"].id),
         models.ReglaContabilizacion(evento="pago", concepto="pago_proveedor", activo=True,
                                     cuenta_debe_id=c["2.1.01.01"].id, cuenta_haber_id=c["1.1.01"].id),
         models.ReglaContabilizacion(evento="consumo_ot", concepto="salida_insumo", activo=True,
@@ -73,9 +70,10 @@ def _oc(db, user, proveedor, *lineas, aprobar=True):
     return r.oc_id, db.query(models.OrdenCompraLinea).filter_by(oc_id=r.oc_id).order_by(models.OrdenCompraLinea.id).all()
 
 
-def _recibir(db, user, oc_id, *pares, fecha=None):
+def _recibir(db, user, oc_id, *pares, fecha=None, ncf=None):
     return recibir_oc(oc_id, RecepcionPayload(fecha=fecha, lineas=[RecepcionLinea(linea_id=l.id, cantidad_recibida=q)
-                                                                   for l, q in pares]),
+                                                                   for l, q in pares],
+                                              factura=FacturaDatos(ncf=ncf) if ncf else None),
                       db=db, current_user=user)
 
 
@@ -141,7 +139,7 @@ def test_una_oc_con_recepciones_no_se_edita_ni_se_borra(db, user, proveedor, e):
     with pytest.raises(HTTPException):
         delete_oc(oc_id, db=db, current_user=user)
     db.rollback()
-    assert db.query(models.CuentaPorPagar).filter_by(oc_id=oc_id).count() == 1
+    assert db.query(models.MovimientoInventario).filter_by(oc_referencia=oc_id).count() == 1
 
 
 def test_borrar_solo_borradores_o_canceladas(db, user, proveedor, e):
@@ -164,7 +162,8 @@ def test_cada_linea_se_contabiliza_en_su_cuenta(db, user, proveedor, e):
     assert _saldo(db, e["1.1.03.01"]) == 10_000
     assert _saldo(db, e["1.1.03.02"]) == 5_000
     assert _saldo(db, e["5.1.04"]) == 20_000, "el servicio no entra al inventario"
-    assert _saldo(db, e["2.1.01.01"]) == -35_000
+    assert _saldo(db, e["2.1.01.04"]) == -35_000, "queda recibido por facturar"
+    assert _saldo(db, e["2.1.01.01"]) == 0, "sin factura no hay deuda con el proveedor"
     assert float(db.query(models.Producto).filter_by(id_prod="S1").one().stock_actual) == 0
 
 
@@ -193,6 +192,7 @@ def test_recepcion_con_fecha_atrasada(db, user, proveedor, e):
 
     assert db.query(models.MovimientoInventario).filter_by(oc_referencia=oc_id).one().fecha.date() == ayer
     assert db.query(models.AsientoContable).filter_by(origen="GR", referencia_id=oc_id).one().fecha == ayer
+    registrar_factura_oc(oc_id, FacturaPayload(ncf="B0100000321", fecha_factura=ayer), db=db, current_user=user)
     assert db.query(models.CuentaPorPagar).filter_by(oc_id=oc_id).one().fecha_factura == ayer
 
     oc2, (l2,) = _oc(db, user, proveedor, ("P1", 1, 1_000))
@@ -246,7 +246,7 @@ def test_no_se_devuelve_lo_que_ya_se_consumio(db, user, proveedor, e):
 
 def test_devolver_una_factura_ya_pagada_no_pierde_el_credito(db, user, proveedor, e):
     oc_id, (l,) = _oc(db, user, proveedor, ("P1", 10, 1_000))
-    _recibir(db, user, oc_id, (l, 10))
+    _recibir(db, user, oc_id, (l, 10), ncf="B0100000001")
     cxp = db.query(models.CuentaPorPagar).filter_by(oc_id=oc_id).one()
     registrar_pago(schemas.PagoCreate(cxp_id=cxp.id, fecha=dt.date.today(), monto=float(cxp.saldo_pendiente)),
                    db=db, user=user)
@@ -282,14 +282,117 @@ def test_el_606_trae_itbis_retenido_fecha_de_pago_y_avisa_sin_ncf(db, user, prov
     proveedor.retencion_itbis_pct = 30
     db.commit()
     oc_id, (l,) = _oc(db, user, proveedor, ("P1", 10, 1_000))
-    _recibir(db, user, oc_id, (l, 10))
+    _recibir(db, user, oc_id, (l, 10), ncf="B0100000606")
     cxp = db.query(models.CuentaPorPagar).filter_by(oc_id=oc_id).one()
     registrar_pago(schemas.PagoCreate(cxp_id=cxp.id, fecha=dt.date.today(), monto=float(cxp.saldo_pendiente)),
                    db=db, user=user)
-
     hoy = dt.date.today()
+    sin_ncf = crear_cxp(schemas.CuentaPorPagarCreate(proveedor_id=proveedor.id, fecha_factura=hoy,
+                                                     subtotal=500, itbis=0),
+                        override=False, db=db, user=user)
+
     r = dgii_606(anio=hoy.year, mes=hoy.month, db=db, user=user)
     fila = next(f for f in r["registros"] if f["cxp"] == cxp.numero)
+    assert fila["ncf"] == "B0100000606"
     assert fila["itbis_retenido"] == 540            # 30% de 1.800
     assert fila["fecha_pago"] == str(hoy)
-    assert cxp.numero in r["sin_ncf"] and r["alertas"]
+    assert r["sin_ncf"] == [sin_ncf["numero"]] and r["alertas"]
+
+
+# ── Factura separada de la recepción (fase 2) ────────────────────────────────
+
+def test_devolver_parte_facturada_emite_nota_de_credito_con_itbis(db, user, proveedor, e):
+    """Recibe 10 y factura 6: al devolver 7, 4 salen sin facturar y 3 con nota de crédito."""
+    proveedor.retencion_itbis_pct = 0
+    db.commit()
+    oc_id, (l,) = _oc(db, user, proveedor, ("P1", 10, 1_000))
+    _recibir(db, user, oc_id, (l, 10))
+    registrar_factura_oc(oc_id, FacturaPayload(ncf="B0100000070", lineas=[{"linea_id": l.id, "cantidad": 6}]),
+                         db=db, current_user=user)
+
+    r = devolver_oc(oc_id, DevolucionPayload(ncf="B0400000001",
+                                             lineas=[DevolucionLinea(linea_id=l.id, cantidad_devuelta=7)]),
+                    db=db, current_user=user)
+
+    nc = db.query(models.NotaCredito).filter_by(numero=r["nc_numero"]).one()
+    assert float(nc.subtotal) == 3_000 and float(nc.itbis) == 540 and nc.ncf == "B0400000001"
+    db.refresh(l)
+    assert float(l.cantidad_recibida) == 3 and float(l.cantidad_facturada) == 3
+    cxp = db.query(models.CuentaPorPagar).filter_by(oc_id=oc_id).one()
+    assert float(cxp.saldo_pendiente) == 6_000 + 1_080 - 3_540
+    assert _saldo(db, e["2.1.01.04"]) == 0, "lo no facturado salió de la cuenta puente"
+    assert _saldo(db, e["1.1.02.03"]) == 1_080 - 540, "la NC revierte su ITBIS"
+    assert _saldo(db, e["2.1.01.01"]) == -float(cxp.saldo_pendiente), "mayor de CxP = auxiliar"
+    assert _saldo(db, e["1.1.03.01"]) == 3_000
+
+
+def test_el_reporte_por_facturar_cuadra_con_la_cuenta_puente(db, user, proveedor, e):
+    oc_a, (la,) = _oc(db, user, proveedor, ("P1", 10, 1_000))
+    oc_b, (lb,) = _oc(db, user, proveedor, ("P2", 20, 50))
+    _recibir(db, user, oc_a, (la, 10))
+    _recibir(db, user, oc_b, (lb, 20))
+    registrar_factura_oc(oc_a, FacturaPayload(ncf="B0100000080", lineas=[{"linea_id": la.id, "cantidad": 4}]),
+                         db=db, current_user=user)
+
+    r = reporte_por_facturar(db=db, _=user)
+    assert r["total"] == 6_000 + 1_000
+    assert r["saldo_mayor"] == 7_000 and r["diferencia"] == 0
+
+
+def test_una_cxp_manual_no_puede_colgarse_de_una_oc(db, user, proveedor, e):
+    with pytest.raises(HTTPException) as ex:
+        crear_cxp(schemas.CuentaPorPagarCreate(proveedor_id=proveedor.id, fecha_factura=dt.date.today(),
+                                               subtotal=1_000, itbis=180, oc_id="OC-0001"),
+                  override=False, db=db, user=user)
+    assert "desde la orden de compra" in ex.value.detail
+
+
+def test_factura_de_consumo_su_itbis_es_costo(db, user, proveedor, e):
+    """Una B02 no da crédito fiscal: su ITBIS va al costo y consume presupuesto."""
+    proveedor.retencion_itbis_pct = 0
+    db.commit()
+    oc_id, (l,) = _oc(db, user, proveedor, ("P1", 10, 1_000))
+    _recibir(db, user, oc_id, (l, 10), ncf="B0200000001")
+    assert _saldo(db, e["1.1.02.03"]) == 0
+    assert _saldo(db, e["5.1.02"]) == 1_800
+    devengado = sum(float(m.monto) for m in db.query(models.MovimientoPresupuestario).all() if m.tipo == "DEVENGADO")
+    assert devengado == 11_800
+
+
+def test_ajuste_de_recepciones_anteriores_cuadra_el_mayor(db, user, proveedor, e):
+    """Una CxP creada por la recepción vieja (asiento solo por el subtotal) se complementa."""
+    from routers.compras import ajuste_asientos_recepciones
+    from routers.contabilidad import _crear_asiento_auto
+    proveedor.retencion_itbis_pct = 30
+    db.commit()
+    hoy = dt.date.today()
+    a = _crear_asiento_auto(db, hoy, "GR", "OC-VIEJA", "Recepción vieja", [
+        {"cuenta_id": e["1.1.03.01"].id, "debe": Decimal("10000"), "haber": 0},
+        {"cuenta_id": e["2.1.01.01"].id, "debe": 0, "haber": Decimal("10000")}], "test", requerido=True)
+    db.add(models.CuentaPorPagar(numero="CXP-V1", proveedor_id=proveedor.id, oc_id="OC-VIEJA", fecha_factura=hoy,
+                                 subtotal=10_000, itbis=1_800, retencion_isr=0, retencion_itbis=540,
+                                 total=11_260, saldo_pendiente=11_260, estado="pendiente", asiento_id=a.id))
+    db.commit()
+    assert _saldo(db, e["2.1.01.01"]) == -10_000
+
+    prueba = ajuste_asientos_recepciones(dry_run=True, fecha=None, db=db, current_user=user)
+    assert prueba["facturas"] == 1 and prueba["ajuste_cxp"] == 1_260
+    assert _saldo(db, e["2.1.01.01"]) == -10_000, "el modo prueba no toca nada"
+
+    ajuste_asientos_recepciones(dry_run=False, fecha=None, db=db, current_user=user)
+    assert _saldo(db, e["2.1.01.01"]) == -11_260
+    assert _saldo(db, e["1.1.02.03"]) == 1_800
+    assert _saldo(db, e["2.1.02.04"]) == -540
+    otra = ajuste_asientos_recepciones(dry_run=True, fecha=None, db=db, current_user=user)
+    assert otra["facturas"] == 0, "no se ajusta dos veces"
+
+
+def test_se_puede_registrar_el_ncf_de_una_factura_vieja(db, user, proveedor, e):
+    from routers.contabilidad import DatosFiscalesCxP, datos_fiscales_cxp
+    hoy = dt.date.today()
+    r = crear_cxp(schemas.CuentaPorPagarCreate(proveedor_id=proveedor.id, fecha_factura=hoy, subtotal=500, itbis=0),
+                  override=False, db=db, user=user)
+    datos_fiscales_cxp(r["id"], DatosFiscalesCxP(ncf="e31-0000000123"), db=db, user=user)
+    cxp = db.query(models.CuentaPorPagar).get(r["id"])
+    assert cxp.ncf == "E310000000123" and cxp.tipo_ncf == "E31"
+    assert dgii_606(anio=hoy.year, mes=hoy.month, db=db, user=user)["sin_ncf"] == []

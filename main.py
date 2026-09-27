@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -286,6 +287,14 @@ def run_migrations():
         "ALTER TABLE notas_credito ADD COLUMN IF NOT EXISTS proveedor_id INTEGER REFERENCES proveedores(id)",
         "ALTER TABLE notas_credito ADD COLUMN IF NOT EXISTS cxp_id INTEGER REFERENCES cuentas_por_pagar(id)",
         "ALTER TABLE notas_credito ADD COLUMN IF NOT EXISTS estado VARCHAR(20) DEFAULT 'activa'",
+        # Compras fase 2: la factura se registra aparte de la recepción. Lo recibido antes de
+        # este cambio ya tenía su CxP (la recepción la creaba), así que cuenta como facturado.
+        "ALTER TABLE ordenes_compra_lineas ADD COLUMN IF NOT EXISTS cantidad_facturada DOUBLE PRECISION",
+        "UPDATE ordenes_compra_lineas SET cantidad_facturada = COALESCE(cantidad_recibida, 0) WHERE cantidad_facturada IS NULL",
+        "ALTER TABLE ordenes_compra_lineas ALTER COLUMN cantidad_facturada SET DEFAULT 0",
+        # Asientos anulados con reverso: pasan a "revertido" para que cuenten junto a su reverso
+        # en los reportes por líneas (antes solo contaba el reverso y la anulación restaba doble).
+        "UPDATE asientos_contables SET estado = 'revertido' WHERE estado = 'anulado' AND asiento_reverso_id IS NOT NULL",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).
@@ -538,6 +547,26 @@ def seed_admin():
         db.close()
 
 
+def asegurar_cuentas_compras():
+    """Crea, si faltan, la cuenta puente de recepciones sin factura y su regla.
+
+    Aditivo e idempotente: no toca cuentas existentes, así sirve para bases de datos
+    cuyo catálogo divergió del de referencia.
+    """
+    from reglas_contables import asegurar_cuenta_puente
+    db = SessionLocal()
+    try:
+        creada = asegurar_cuenta_puente(db, models)
+        db.commit()
+        if creada:
+            logging.getLogger(__name__).info("Cuenta puente de compras creada: %s", creada)
+    except Exception:
+        db.rollback()
+        logging.getLogger(__name__).exception("No se pudo asegurar la cuenta puente de compras")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     models.Base.metadata.create_all(bind=engine)
@@ -546,6 +575,7 @@ async def lifespan(app: FastAPI):
     seed_rbac()
     seed_diarios()
     seed_admin()
+    asegurar_cuentas_compras()
     recalc_all_ot_costs()
     start_sync()
     yield

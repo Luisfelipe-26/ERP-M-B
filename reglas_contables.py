@@ -16,6 +16,10 @@ REGLAS_DATA = [
     # ── Compras ──
     ("compra", "factura_proveedor", "1.1.03.01", "2.1.01.01", "Compra insumos: Db Inventario, Cr CxP Proveedores"),
     ("compra", "itbis_compra",      "1.1.02.03", "2.1.01.01", "ITBIS en compras: Db Crédito Fiscal, Cr CxP"),
+    ("compra", "recepcion_por_facturar", "1.1.03.01", "2.1.01.04",
+     "Recepción sin factura: Db Inventario, Cr Compras Recibidas por Facturar"),
+    ("compra", "retencion_isr",     "2.1.01.01", "2.1.02.03", "Retención ISR a proveedor: Cr Retenciones ISR por Pagar"),
+    ("compra", "retencion_itbis",   "2.1.01.01", "2.1.02.04", "Retención ITBIS a proveedor: Cr ITBIS Retenido por Pagar"),
     # ── Ventas ──
     ("venta", "factura_cliente", "1.1.02.01", "4.1.01",    "Venta: Db CxC Clientes, Cr Ingreso Venta"),
     ("venta", "itbis_venta",     "1.1.02.01", "2.1.02.01", "ITBIS en ventas: Db CxC, Cr ITBIS por Pagar"),
@@ -41,6 +45,39 @@ REGLAS_DATA = [
     # ── Depreciación ──
     ("depreciacion", "dep_mensual", "5.1.03", "1.2.02.01", "Depreciación: Db Costo Dep, Cr Dep Acumulada"),
 ]
+
+
+def asegurar_cuenta_puente(db, models):
+    """Crea, si faltan, la cuenta 'Compras Recibidas por Facturar' y la regla que la usa.
+
+    La recepción acredita esta cuenta y la factura del proveedor la liquida, como en
+    Dynamics 365. Si ya hay una cuenta con ese sentido se reutiliza; si el código 2.1.01.04
+    está ocupado por otra cuenta (catálogo divergente), se toma el siguiente libre.
+    Devuelve el código de la cuenta usada si creó la regla, o None si ya existía.
+    """
+    C, R = models.CuentaContable, models.ReglaContabilizacion
+    if db.query(R).filter_by(evento="compra", concepto="recepcion_por_facturar").first():
+        return None
+    cuenta = next((c for c in db.query(C).filter(C.codigo.like("2.1.01.%")).all()
+                   if "factur" in (c.nombre or "").lower() and "recib" in (c.nombre or "").lower()), None)
+    if cuenta is None:
+        usados = {c for (c,) in db.query(C.codigo).all()}
+        codigo = next(f"2.1.01.{n:02d}" for n in range(4, 100) if f"2.1.01.{n:02d}" not in usados)
+        padre = db.query(C).filter_by(codigo="2.1.01").first()
+        hermana = db.query(C).filter_by(codigo="2.1.01.01").first()
+        cuenta = C(codigo=codigo, nombre="Compras Recibidas por Facturar", tipo="pasivo",
+                   naturaleza="acreedora", grupo="Balance", nivel=4, acepta_movimientos=True,
+                   cuenta_padre_id=padre.id if padre else None,
+                   # Se presenta en el balance junto a las CxP de proveedores.
+                   partida_id=hermana.partida_id if hermana else None, activo=True)
+        db.add(cuenta)
+        db.flush()
+    compra = db.query(R).filter_by(evento="compra", concepto="factura_proveedor").first()
+    db.add(R(evento="compra", concepto="recepcion_por_facturar",
+             cuenta_debe_id=compra.cuenta_debe_id if compra else cuenta.id,
+             cuenta_haber_id=cuenta.id, activo=True,
+             descripcion="Recepción sin factura: Db Inventario, Cr Compras Recibidas por Facturar"))
+    return cuenta.codigo
 
 
 def sembrar_reglas(db, models):

@@ -188,7 +188,7 @@ def _revaluar_asiento_ot(db: Session, orden: models.OrdenTrabajo):
     asientos = db.query(models.AsientoContable).filter(
         models.AsientoContable.origen == "OT",
         models.AsientoContable.referencia_id == str(orden.ot_id),
-        models.AsientoContable.estado != "anulado",
+        models.AsientoContable.estado.notin_(("anulado", "revertido")),
     ).order_by(models.AsientoContable.id.asc()).all()
     if not asientos:
         return None
@@ -707,7 +707,7 @@ def update_estado(ot_id: int, estado: str = Query(...), hora_cierre: Optional[st
             existente = db.query(models.AsientoContable).filter(
                 models.AsientoContable.origen == "OT",
                 models.AsientoContable.referencia_id == str(ot_id),
-                models.AsientoContable.estado != "anulado",
+                models.AsientoContable.estado.notin_(("anulado", "revertido")),
             ).first()
             if existente:
                 _revaluar_asiento_ot(db, orden)
@@ -769,7 +769,7 @@ def delete_orden(ot_id: int, db: Session = Depends(get_db),
     asientos_ot = db.query(models.AsientoContable).filter(
         models.AsientoContable.origen == "OT",
         models.AsientoContable.referencia_id == str(ot_id),
-        models.AsientoContable.estado != "anulado",
+        models.AsientoContable.estado.notin_(("anulado", "revertido")),
     ).all()
     for a in asientos_ot:
         _actualizar_saldos(db, a, -1)

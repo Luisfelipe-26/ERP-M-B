@@ -8,6 +8,7 @@ from database import get_db
 import models, schemas, auth
 from routers.sequences import get_next, peek_next
 from routers.contabilidad import (_crear_asiento_auto, _get_regla_cuentas, _verificar_presupuesto,
+                                  _cuentas_retencion, _devengar_cxp_contra_compromisos, NCF_SIN_CREDITO,
                                   _registrar_mov_pres, _monto_presupuestario,
                                   _reversar_devengado_cxp, _itbis_compra)
 from typing import List, Optional
@@ -388,6 +389,9 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
             "cantidad": l.cantidad,
             "cantidad_recibida": l.cantidad_recibida or 0,
             "cantidad_pendiente": round(l.cantidad - (l.cantidad_recibida or 0), 4),
+            "cantidad_facturada": l.cantidad_facturada or 0,
+            "pendiente_facturar": round(_pendiente_facturar(l), 4),
+            "precio_neto": round(_precio_neto(l), 4),
             "precio_unitario": l.precio_unitario,
             "descuento_pct": float(l.descuento_pct or 0),
             "impuesto": l.impuesto or "itbis_18",
@@ -424,9 +428,9 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
         models.CuentaPorPagar.oc_id == oc_id,
     ).order_by(models.CuentaPorPagar.fecha_factura.desc()).all()
     cxp_out = [{
-        "numero": c.numero, "fecha": str(c.fecha_factura),
+        "id": c.id, "numero": c.numero, "fecha": str(c.fecha_factura),
         "total": float(c.total or 0), "saldo": float(c.saldo_pendiente or 0),
-        "estado": c.estado, "num_factura": c.num_factura_proveedor,
+        "estado": c.estado, "num_factura": c.num_factura_proveedor, "ncf": c.ncf,
     } for c in cxp_list]
 
     return {
@@ -435,6 +439,7 @@ def get_oc(oc_id: str, db: Session = Depends(get_db), _=Depends(auth.get_current
         "asiento_contable": asiento_info,
         "compromiso": compromiso_info,
         "cuentas_por_pagar": cxp_out,
+        "por_facturar": round(sum(_pendiente_facturar(l) * _precio_neto(l) for l in lineas), 2),
     }
 
 
@@ -728,24 +733,271 @@ def update_oc_estado(oc_id: str, estado: str = Query(...),
 
 from pydantic import BaseModel as PydanticBase
 from typing import List as TList
+import re as _re
+
+_EPS = 1e-6          # holgura de redondeo al comparar cantidades
+TOL_PRECIO = 0.02    # diferencia de precio factura vs OC que se acepta sin autorización
+
+# Comprobantes que puede traer (o, en B11/E41, emitir la finca por) una compra.
+TIPOS_NCF_COMPRA = {
+    "B01": "Crédito fiscal", "E31": "Crédito fiscal",
+    "B02": "Consumo", "E32": "Consumo",
+    "B11": "Comprobante de compras", "E41": "Comprobante de compras",
+    "B13": "Gastos menores", "E43": "Gastos menores",
+    "B14": "Regímenes especiales", "E44": "Regímenes especiales",
+    "B15": "Gubernamental", "E45": "Gubernamental",
+}
+_NCF_RE = _re.compile(r"^(B\d{10}|E\d{12})$")
+
+
+def _normalizar_ncf(ncf: str, tipos: dict, que: str) -> tuple:
+    """Valida el NCF (B + 10 dígitos, o e-CF: E + 12) y devuelve (ncf, tipo)."""
+    n = (ncf or "").strip().upper().replace("-", "").replace(" ", "")
+    if not _NCF_RE.match(n):
+        raise HTTPException(400, (
+            f"NCF '{ncf}' inválido: debe ser B y 10 dígitos (B0100000123) "
+            "o, si es electrónico, E y 12 dígitos (E310000000123)"))
+    if n[:3] not in tipos:
+        raise HTTPException(400, f"El comprobante {n[:3]} no corresponde a {que}")
+    return n, n[:3]
+
+
+def _pendiente_facturar(linea) -> float:
+    return max(0.0, float(linea.cantidad_recibida or 0) - float(linea.cantidad_facturada or 0))
+
+
+def _cuenta_diferencia(linea, prod, cuenta_recepcion):
+    """Dónde va lo que la factura cobra de más o de menos respecto a la OC.
+
+    En un servicio, a su propio gasto. En un producto con stock, a su cuenta de costo: el
+    inventario queda valuado al precio de la OC y el ajuste no lo desalinea del mayor.
+    """
+    if prod is not None and not prod.es_inventariable:
+        return cuenta_recepcion
+    return _cuentas_producto(prod)[1] or linea.cuenta_contable_id or cuenta_recepcion
+
+
+class FacturaLinea(PydanticBase):
+    linea_id: int
+    cantidad: float
+    precio_unitario: Optional[float] = None    # neto de descuento; None = el de la OC
+
+
+class FacturaDatos(PydanticBase):
+    ncf: str
+    num_factura: Optional[str] = None
+    fecha_factura: Optional[date] = None
+    fecha_vencimiento: Optional[date] = None
+    notas: Optional[str] = None
+
+
+class FacturaPayload(FacturaDatos):
+    lineas: TList[FacturaLinea] = []           # vacío = todo lo recibido sin facturar
+    aceptar_diferencia: bool = False           # solo admin: precio fuera de tolerancia
+
+
+def _registrar_factura(db: Session, oc, prov, data: FacturaPayload, user):
+    """Registra la factura del proveedor contra lo recibido de una OC (three-way match).
+
+    Como en Dynamics 365: la recepción dejó la mercancía contra la cuenta puente
+    "Compras recibidas por facturar"; la factura la liquida y reconoce la deuda real con
+    su ITBIS y sus retenciones. Solo se factura lo recibido y aún no facturado, y el
+    precio no puede apartarse del de la OC más de la tolerancia sin autorización.
+    """
+    from datetime import timedelta
+    ncf, tipo_ncf = _normalizar_ncf(data.ncf, TIPOS_NCF_COMPRA, "una factura de compra")
+    dup = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.proveedor_id == prov.id, models.CuentaPorPagar.ncf == ncf,
+        models.CuentaPorPagar.estado != "anulada").first()
+    if dup:
+        raise HTTPException(400, f"El NCF {ncf} de {prov.nombre} ya está registrado en {dup.numero}")
+    hoy = date.today()
+    fecha = data.fecha_factura or hoy
+    if fecha > hoy:
+        raise HTTPException(400, "La fecha de la factura no puede ser futura")
+
+    r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
+    r_puente = _get_regla_cuentas(db, "compra", "recepcion_por_facturar")
+    if not r_compra or not r_puente:
+        raise HTTPException(400, "Configure las reglas compra / factura_proveedor y compra / recepcion_por_facturar")
+
+    por_id = {l.id: l for l in db.query(models.OrdenCompraLinea).filter(
+        models.OrdenCompraLinea.oc_id == oc.oc_id).all()}
+    pedidos = data.lineas or [FacturaLinea(linea_id=l.id, cantidad=_pendiente_facturar(l))
+                              for l in por_id.values() if _pendiente_facturar(l) > _EPS]
+    if not pedidos:
+        raise HTTPException(400, f"La OC {oc.oc_id} no tiene mercancía recibida pendiente de facturar")
+
+    sin_credito = tipo_ncf in NCF_SIN_CREDITO
+    dims_oc = {"campo_id": oc.campo_id, "unidad_negocio_id": oc.unidad_negocio_id,
+               "departamento_id": oc.departamento_id}
+    puente = Decimal("0")
+    diferencias: dict = {}     # (cuenta, un, depto) -> monto (+ cobra de más, - de menos)
+    itbis_no_deducible: dict = {}
+    subtotal = itbis = Decimal("0")
+    lineas_cxp = []
+    for item in pedidos:
+        if item.cantidad <= 0:
+            continue
+        linea = por_id.get(item.linea_id)
+        if not linea:
+            raise HTTPException(400, f"La línea {item.linea_id} no pertenece a la OC {oc.oc_id}")
+        prod = db.query(models.Producto).filter(models.Producto.id_prod == linea.producto_id).first()
+        nombre = prod.producto if prod else linea.producto_id
+        pend = _pendiente_facturar(linea)
+        if item.cantidad > pend + _EPS:
+            raise HTTPException(400, (
+                f"{nombre}: hay {pend:g} recibidas sin facturar y la factura trae {item.cantidad:g}. "
+                "Registre primero la recepción de lo que falta."))
+        precio_oc = _precio_neto(linea)
+        precio = precio_oc if item.precio_unitario is None else float(item.precio_unitario)
+        if precio < 0:
+            raise HTTPException(400, f"{nombre}: el precio no puede ser negativo")
+        if precio_oc > 0 and abs(precio - precio_oc) / precio_oc > TOL_PRECIO + 1e-9:
+            if not data.aceptar_diferencia:
+                raise HTTPException(400, (
+                    f"{nombre}: la factura cobra {precio:,.2f} por unidad y la OC dice {precio_oc:,.2f} "
+                    f"(más de {TOL_PRECIO:.0%} de diferencia). Si es correcto, un administrador puede aceptarla."))
+            if user.rol != "admin":
+                raise HTTPException(403, "Solo un administrador puede aceptar una diferencia de precio fuera de tolerancia")
+
+        recibido = Decimal(str(round(item.cantidad * precio_oc, 2)))
+        sub = Decimal(str(round(item.cantidad * precio, 2)))
+        itbis_l = _itbis_compra(sub, linea.impuesto, prov)
+        cta_rec = _cuenta_debito_recepcion(linea, prod, r_compra[0])
+        clave = (_cuenta_diferencia(linea, prod, cta_rec),
+                 linea.unidad_negocio_id or oc.unidad_negocio_id,
+                 linea.departamento_id or oc.departamento_id)
+        puente += recibido
+        if sub != recibido:
+            diferencias[clave] = diferencias.get(clave, Decimal("0")) + (sub - recibido)
+        if sin_credito and itbis_l > 0:
+            itbis_no_deducible[clave] = itbis_no_deducible.get(clave, Decimal("0")) + itbis_l
+        subtotal += sub
+        itbis += itbis_l
+        linea.cantidad_facturada = float(linea.cantidad_facturada or 0) + item.cantidad
+        lineas_cxp.append((linea, item.cantidad, precio, sub, itbis_l))
+
+    if not lineas_cxp:
+        raise HTTPException(400, "Indique la cantidad facturada de al menos una línea")
+
+    r_itbis = _get_regla_cuentas(db, "compra", "itbis_compra")
+    if itbis > 0 and not sin_credito and not r_itbis:
+        raise HTTPException(400, "Configure la regla compra / itbis_compra para registrar el crédito fiscal")
+    ret_isr = (subtotal * Decimal(str(prov.retencion_isr_pct or 0)) / 100).quantize(Decimal("0.01"))
+    ret_itbis = (itbis * Decimal(str(prov.retencion_itbis_pct or 0)) / 100).quantize(Decimal("0.01"))
+    cta_ret_isr, cta_ret_itbis = _cuentas_retencion(db)
+    if (ret_isr > 0 and not cta_ret_isr) or (ret_itbis > 0 and not cta_ret_itbis):
+        raise HTTPException(400, "Configure las cuentas de retención ISR / ITBIS por pagar")
+    total = subtotal + itbis - ret_isr - ret_itbis
+
+    cxp = models.CuentaPorPagar(
+        numero=get_next("CXP", db), proveedor_id=prov.id, oc_id=oc.oc_id,
+        tipo_ncf=tipo_ncf, ncf=ncf, num_factura_proveedor=data.num_factura,
+        fecha_factura=fecha,
+        fecha_vencimiento=data.fecha_vencimiento or fecha + timedelta(days=prov.condicion_pago_dias or 30),
+        subtotal=subtotal, itbis=itbis, retencion_isr=ret_isr, retencion_itbis=ret_itbis,
+        total=total, saldo_pendiente=total,
+        notas=data.notas or f"Factura de la OC {oc.oc_id}",
+    )
+    db.add(cxp)
+    db.flush()
+    for linea, cant, precio, sub, itbis_l in lineas_cxp:
+        db.add(models.LineaCxP(
+            cxp_id=cxp.id, producto_id=linea.producto_id, oc_linea_id=linea.id,
+            cantidad=cant, precio_unitario=precio, descuento_pct=0,
+            impuesto=linea.impuesto or "itbis_18", monto_itbis=itbis_l, subtotal=sub,
+            cuenta_contable_id=linea.cuenta_contable_id,
+        ))
+
+    tercero = str(prov.id)
+    lineas = [{"cuenta_id": r_puente[1], "debe": puente, "haber": 0, **dims_oc, "tercero_id": tercero,
+               "descripcion_linea": f"Liquida recepción OC {oc.oc_id}"}]
+    for (cta, un, dep), m in diferencias.items():
+        lado = {"debe": m, "haber": 0} if m > 0 else {"debe": 0, "haber": -m}
+        lineas.append({"cuenta_id": cta, **lado, "campo_id": oc.campo_id, "unidad_negocio_id": un,
+                       "departamento_id": dep, "descripcion_linea": f"Diferencia de precio factura {ncf}"})
+    if itbis > 0:
+        if sin_credito:
+            for (cta, un, dep), m in itbis_no_deducible.items():
+                lineas.append({"cuenta_id": cta, "debe": m, "haber": 0, "campo_id": oc.campo_id,
+                               "unidad_negocio_id": un, "departamento_id": dep,
+                               "descripcion_linea": f"ITBIS no deducible ({tipo_ncf}) {ncf}"})
+        else:
+            lineas.append({"cuenta_id": r_itbis[0], "debe": itbis, "haber": 0,
+                           "descripcion_linea": f"ITBIS crédito fiscal {ncf}"})
+    lineas.append({"cuenta_id": r_compra[1], "debe": 0, "haber": total, **dims_oc, "tercero_id": tercero,
+                   "descripcion_linea": f"CxP factura {ncf}"})
+    if ret_isr > 0:
+        lineas.append({"cuenta_id": cta_ret_isr, "debe": 0, "haber": ret_isr,
+                       "descripcion_linea": f"Retención ISR {prov.nombre}"})
+    if ret_itbis > 0:
+        lineas.append({"cuenta_id": cta_ret_itbis, "debe": 0, "haber": ret_itbis,
+                       "descripcion_linea": f"Retención ITBIS {prov.nombre}"})
+    asiento = _crear_asiento_auto(db, fecha, "CXP", cxp.numero,
+                                  f"Factura {ncf} — {prov.nombre} (OC {oc.oc_id})",
+                                  lineas, user.nombre, requerido=True)
+    cxp.asiento_id = asiento.id
+
+    # La factura es el devengado: libera el compromiso de la OC por lo que cobra.
+    devengado = _devengar_cxp_contra_compromisos(db, cxp, user)
+    audit.log(db, user, "FACTURA", "OC", oc.oc_id,
+              f"Factura {ncf} ({cxp.numero}) de {prov.nombre}: total RD$ {total:,.2f}",
+              {"cxp": cxp.numero, "ncf": ncf, "subtotal": float(subtotal), "itbis": float(itbis),
+               "ret_isr": float(ret_isr), "ret_itbis": float(ret_itbis),
+               "diferencia_precio": float(sum(diferencias.values(), Decimal("0"))),
+               "devengado": float(devengado)})
+    return cxp
+
+
+@router.post("/{oc_id}/factura")
+def registrar_factura_oc(oc_id: str, data: FacturaPayload, db: Session = Depends(get_db),
+                         current_user: models.Usuario = Depends(auth.require_supervisor)):
+    """Registrar la factura del proveedor contra lo recibido de la OC."""
+    oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
+    if not oc:
+        raise HTTPException(404, "Orden de compra no encontrada")
+    if oc.estado not in ("Parcial", "Recibida", "Cerrada"):
+        raise HTTPException(400, f"La OC {oc_id} no tiene recepciones que facturar (estado: {oc.estado})")
+    prov = _proveedor_de(db, oc)
+    if not prov:
+        raise HTTPException(400, "La OC no tiene un proveedor registrado")
+    import logging as _logging
+    try:
+        cxp = _registrar_factura(db, oc, prov, data, current_user)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        _logging.getLogger(__name__).exception("Error registrando factura OC %s", oc_id)
+        raise HTTPException(500, "Error al registrar la factura")
+    return {"ok": True, "cxp": cxp.numero, "ncf": cxp.ncf, "subtotal": float(cxp.subtotal),
+            "itbis": float(cxp.itbis), "retencion_isr": float(cxp.retencion_isr),
+            "retencion_itbis": float(cxp.retencion_itbis), "total": float(cxp.total)}
+
 
 class RecepcionLinea(PydanticBase):
     linea_id: int
     cantidad_recibida: float
 
+
 class RecepcionPayload(PydanticBase):
-    num_factura: Optional[str] = None
+    num_factura: Optional[str] = None     # referencia del conduce o factura que acompaña la mercancía
     fecha: Optional[date] = None          # None = hoy; permite registrar una recepción atrasada
     lineas: TList[RecepcionLinea] = []
-
-
-_EPS = 1e-6   # holgura de redondeo al comparar cantidades
+    factura: Optional[FacturaDatos] = None   # "Recibir y facturar": la factura llegó con la mercancía
 
 
 @router.post("/{oc_id}/recepcion")
 def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db),
                current_user: models.Usuario = Depends(auth.require_supervisor)):
-    """Receive items against an OC — updates quantities, generates GR for inventariables."""
+    """Recibir mercancía de una OC: entra al inventario (o al gasto) contra la cuenta puente.
+
+    La deuda con el proveedor nace con su factura, no con la recepción. Si la factura llegó
+    con la mercancía, `factura` la registra en el mismo paso ("Recibir y facturar").
+    """
     oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
     if not oc:
         raise HTTPException(status_code=404, detail="Orden de compra no encontrada")
@@ -753,7 +1005,6 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
         raise HTTPException(400, f"Solo se puede recibir una OC Aprobada o Parcial (estado actual: {oc.estado})")
 
     from routers.inventario import _recalc_avg_cost
-    from routers.sequences import get_next
     import logging as _logging
 
     hoy = date.today()
@@ -762,11 +1013,12 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
         raise HTTPException(400, "La fecha de recepción no puede ser futura")
     momento = datetime.now() if fecha_rec == hoy else datetime.combine(fecha_rec, time(12))
 
-    # Una recepción mueve inventario y deuda con el proveedor: sin la regla no hay asiento y
-    # sin proveedor no hay CxP, y cualquiera de los dos deja el mayor sin respaldo.
+    # Una recepción mueve inventario y una obligación con el proveedor: sin las reglas no hay
+    # asiento, y sin proveedor la factura no podrá registrarse.
     r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
-    if not r_compra:
-        raise HTTPException(400, "Configure la regla contable compra / factura_proveedor antes de recibir")
+    r_puente = _get_regla_cuentas(db, "compra", "recepcion_por_facturar")
+    if not r_compra or not r_puente:
+        raise HTTPException(400, "Configure las reglas compra / factura_proveedor y compra / recepcion_por_facturar antes de recibir")
     prov = _proveedor_de(db, oc)
     if not prov:
         raise HTTPException(400, "La OC no tiene un proveedor registrado: asígnelo antes de recibir")
@@ -784,7 +1036,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
             if not linea:
                 raise HTTPException(400, f"La línea {item.linea_id} no pertenece a la OC {oc_id}")
             # Incluye productos desactivados después de hacer la OC: la mercancía llegó igual,
-            # y saltarlos dejaba asiento y CxP sin la entrada al inventario.
+            # y saltarlos dejaba el asiento sin la entrada al inventario.
             prod = db.query(models.Producto).filter(models.Producto.id_prod == linea.producto_id).first()
             nombre = prod.producto if prod else linea.producto_id
 
@@ -796,7 +1048,6 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                     "si llegó más, haga otra OC por la diferencia."))
 
             # El costo real es el neto: con 10% de descuento cada unidad cuesta 900, no 1.000.
-            # Usar el precio bruto inflaba el inventario y facturaba al proveedor de más.
             precio_neto = _precio_neto(linea)
             monto_l = Decimal(str(round(item.cantidad_recibida * precio_neto, 2)))
             linea.cantidad_recibida = float(linea.cantidad_recibida or 0) + item.cantidad_recibida
@@ -812,10 +1063,8 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
             if prod and prod.es_inventariable:
                 nuevo_costo = _recalc_avg_cost(prod, item.cantidad_recibida, precio_neto)
                 nuevo_stock = float(prod.stock_actual or 0) + item.cantidad_recibida
-                num_doc = get_next("GR", db)
-
-                mov = models.MovimientoInventario(
-                    num_documento=num_doc,
+                db.add(models.MovimientoInventario(
+                    num_documento=get_next("GR", db),
                     producto_id=linea.producto_id,
                     tipo_doc="GR",
                     tipo="entrada",
@@ -828,8 +1077,7 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
                     fecha=momento,
                     oc_referencia=oc_id,
                     usuario_id=current_user.id,
-                )
-                db.add(mov)
+                ))
                 prod.stock_actual = round(nuevo_stock, 4)
                 prod.costo_promedio = round(nuevo_costo, 4)
 
@@ -840,97 +1088,40 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
         oc.fecha_recepcion = momento
         if data.num_factura:
             oc.num_factura = data.num_factura
-
         all_received = all(float(l.cantidad_recibida or 0) >= float(l.cantidad or 0) - _EPS for l in lineas_oc)
         oc.estado = "Recibida" if all_received else "Parcial"
 
-        asiento_num = None
-        cxp_numero = None
-        asiento = None
-        if total_recibido_now > 0:
-            monto = total_recibido_now
-            dim = {"campo_id": oc.campo_id, "unidad_negocio_id": oc.unidad_negocio_id,
-                   "departamento_id": oc.departamento_id}
-            asiento = _crear_asiento_auto(
-                db, fecha_rec, "GR", oc_id,
-                f"Recepción OC {oc_id} — {prov.nombre}",
-                [{"cuenta_id": cta, "debe": m, "haber": 0, "campo_id": oc.campo_id,
-                  "unidad_negocio_id": un, "departamento_id": dep,
-                  "descripcion_linea": f"Recepción OC {oc_id}"}
-                 for (cta, un, dep), m in debitos.items()] +
-                [{"cuenta_id": r_compra[1], "debe": 0, "haber": monto, **dim,
-                  "tercero_id": str(prov.id),
-                  "descripcion_linea": f"CxP recepción OC {oc_id}"}],
-                current_user.nombre,
-                requerido=True,
-            )
-            asiento_num = asiento.numero if asiento else None
+        dim = {"campo_id": oc.campo_id, "unidad_negocio_id": oc.unidad_negocio_id,
+               "departamento_id": oc.departamento_id}
+        asiento = _crear_asiento_auto(
+            db, fecha_rec, "GR", oc_id,
+            f"Recepción OC {oc_id} — {prov.nombre}",
+            [{"cuenta_id": cta, "debe": m, "haber": 0, "campo_id": oc.campo_id,
+              "unidad_negocio_id": un, "departamento_id": dep,
+              "descripcion_linea": f"Recepción OC {oc_id}"}
+             for (cta, un, dep), m in debitos.items()] +
+            [{"cuenta_id": r_puente[1], "debe": 0, "haber": total_recibido_now, **dim,
+              "tercero_id": str(prov.id),
+              "descripcion_linea": f"Recibido por facturar OC {oc_id}"}],
+            current_user.nombre,
+            requerido=True,
+        )
+        asiento_num = asiento.numero if asiento else None
 
-            if prov:
-                from datetime import timedelta
-                cxp_num = get_next("CXP", db)
-                fecha_hoy = fecha_rec
-                vencimiento = fecha_hoy + timedelta(days=prov.condicion_pago_dias or 30)
-
-                # Por línea y no 18% plano sobre el total: una OC con líneas exentas
-                # generaba un encabezado de ITBIS que no cuadraba con sus propias líneas.
-                itbis_monto = Decimal("0")
-                for rl in received_lineas:
-                    oc_l = next((o for o in lineas_oc if o.id == rl["linea_id"]), None)
-                    if not oc_l:
-                        continue
-                    itbis_monto += _itbis_compra(Decimal(str(rl["monto"])), oc_l.impuesto, prov)
-
-                isr_pct = Decimal(str(prov.retencion_isr_pct or 0))
-                itbis_ret_pct = Decimal(str(prov.retencion_itbis_pct or 0))
-                ret_isr = round(monto * isr_pct / 100, 2)
-                ret_itbis = round(itbis_monto * itbis_ret_pct / 100, 2)
-                total_cxp = monto + itbis_monto - ret_isr - ret_itbis
-
-                cxp = models.CuentaPorPagar(
-                    numero=cxp_num,
-                    proveedor_id=prov.id,
-                    oc_id=oc_id,
-                    tipo_ncf=prov.tipo_ncf_default or "E41",
-                    num_factura_proveedor=data.num_factura,
-                    fecha_factura=fecha_hoy,
-                    fecha_vencimiento=vencimiento,
-                    subtotal=monto,
-                    itbis=itbis_monto,
-                    retencion_isr=ret_isr,
-                    retencion_itbis=ret_itbis,
-                    total=total_cxp,
-                    saldo_pendiente=total_cxp,
-                    asiento_id=asiento.id if asiento else None,
-                    notas=f"Generada automáticamente desde recepción OC {oc_id}",
-                )
-                db.add(cxp)
-                db.flush()
-
-                for rl in received_lineas:
-                    oc_l = next((o for o in lineas_oc if o.id == rl["linea_id"]), None)
-                    if oc_l:
-                        sub_l = Decimal(str(rl["monto"]))
-                        imp = oc_l.impuesto or "itbis_18"
-                        db.add(models.LineaCxP(
-                            cxp_id=cxp.id,
-                            producto_id=oc_l.producto_id,
-                            oc_linea_id=oc_l.id,
-                            cantidad=rl["cantidad_recibida"],
-                            precio_unitario=float(oc_l.precio_unitario or 0),
-                            descuento_pct=float(oc_l.descuento_pct or 0),
-                            impuesto=imp,
-                            monto_itbis=_itbis_compra(sub_l, imp, prov),
-                            subtotal=sub_l,
-                        ))
-
-                cxp_numero = cxp_num
+        cxp = None
+        if data.factura:
+            db.flush()
+            cxp = _registrar_factura(db, oc, prov, FacturaPayload(
+                **data.factura.model_dump(),
+                lineas=[FacturaLinea(linea_id=rl["linea_id"], cantidad=rl["cantidad_recibida"])
+                        for rl in received_lineas]), current_user)
 
         audit.log(db, current_user, "RECEPCION", "OC", oc_id,
-                  f"Recepción OC {oc_id}: {len(received_lineas)} líneas, monto={total_recibido_now:,.2f}",
+                  f"Recepción OC {oc_id}: {len(received_lineas)} líneas, monto={total_recibido_now:,.2f}" +
+                  (f" — facturada ({cxp.numero})" if cxp else " — pendiente de facturar"),
                   {"lineas_recibidas": received_lineas, "total_recibido_now": float(total_recibido_now),
                    "fecha": str(fecha_rec), "num_factura": data.num_factura, "estado_nuevo": oc.estado,
-                   "asiento": asiento_num, "cxp": cxp_numero})
+                   "asiento": asiento_num, "cxp": cxp.numero if cxp else None})
 
         db.commit()
         db.refresh(oc)
@@ -942,7 +1133,9 @@ def recibir_oc(oc_id: str, data: RecepcionPayload, db: Session = Depends(get_db)
         _logging.getLogger(__name__).exception("Error en recepción OC %s", oc_id)
         raise HTTPException(500, "Error al procesar la recepción")
     return {"ok": True, "estado": oc.estado, "total_recibido": oc.total_recibido,
-            "num_factura": oc.num_factura, "asiento": asiento_num, "cxp": cxp_numero}
+            "num_factura": oc.num_factura, "asiento": asiento_num,
+            "cxp": cxp.numero if cxp else None,
+            "por_facturar": cxp is None}
 
 
 @router.put("/{oc_id}")
@@ -1121,17 +1314,21 @@ class DevolucionLinea(PydanticBase):
     linea_id: int
     cantidad_devuelta: float
 
+
 class DevolucionPayload(PydanticBase):
     motivo: str = "Devolución a proveedor"
+    ncf: Optional[str] = None     # NCF de la nota de crédito del proveedor (B04/E34), si ya la envió
     lineas: TList[DevolucionLinea] = []
 
 
 @router.post("/{oc_id}/devolucion")
 def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_db),
                 current_user: models.Usuario = Depends(auth.require_supervisor)):
-    """Devolver mercancía recibida al proveedor: saca del inventario, emite NC y reduce la CxP.
+    """Devolver mercancía recibida al proveedor.
 
-    Todo o nada, igual que la recepción: sin asiento no se mueve nada.
+    Lo que aún no estaba facturado solo revierte la recepción contra la cuenta puente. Lo
+    ya facturado genera una nota de crédito que reduce la CxP, el ITBIS acreditado y las
+    retenciones. Todo o nada, igual que la recepción: sin asiento no se mueve nada.
     """
     oc = db.query(models.OrdenCompra).filter(models.OrdenCompra.oc_id == oc_id).first()
     if not oc:
@@ -1141,11 +1338,15 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
     if not data.lineas:
         raise HTTPException(400, "Debe indicar al menos una línea a devolver")
     r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
-    if not r_compra:
-        raise HTTPException(400, "Configure la regla contable compra / factura_proveedor antes de devolver")
+    r_puente = _get_regla_cuentas(db, "compra", "recepcion_por_facturar")
+    if not r_compra or not r_puente:
+        raise HTTPException(400, "Configure las reglas compra / factura_proveedor y compra / recepcion_por_facturar")
     prov = _proveedor_de(db, oc)
     if not prov:
         raise HTTPException(400, "La OC no tiene un proveedor registrado")
+    ncf_nc = None
+    if data.ncf:
+        ncf_nc, _ = _normalizar_ncf(data.ncf, {"B04": "", "E34": ""}, "una nota de crédito")
 
     import logging as _logging
     hoy = date.today()
@@ -1154,9 +1355,10 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
         por_id = {l.id: l for l in db.query(models.OrdenCompraLinea).filter(
             models.OrdenCompraLinea.oc_id == oc_id).all()}
         total_devuelto = Decimal("0")
-        lineas_itbis = []
+        sin_facturar = Decimal("0")      # vuelve contra la cuenta puente
+        facturado = []                   # (monto, impuesto, oc_linea_id): va en la nota de crédito
         lineas_devueltas = []
-        creditos: dict = {}   # (cuenta, unidad de negocio, departamento) -> monto
+        creditos: dict = {}              # (cuenta, unidad de negocio, departamento) -> monto
 
         for item in data.lineas:
             if item.cantidad_devuelta <= 0:
@@ -1168,25 +1370,29 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
             nombre = prod.producto if prod else linea.producto_id
 
             # cantidad_recibida ya descuenta las devoluciones anteriores (se reduce abajo).
-            # Restarle además lo devuelto antes contaba dos veces y bloqueaba la segunda devolución.
             recibida = float(linea.cantidad_recibida or 0)
-            if item.cantidad_devuelta > recibida + _EPS:
+            qty = item.cantidad_devuelta
+            if qty > recibida + _EPS:
                 raise HTTPException(400, (
-                    f"{nombre}: quedan {recibida:g} recibidas sin devolver y se intentó devolver "
-                    f"{item.cantidad_devuelta:g}"))
+                    f"{nombre}: quedan {recibida:g} recibidas sin devolver y se intentó devolver {qty:g}"))
 
             precio = _precio_neto(linea)
-            monto_linea = Decimal(str(round(item.cantidad_devuelta * precio, 2)))
+            # Primero sale lo que aún no se facturó; el resto ya está en una factura.
+            qty_a = min(qty, _pendiente_facturar(linea))
+            qty_b = qty - qty_a
+            monto_a = Decimal(str(round(qty_a * precio, 2)))
+            monto_b = Decimal(str(round(qty_b * precio, 2)))
+            monto_linea = monto_a + monto_b
 
             if prod and prod.es_inventariable:
                 stock = float(prod.stock_actual or 0)
-                if item.cantidad_devuelta > stock + _EPS:
+                if qty > stock + _EPS:
                     raise HTTPException(400, (
                         f"{nombre}: solo hay {stock:g} en inventario. Lo demás ya se consumió "
                         "y no se puede devolver al proveedor."))
                 # Sale al precio al que entró, y el costo promedio de lo que queda se recalcula:
                 # sin eso el valor del inventario y su cuenta en el mayor se separaban.
-                nuevo_stock = stock - item.cantidad_devuelta
+                nuevo_stock = stock - qty
                 valor_restante = stock * float(prod.costo_promedio or 0) - float(monto_linea)
                 nuevo_costo = (max(0.0, valor_restante) / nuevo_stock if nuevo_stock > _EPS
                                else float(prod.costo_promedio or 0))
@@ -1196,7 +1402,7 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
                     tipo_doc="DEV-GR",
                     tipo="salida",
                     motivo=data.motivo,
-                    cantidad=item.cantidad_devuelta,
+                    cantidad=qty,
                     costo_unitario=round(precio, 4),
                     costo_promedio_post=round(nuevo_costo, 4),
                     stock_post=round(nuevo_stock, 4),
@@ -1209,9 +1415,12 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
                 prod.stock_actual = round(nuevo_stock, 4)
                 prod.costo_promedio = round(nuevo_costo, 4)
 
-            linea.cantidad_recibida = recibida - item.cantidad_devuelta
+            linea.cantidad_recibida = recibida - qty
+            linea.cantidad_facturada = max(0.0, float(linea.cantidad_facturada or 0) - qty_b)
             total_devuelto += monto_linea
-            lineas_itbis.append((monto_linea, linea.impuesto))
+            sin_facturar += monto_a
+            if monto_b > 0:
+                facturado.append((monto_b, linea.impuesto, linea.id))
             clave = (_cuenta_debito_recepcion(linea, prod, r_compra[0]),
                      linea.unidad_negocio_id or oc.unidad_negocio_id,
                      linea.departamento_id or oc.departamento_id)
@@ -1219,7 +1428,8 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
             lineas_devueltas.append({
                 "linea_id": linea.id,
                 "producto_id": linea.producto_id,
-                "cantidad_devuelta": item.cantidad_devuelta,
+                "cantidad_devuelta": qty,
+                "cantidad_ya_facturada": qty_b,
                 "monto": float(monto_linea),
             })
 
@@ -1231,74 +1441,101 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
         if oc.estado == "Recibida":
             oc.estado = "Parcial"
 
-        itbis_monto = sum((_itbis_compra(m, imp, prov) for m, imp in lineas_itbis), Decimal("0"))
-        nc_total = total_devuelto + itbis_monto
-
-        # La NC se aplica a una factura de la OC que todavía tenga saldo. Antes iba a la
-        # primera aunque estuviera pagada, y lo que no cabía se perdía.
-        cxp = db.query(models.CuentaPorPagar).filter(
-            models.CuentaPorPagar.oc_id == oc_id,
-            models.CuentaPorPagar.estado.in_(("pendiente", "parcial")),
-        ).order_by(models.CuentaPorPagar.saldo_pendiente.desc()).first()
-        saldo = Decimal(str(cxp.saldo_pendiente or 0)) if cxp else Decimal("0")
-        if nc_total > saldo + Decimal("0.005"):
-            raise HTTPException(400, (
-                f"La devolución genera una nota de crédito de RD$ {nc_total:,.2f} y las facturas de "
-                f"esta OC solo tienen RD$ {saldo:,.2f} pendientes de pago. El exceso sería un saldo "
-                "a favor con el proveedor, que aún no se puede registrar: coordine el reembolso y "
-                "regístrelo como nota de crédito manual."))
-
-        nc_numero = get_next("NC", db)
-        nc = models.NotaCredito(
-            numero=nc_numero,
-            tipo="proveedor",
-            proveedor_id=prov.id,
-            cxp_id=cxp.id,
-            estado="activa",
-            referencia_id=cxp.id,
-            fecha=hoy,
-            motivo=data.motivo,
-            subtotal=total_devuelto,
-            itbis=itbis_monto,
-            total=nc_total,
-        )
-        db.add(nc)
-        db.flush()
-
-        cxp.saldo_pendiente = max(Decimal("0"), saldo - nc_total)
-        if cxp.saldo_pendiente <= Decimal("0.005"):
-            cxp.saldo_pendiente = Decimal("0")
-            cxp.estado = "pagada"
-        else:
-            cxp.estado = "parcial"
-        presup_reversado = _reversar_devengado_cxp(
-            db, cxp, _monto_presupuestario(total_devuelto, itbis_monto, prov), hoy,
-            origen_tipo="DEV-GR", origen_id=nc_numero,
-            notas=f"Reverso por devolución OC {oc_id} — NC {nc_numero}",
-            user=current_user,
-        )
-
-        # Espejo de la recepción: se revierte contra las mismas cuentas por las que entró.
         dim = {"campo_id": oc.campo_id, "unidad_negocio_id": oc.unidad_negocio_id,
                "departamento_id": oc.departamento_id}
+        tercero = str(prov.id)
+        asiento_lineas = []
+        if sin_facturar > 0:
+            asiento_lineas.append({"cuenta_id": r_puente[1], "debe": sin_facturar, "haber": 0, **dim,
+                                   "tercero_id": tercero,
+                                   "descripcion_linea": f"Reverso de recepción sin facturar OC {oc_id}"})
+
+        nc = cxp = None
+        presup_reversado = Decimal("0")
+        if facturado:
+            sub_b = sum((m for m, _, _ in facturado), Decimal("0"))
+            itbis_b = sum((_itbis_compra(m, imp, prov) for m, imp, _ in facturado), Decimal("0"))
+            ret_isr_b = (sub_b * Decimal(str(prov.retencion_isr_pct or 0)) / 100).quantize(Decimal("0.01"))
+            ret_itbis_b = (itbis_b * Decimal(str(prov.retencion_itbis_pct or 0)) / 100).quantize(Decimal("0.01"))
+            neto_b = sub_b + itbis_b - ret_isr_b - ret_itbis_b
+
+            # La NC va a una factura de la OC con saldo; mejor si es la que cobró esas líneas.
+            ids_devueltos = {lid for _, _, lid in facturado}
+            abiertas = db.query(models.CuentaPorPagar).filter(
+                models.CuentaPorPagar.oc_id == oc_id,
+                models.CuentaPorPagar.estado.in_(("pendiente", "parcial")),
+            ).all()
+
+            def _cobra_lineas(c):
+                return db.query(models.LineaCxP).filter(models.LineaCxP.cxp_id == c.id,
+                                                        models.LineaCxP.oc_linea_id.in_(ids_devueltos)).count()
+            abiertas.sort(key=lambda c: (_cobra_lineas(c) == 0, -float(c.saldo_pendiente or 0)))
+            cxp = abiertas[0] if abiertas else None
+            saldo = Decimal(str(cxp.saldo_pendiente or 0)) if cxp else Decimal("0")
+            if neto_b > saldo + Decimal("0.005"):
+                raise HTTPException(400, (
+                    f"Parte de lo devuelto ya estaba facturado: la nota de crédito reduce RD$ {neto_b:,.2f} "
+                    f"y las facturas de esta OC solo tienen RD$ {saldo:,.2f} pendientes de pago. El exceso "
+                    "sería un saldo a favor con el proveedor, que aún no se puede registrar: coordine el "
+                    "reembolso y regístrelo como nota de crédito manual."))
+
+            r_itbis = _get_regla_cuentas(db, "compra", "itbis_compra")
+            if itbis_b > 0 and not r_itbis:
+                raise HTTPException(400, "Configure la regla compra / itbis_compra")
+            cta_ret_isr, cta_ret_itbis = _cuentas_retencion(db)
+            if (ret_isr_b > 0 and not cta_ret_isr) or (ret_itbis_b > 0 and not cta_ret_itbis):
+                raise HTTPException(400, "Configure las cuentas de retención ISR / ITBIS por pagar")
+
+            nc = models.NotaCredito(
+                numero=get_next("NC", db), tipo="proveedor", proveedor_id=prov.id,
+                cxp_id=cxp.id, referencia_id=cxp.id, estado="activa", ncf=ncf_nc,
+                fecha=hoy, motivo=data.motivo,
+                subtotal=sub_b, itbis=itbis_b, total=sub_b + itbis_b,
+            )
+            db.add(nc)
+            db.flush()
+            cxp.saldo_pendiente = max(Decimal("0"), saldo - neto_b)
+            if cxp.saldo_pendiente <= Decimal("0.005"):
+                cxp.saldo_pendiente = Decimal("0")
+                cxp.estado = "pagada"
+            else:
+                cxp.estado = "parcial"
+            presup_reversado = _reversar_devengado_cxp(
+                db, cxp, _monto_presupuestario(sub_b, itbis_b, prov, cxp.tipo_ncf), hoy,
+                origen_tipo="DEV-GR", origen_id=nc.numero,
+                notas=f"Reverso por devolución OC {oc_id} — NC {nc.numero}",
+                user=current_user,
+            )
+            asiento_lineas.append({"cuenta_id": r_compra[1], "debe": neto_b, "haber": 0, **dim,
+                                   "tercero_id": tercero,
+                                   "descripcion_linea": f"NC {nc.numero} reduce CxP {cxp.numero}"})
+            if ret_isr_b > 0:
+                asiento_lineas.append({"cuenta_id": cta_ret_isr, "debe": ret_isr_b, "haber": 0,
+                                       "descripcion_linea": f"Reverso retención ISR NC {nc.numero}"})
+            if ret_itbis_b > 0:
+                asiento_lineas.append({"cuenta_id": cta_ret_itbis, "debe": ret_itbis_b, "haber": 0,
+                                       "descripcion_linea": f"Reverso retención ITBIS NC {nc.numero}"})
+            if itbis_b > 0:
+                asiento_lineas.append({"cuenta_id": r_itbis[0], "debe": 0, "haber": itbis_b,
+                                       "descripcion_linea": f"Reverso ITBIS crédito fiscal NC {nc.numero}"})
+
+        # Espejo de la recepción: sale por las mismas cuentas por las que entró.
+        asiento_lineas += [{"cuenta_id": cta, "debe": 0, "haber": m, "campo_id": oc.campo_id,
+                            "unidad_negocio_id": un, "departamento_id": dep,
+                            "descripcion_linea": f"Devolución OC {oc_id}"}
+                           for (cta, un, dep), m in creditos.items()]
         asiento = _crear_asiento_auto(
-            db, hoy, "DEV-GR", oc_id,
-            f"Devolución OC {oc_id} — {prov.nombre}",
-            [{"cuenta_id": r_compra[1], "debe": total_devuelto, "haber": 0, **dim,
-              "tercero_id": str(prov.id),
-              "descripcion_linea": f"Reverso CxP devolución OC {oc_id}"}] +
-            [{"cuenta_id": cta, "debe": 0, "haber": m, "campo_id": oc.campo_id,
-              "unidad_negocio_id": un, "departamento_id": dep,
-              "descripcion_linea": f"Devolución OC {oc_id}"}
-             for (cta, un, dep), m in creditos.items()],
-            current_user.nombre,
-            requerido=True,
+            db, hoy, "DEV-GR", oc_id, f"Devolución OC {oc_id} — {prov.nombre}",
+            asiento_lineas, current_user.nombre, requerido=True,
         )
-        nc.asiento_id = asiento.id if asiento else None
+        if nc:
+            nc.asiento_id = asiento.id
 
         audit.log(db, current_user, "DEVOLUCION", "OC", oc_id,
-                  f"Devolución {len(lineas_devueltas)} líneas — Total: RD$ {total_devuelto:,.2f} — NC {nc_numero}",
-                  {"lineas": lineas_devueltas, "nc": nc_numero, "cxp_ajustada": cxp.numero})
+                  f"Devolución {len(lineas_devueltas)} líneas — Total: RD$ {total_devuelto:,.2f}" +
+                  (f" — NC {nc.numero}" if nc else " — sin facturar, sin nota de crédito"),
+                  {"lineas": lineas_devueltas, "nc": nc.numero if nc else None,
+                   "cxp_ajustada": cxp.numero if cxp else None})
 
         db.commit()
     except HTTPException:
@@ -1313,8 +1550,120 @@ def devolver_oc(oc_id: str, data: DevolucionPayload, db: Session = Depends(get_d
         "ok": True,
         "lineas_devueltas": lineas_devueltas,
         "total_devuelto": float(total_devuelto),
-        "nc_numero": nc_numero,
-        "cxp_ajustada": cxp.numero,
+        "nc_numero": nc.numero if nc else None,
+        "cxp_ajustada": cxp.numero if cxp else None,
         "presupuesto_reversado": float(presup_reversado),
         "asiento": asiento.numero if asiento else None,
     }
+
+
+# ─── Reportes y ajustes de la factura separada ─────────────────────────────
+
+@router.get("/reportes/por-facturar")
+def reporte_por_facturar(db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
+    """Mercancía recibida que el proveedor aún no ha facturado, contra el saldo de la cuenta puente.
+
+    Las dos cifras deben coincidir: es la conciliación de la cuenta "Compras recibidas por facturar".
+    """
+    filas = []
+    for l, oc in db.query(models.OrdenCompraLinea, models.OrdenCompra).join(
+            models.OrdenCompra, models.OrdenCompra.oc_id == models.OrdenCompraLinea.oc_id).all():
+        pend = _pendiente_facturar(l)
+        if pend <= _EPS:
+            continue
+        prod = db.query(models.Producto).filter(models.Producto.id_prod == l.producto_id).first()
+        filas.append({
+            "oc_id": oc.oc_id, "proveedor": oc.proveedor, "fecha_recepcion": oc.fecha_recepcion,
+            "linea_id": l.id, "producto_id": l.producto_id, "producto": prod.producto if prod else l.producto_id,
+            "cantidad": round(pend, 4), "precio_neto": round(_precio_neto(l), 4),
+            "valor": round(pend * _precio_neto(l), 2),
+        })
+    r_puente = _get_regla_cuentas(db, "compra", "recepcion_por_facturar")
+    saldo_mayor = None
+    if r_puente:
+        d, h = db.query(sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.debe), 0),
+                        sqlfunc.coalesce(sqlfunc.sum(models.LineaAsiento.haber), 0)).join(
+            models.AsientoContable, models.AsientoContable.id == models.LineaAsiento.asiento_id).filter(
+            models.LineaAsiento.cuenta_id == r_puente[1],
+            models.AsientoContable.estado != "anulado").one()
+        saldo_mayor = round(float(h or 0) - float(d or 0), 2)
+    total = round(sum(f["valor"] for f in filas), 2)
+    return {"total": total, "saldo_mayor": saldo_mayor,
+            "diferencia": round(total - saldo_mayor, 2) if saldo_mayor is not None else None,
+            "items": sorted(filas, key=lambda f: (str(f["fecha_recepcion"] or ""), f["oc_id"]))}
+
+
+@router.post("/ajuste-asientos-recepciones")
+def ajuste_asientos_recepciones(dry_run: bool = Query(True), fecha: Optional[date] = None,
+                                db: Session = Depends(get_db),
+                                current_user: models.Usuario = Depends(auth.require_admin)):
+    """Completa el asiento de las facturas que creaba la recepción antes de la fase 2.
+
+    Aquellas recepciones acreditaban la CxP solo por el subtotal: faltaba el ITBIS como
+    crédito fiscal y las retenciones, y el mayor de proveedores quedaba descuadrado contra
+    el auxiliar. Por cada una se crea un asiento complementario. En modo prueba solo lista.
+    """
+    r_compra = _get_regla_cuentas(db, "compra", "factura_proveedor")
+    r_itbis = _get_regla_cuentas(db, "compra", "itbis_compra")
+    cta_ret_isr, cta_ret_itbis = _cuentas_retencion(db)
+    if not r_compra:
+        raise HTTPException(400, "Configure la regla compra / factura_proveedor")
+    fecha = fecha or date.today()
+
+    ya = {a.referencia_id for a in db.query(models.AsientoContable).filter(
+        models.AsientoContable.origen == "AJ-CXP", models.AsientoContable.estado != "anulado").all()}
+    items, faltan_cuentas = [], []
+    for cxp in db.query(models.CuentaPorPagar).filter(
+            models.CuentaPorPagar.oc_id.isnot(None), models.CuentaPorPagar.asiento_id.isnot(None),
+            models.CuentaPorPagar.estado != "anulada").order_by(models.CuentaPorPagar.id).all():
+        a = db.query(models.AsientoContable).get(cxp.asiento_id)
+        # Solo las que nacieron de una recepción (su asiento es el GR de la OC).
+        if not a or a.origen != "GR" or cxp.numero in ya:
+            continue
+        itbis = Decimal(str(cxp.itbis or 0))
+        ret_isr = Decimal(str(cxp.retencion_isr or 0))
+        ret_itbis = Decimal(str(cxp.retencion_itbis or 0))
+        if itbis <= 0 and ret_isr <= 0 and ret_itbis <= 0:
+            continue
+        neto_cxp = itbis - ret_isr - ret_itbis
+        item = {"cxp": cxp.numero, "oc_id": cxp.oc_id, "fecha_factura": str(cxp.fecha_factura),
+                "itbis": float(itbis), "retencion_isr": float(ret_isr), "retencion_itbis": float(ret_itbis),
+                "ajuste_cxp": float(neto_cxp)}
+        if (itbis > 0 and not r_itbis) or (ret_isr > 0 and not cta_ret_isr) or (ret_itbis > 0 and not cta_ret_itbis):
+            faltan_cuentas.append(cxp.numero)
+            continue
+        items.append(item)
+        if dry_run:
+            continue
+        lineas = []
+        if itbis > 0:
+            lineas.append({"cuenta_id": r_itbis[0], "debe": itbis, "haber": 0,
+                           "descripcion_linea": f"ITBIS crédito fiscal no registrado — {cxp.numero}"})
+        if neto_cxp != 0:
+            lado = {"debe": 0, "haber": neto_cxp} if neto_cxp > 0 else {"debe": -neto_cxp, "haber": 0}
+            lineas.append({"cuenta_id": r_compra[1], **lado, "tercero_id": str(cxp.proveedor_id),
+                           "descripcion_linea": f"Complemento CxP {cxp.numero}"})
+        if ret_isr > 0:
+            lineas.append({"cuenta_id": cta_ret_isr, "debe": 0, "haber": ret_isr,
+                           "descripcion_linea": f"Retención ISR — {cxp.numero}"})
+        if ret_itbis > 0:
+            lineas.append({"cuenta_id": cta_ret_itbis, "debe": 0, "haber": ret_itbis,
+                           "descripcion_linea": f"Retención ITBIS — {cxp.numero}"})
+        _crear_asiento_auto(db, fecha, "AJ-CXP", cxp.numero,
+                            f"Complemento de ITBIS y retenciones de {cxp.numero} (OC {cxp.oc_id})",
+                            lineas, current_user.nombre, requerido=True)
+
+    resumen = {
+        "dry_run": dry_run, "fecha": str(fecha), "facturas": len(items),
+        "itbis": round(sum(i["itbis"] for i in items), 2),
+        "retencion_isr": round(sum(i["retencion_isr"] for i in items), 2),
+        "retencion_itbis": round(sum(i["retencion_itbis"] for i in items), 2),
+        "ajuste_cxp": round(sum(i["ajuste_cxp"] for i in items), 2),
+        "sin_cuentas_configuradas": faltan_cuentas, "items": items,
+    }
+    if not dry_run:
+        audit.log(db, current_user, "AJUSTE", "CXP", "recepciones",
+                  f"Complemento de ITBIS/retenciones en {len(items)} facturas de recepciones anteriores",
+                  {k: v for k, v in resumen.items() if k != "items"})
+        db.commit()
+    return resumen

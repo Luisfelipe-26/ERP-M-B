@@ -5,7 +5,7 @@ import models
 from conftest import ANIO
 import pytest
 
-from routers.compras import RecepcionLinea, RecepcionPayload, recibir_oc
+from routers.compras import FacturaDatos, RecepcionLinea, RecepcionPayload, recibir_oc
 
 # Una recepción siempre contabiliza: sin regla ni período abierto no se puede recibir.
 pytestmark = pytest.mark.usefixtures("reglas_compra")
@@ -81,11 +81,12 @@ def test_recibir_sobre_stock_existente_promedia_el_costo(db, proveedor, user):
 def test_la_cxp_cobra_el_precio_neto(db, proveedor, user):
     oc, linea = _oc_con_descuento(db, proveedor, descuento_pct=10)
 
-    recibir_oc("OC-001", RecepcionPayload(lineas=[RecepcionLinea(linea_id=linea.id, cantidad_recibida=10)]),
+    recibir_oc("OC-001", RecepcionPayload(lineas=[RecepcionLinea(linea_id=linea.id, cantidad_recibida=10)],
+                                          factura=FacturaDatos(ncf="B0100000001")),
                db=db, current_user=user)
 
     cxp = db.query(models.CuentaPorPagar).filter_by(oc_id="OC-001").one()
     lcxp = db.query(models.LineaCxP).filter_by(cxp_id=cxp.id).one()
     assert float(cxp.subtotal) == 9_000, "el proveedor factura lo neto"
     assert float(lcxp.subtotal) == 9_000
-    assert float(lcxp.descuento_pct) == 10
+    assert float(lcxp.precio_unitario) == 900, "la línea de la factura lleva el precio ya descontado"

@@ -82,18 +82,51 @@ def periodo_abierto(db, d: dt.date):
         db.flush()
 
 
+def cuentas_compra(db, cuenta_compra_id=None):
+    """Cuentas y reglas del ciclo de compra con los códigos del catálogo de referencia.
+
+    `cuenta_compra_id` sustituye la cuenta débito de la regla de compra (por defecto
+    Inventario insumos). Devuelve las cuentas por código.
+    """
+    c = {}
+    for cod, nom, nat, tipo in [
+        ("1.1.03.01", "Inventario insumos", "deudora", "activo"),
+        ("1.1.02.03", "ITBIS crédito fiscal", "deudora", "activo"),
+        ("2.1.01.01", "CxP proveedores", "acreedora", "pasivo"),
+        ("2.1.01.04", "Compras recibidas por facturar", "acreedora", "pasivo"),
+        ("2.1.02.03", "Retenciones ISR por pagar", "acreedora", "pasivo"),
+        ("2.1.02.04", "ITBIS retenido por pagar", "acreedora", "pasivo"),
+    ]:
+        c[cod] = db.query(models.CuentaContable).filter_by(codigo=cod).first() or \
+            models.CuentaContable(codigo=cod, nombre=nom, naturaleza=nat, tipo=tipo)
+        db.add(c[cod])
+    db.flush()
+    compra = cuenta_compra_id or c["1.1.03.01"].id
+    for concepto, debe, haber in [("factura_proveedor", compra, c["2.1.01.01"].id),
+                                  ("itbis_compra", c["1.1.02.03"].id, c["2.1.01.01"].id),
+                                  ("recepcion_por_facturar", compra, c["2.1.01.04"].id)]:
+        db.add(models.ReglaContabilizacion(evento="compra", concepto=concepto, activo=True,
+                                           cuenta_debe_id=debe, cuenta_haber_id=haber))
+    db.flush()
+    return c
+
+
 @pytest.fixture
 def reglas_compra(db):
-    """Lo mínimo para que una recepción contabilice: regla de compra y período de hoy."""
-    inv = models.CuentaContable(codigo="1.1.03.01", nombre="Inventario insumos", naturaleza="deudora", tipo="activo")
-    cxp = models.CuentaContable(codigo="2.1.01.01", nombre="CxP proveedores", naturaleza="acreedora", tipo="pasivo")
-    db.add_all([inv, cxp])
-    db.flush()
-    db.add(models.ReglaContabilizacion(evento="compra", concepto="factura_proveedor", activo=True,
-                                       cuenta_debe_id=inv.id, cuenta_haber_id=cxp.id))
+    """Lo mínimo para que una recepción contabilice: reglas de compra y período de hoy."""
+    c = cuentas_compra(db)
     periodo_abierto(db, dt.date.today())
     db.commit()
-    return {"inventario": inv, "cxp": cxp}
+    return {"inventario": c["1.1.03.01"], "cxp": c["2.1.01.01"], "puente": c["2.1.01.04"], **c}
+
+
+def saldo_cuenta(db, cuenta) -> float:
+    """Saldo deudor (debe - haber) de una cuenta en asientos no anulados."""
+    total = 0.0
+    for l in db.query(models.LineaAsiento).filter_by(cuenta_id=cuenta.id).all():
+        if l.asiento.estado != "anulado":
+            total += float(l.debe or 0) - float(l.haber or 0)
+    return round(total, 2)
 
 
 def presupuestar(db, cuenta_id, monto_mensual, *, meses=12, departamento_id=None,

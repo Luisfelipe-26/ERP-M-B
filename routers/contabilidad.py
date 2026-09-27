@@ -10,6 +10,8 @@ from auth import get_current_user, require_admin
 from datetime import date, datetime, timedelta
 from calendar import monthrange
 from decimal import Decimal
+from typing import Optional
+from pydantic import BaseModel
 import models, schemas, logging
 from routers.sequences import get_next, peek_next
 
@@ -75,6 +77,11 @@ def _resolve_diario_id(db: Session, origen: str):
 
 _CLASES_PRESUPUESTABLES = {"4", "5", "6"}
 
+# Asientos que cuentan en los libros. Uno "revertido" sigue contando junto a su reverso
+# (netean a cero, como en Dynamics 365); antes quedaba "anulado" y fuera de los reportes
+# mientras su reverso sí entraba, así que la anulación se restaba dos veces.
+ESTADOS_EN_LIBROS = ("contabilizado", "revertido")
+
 MESES_NOMBRE = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
                 "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 
@@ -124,14 +131,20 @@ def _consumo_ytd(db: Session, cfg, *, anio: int, hasta_mes: int, cuenta_id: int,
     return float(q.scalar() or 0)
 
 
-def _monto_presupuestario(subtotal, itbis, proveedor) -> Decimal:
+# Comprobantes cuyo ITBIS no da derecho a crédito fiscal (factura de consumo).
+NCF_SIN_CREDITO = ("B02", "E32")
+
+
+def _monto_presupuestario(subtotal, itbis, proveedor, tipo_ncf=None) -> Decimal:
     """Monto que consume presupuesto.
 
     El ITBIS de un proveedor formal es crédito fiscal recuperable y no es costo, así que
-    no consume. El de un informal no da derecho a crédito: es costo real y sí consume.
+    no consume. El de un informal, o el de una factura de consumo (B02/E32), no da derecho
+    a crédito: es costo real y sí consume.
     """
     base = Decimal(str(subtotal or 0))
-    if (getattr(proveedor, "tipo_contribuyente", None) or "").lower() == "informal":
+    if ((getattr(proveedor, "tipo_contribuyente", None) or "").lower() == "informal"
+            or (tipo_ncf or "")[:3] in NCF_SIN_CREDITO):
         base += Decimal(str(itbis or 0))
     return base
 
@@ -726,7 +739,7 @@ def cerrar_periodo(id: int, db: Session = Depends(get_db), user=Depends(require_
         sqlfunc.sum(models.LineaAsiento.debe).label("td"),
         sqlfunc.sum(models.LineaAsiento.haber).label("th"),
     ).join(models.AsientoContable).filter(
-        models.AsientoContable.estado == "contabilizado",
+        models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
         models.AsientoContable.periodo_id.in_(periodo_ids)
     ).group_by(models.LineaAsiento.cuenta_id)
 
@@ -998,33 +1011,11 @@ def anular_asiento(numero: str, motivo: str = "Anulación manual",
         raise HTTPException(404, "Asiento no encontrado")
     if a.estado == "anulado":
         raise HTTPException(400, "El asiento ya está anulado")
+    if a.estado == "revertido":
+        raise HTTPException(400, "El asiento ya fue revertido")
 
     try:
-        if a.estado == "contabilizado":
-            num_rev = get_next("AC", db)
-            reverso = models.AsientoContable(
-                numero=num_rev, fecha=date.today(),
-                periodo_id=a.periodo_id, tipo="cierre", origen=a.origen,
-                referencia_id=a.referencia_id,
-                descripcion=f"Reverso de {numero}: {motivo}",
-                total_debe=a.total_debe, total_haber=a.total_haber,
-                estado="contabilizado", creado_por=user.nombre,
-                contabilizado_por=user.nombre, contabilizado_en=datetime.utcnow()
-            )
-            db.add(reverso)
-            db.flush()
-            for l in a.lineas:
-                db.add(models.LineaAsiento(
-                    asiento_id=reverso.id, cuenta_id=l.cuenta_id,
-                    debe=l.haber, haber=l.debe,
-                    campo_id=l.campo_id, tercero_id=l.tercero_id,
-                    descripcion_linea=f"Reverso: {l.descripcion_linea or ''}"
-                ))
-            _actualizar_saldos(db, reverso, 1)
-            a.asiento_reverso_id = reverso.id
-
-        a.estado = "anulado"
-        a.anulado_por = user.nombre
+        _reversar_asiento(db, a, motivo, user.nombre)
         _audit(db, user, "ESTADO", "ASIENTO", numero, f"Anulado — {motivo}")
         db.commit()
     except Exception:
@@ -1032,6 +1023,41 @@ def anular_asiento(numero: str, motivo: str = "Anulación manual",
         logger.exception("Error anulando asiento %s", numero)
         raise HTTPException(500, "Error al anular asiento")
     return {"ok": True, "msg": f"Asiento {numero} anulado"}
+
+
+def _reversar_asiento(db: Session, a, motivo: str, usuario: str):
+    """Anula un asiento en borrador, o revierte uno contabilizado con un asiento de reverso.
+
+    El contabilizado queda "revertido" y sigue contando junto a su reverso, fechado hoy:
+    un período cerrado no se toca y los reportes por líneas netean a cero.
+    """
+    if a.estado == "contabilizado":
+        reverso = models.AsientoContable(
+            numero=get_next("AC", db), fecha=date.today(),
+            periodo_id=a.periodo_id, tipo="cierre", origen=a.origen,
+            referencia_id=a.referencia_id,
+            descripcion=f"Reverso de {a.numero}: {motivo}",
+            total_debe=a.total_debe, total_haber=a.total_haber,
+            estado="contabilizado", creado_por=usuario,
+            contabilizado_por=usuario, contabilizado_en=datetime.utcnow()
+        )
+        db.add(reverso)
+        db.flush()
+        for l in a.lineas:
+            db.add(models.LineaAsiento(
+                asiento_id=reverso.id, cuenta_id=l.cuenta_id,
+                debe=l.haber, haber=l.debe,
+                campo_id=l.campo_id, tercero_id=l.tercero_id,
+                unidad_negocio_id=l.unidad_negocio_id, departamento_id=l.departamento_id,
+                descripcion_linea=f"Reverso: {l.descripcion_linea or ''}"
+            ))
+        db.flush()
+        _actualizar_saldos(db, reverso, 1)
+        a.asiento_reverso_id = reverso.id
+        a.estado = "revertido"
+    else:
+        a.estado = "anulado"
+    a.anulado_por = usuario
 
 
 def _actualizar_saldos(db: Session, asiento, factor: int):
@@ -1071,7 +1097,7 @@ def libro_mayor(
     if user.rol == "operador":
         raise HTTPException(403, "Acceso denegado")
     q = db.query(models.LineaAsiento).join(models.AsientoContable).filter(
-        models.AsientoContable.estado == "contabilizado"
+        models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS)
     )
     target_cuenta_id = cuenta_id
     if not target_cuenta_id and codigo:
@@ -1152,7 +1178,7 @@ def balance_comprobacion(periodo_id: int = None, anio: int = None, mes: int = No
             sqlfunc.sum(models.LineaAsiento.debe).label("total_debe"),
             sqlfunc.sum(models.LineaAsiento.haber).label("total_haber"),
         ).join(models.AsientoContable).filter(
-            models.AsientoContable.estado == "contabilizado",
+            models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
             models.AsientoContable.periodo_id.in_(periodo_ids),
         )
         if campo_id:
@@ -1228,7 +1254,7 @@ def balance_general(anio: int = None, mes: int = None,
             sqlfunc.sum(models.LineaAsiento.debe).label("total_debe"),
             sqlfunc.sum(models.LineaAsiento.haber).label("total_haber"),
         ).join(models.AsientoContable).filter(
-            models.AsientoContable.estado == "contabilizado",
+            models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
             models.AsientoContable.periodo_id.in_(periodo_ids),
         )
         if campo_id:
@@ -1394,7 +1420,7 @@ def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
         sqlfunc.sum(models.LineaAsiento.debe).label("total_debe"),
         sqlfunc.sum(models.LineaAsiento.haber).label("total_haber"),
     ).join(models.AsientoContable).filter(
-        models.AsientoContable.estado == "contabilizado",
+        models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
         models.AsientoContable.periodo_id.in_(periodo_ids)
     )
     if campo_id:
@@ -1623,6 +1649,17 @@ def _itbis_compra(subtotal, impuesto: str, proveedor) -> Decimal:
     return (Decimal(str(subtotal or 0)) * tasa).quantize(Decimal("0.01"))
 
 
+def _cuentas_retencion(db: Session):
+    """(retención ISR por pagar, ITBIS retenido por pagar): por regla o por código de catálogo."""
+    def cuenta(concepto, codigo):
+        r = _get_regla_cuentas(db, "compra", concepto)
+        if r:
+            return r[1]
+        c = db.query(models.CuentaContable).filter(models.CuentaContable.codigo == codigo).first()
+        return c.id if c else None
+    return cuenta("retencion_isr", "2.1.02.03"), cuenta("retencion_itbis", "2.1.02.04")
+
+
 def _calcular_cxp_desde_lineas(lineas_data, prov):
     """Calculate CxP totals from line items + proveedor retenciones."""
     subtotal = Decimal("0")
@@ -1656,6 +1693,12 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
     prov = db.query(models.Proveedor).get(data.proveedor_id)
     if not prov:
         raise HTTPException(400, f"Proveedor ID {data.proveedor_id} no existe")
+    # La factura de una OC se compara contra lo recibido y liquida la cuenta puente; por
+    # aquí se duplicaba la deuda de una OC que ya tenía su CxP.
+    if data.oc_id:
+        raise HTTPException(400, (
+            f"La factura de la OC {data.oc_id} se registra desde la orden de compra "
+            "(Registrar factura), para compararla con lo recibido."))
 
     if data.lineas:
         subtotal, itbis, ret_isr, ret_itbis, total, lineas_calc = _calcular_cxp_desde_lineas(data.lineas, prov)
@@ -1745,24 +1788,19 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
         asiento_lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis,
                         "tercero_id": str(data.proveedor_id),
                         "descripcion_linea": f"CxP ITBIS {prov.nombre}"})
-    if ret_isr > 0:
-        cta_ret_isr = db.query(models.CuentaContable).filter(
-            models.CuentaContable.codigo == "2.1.02.03").first()
-        if cta_ret_isr and r_factura:
-            asiento_lineas.append({"cuenta_id": r_factura[1], "debe": ret_isr, "haber": 0,
-                            "tercero_id": str(data.proveedor_id),
-                            "descripcion_linea": f"Retención ISR {prov.nombre}"})
-            asiento_lineas.append({"cuenta_id": cta_ret_isr.id, "debe": 0, "haber": ret_isr,
-                            "descripcion_linea": "Retención ISR por pagar"})
-    if ret_itbis > 0:
-        cta_ret_itbis = db.query(models.CuentaContable).filter(
-            models.CuentaContable.codigo == "2.1.02.04").first()
-        if cta_ret_itbis and r_factura:
-            asiento_lineas.append({"cuenta_id": r_factura[1], "debe": ret_itbis, "haber": 0,
-                            "tercero_id": str(data.proveedor_id),
-                            "descripcion_linea": f"Retención ITBIS {prov.nombre}"})
-            asiento_lineas.append({"cuenta_id": cta_ret_itbis.id, "debe": 0, "haber": ret_itbis,
-                            "descripcion_linea": "Retención ITBIS por pagar"})
+    # Sin su cuenta la retención no se registraba y el mayor de proveedores quedaba por
+    # encima del auxiliar en ese monto.
+    cta_ret_isr, cta_ret_itbis = _cuentas_retencion(db)
+    for monto_ret, cta_ret, nombre_ret in ((ret_isr, cta_ret_isr, "ISR"), (ret_itbis, cta_ret_itbis, "ITBIS")):
+        if monto_ret <= 0:
+            continue
+        if not cta_ret or not r_factura:
+            raise HTTPException(400, f"Configure la cuenta de retención {nombre_ret} por pagar (regla compra / retencion_{nombre_ret.lower()})")
+        asiento_lineas.append({"cuenta_id": r_factura[1], "debe": monto_ret, "haber": 0,
+                               "tercero_id": str(data.proveedor_id),
+                               "descripcion_linea": f"Retención {nombre_ret} {prov.nombre}"})
+        asiento_lineas.append({"cuenta_id": cta_ret, "debe": 0, "haber": monto_ret,
+                               "descripcion_linea": f"Retención {nombre_ret} por pagar"})
 
     try:
         asiento = None
@@ -1916,7 +1954,7 @@ def _devengar_cxp_contra_compromisos(db: Session, cxp, user) -> Decimal:
 
     reparto, sin_compromiso = [], Decimal("0")
     for cl in cxp_lineas:
-        monto_l = _monto_presupuestario(cl.subtotal, cl.monto_itbis, prov)
+        monto_l = _monto_presupuestario(cl.subtotal, cl.monto_itbis, prov, cxp.tipo_ncf)
         if monto_l <= 0:
             continue
         comp = por_linea.get(cl.oc_linea_id)
@@ -1927,7 +1965,7 @@ def _devengar_cxp_contra_compromisos(db: Session, cxp, user) -> Decimal:
 
     # Factura de cabecera, o líneas que no mapean a una línea de OC: prorratear
     # entre los compromisos abiertos según el saldo que le queda a cada uno.
-    pendiente = sin_compromiso if cxp_lineas else _monto_presupuestario(cxp.subtotal, cxp.itbis, prov)
+    pendiente = sin_compromiso if cxp_lineas else _monto_presupuestario(cxp.subtotal, cxp.itbis, prov, cxp.tipo_ncf)
     if pendiente > 0:
         abiertos = [c for c in comps if _saldo(c) > 0]
         saldo_total = sum((_saldo(c) for c in abiertos), Decimal("0"))
@@ -1982,6 +2020,16 @@ def validar_cxp(cxp_id: int, db: Session = Depends(get_db),
     cxp = db.query(models.CuentaPorPagar).get(cxp_id)
     if not cxp:
         raise HTTPException(404, "CxP no encontrada")
+    # Las facturas registradas desde la OC se comparan y devengan al registrarse; validarlas
+    # otra vez (o validar dos veces una vieja) devengaba el presupuesto por duplicado.
+    ya_devengada = db.query(models.MovimientoPresupuestario).filter(
+        models.MovimientoPresupuestario.tipo == "DEVENGADO",
+        models.MovimientoPresupuestario.origen_tipo == "CXP",
+        models.MovimientoPresupuestario.origen_id == cxp.numero,
+    ).first()
+    if ya_devengada:
+        return {"ok": True, "alertas": [], "devengado": 0.0,
+                "mensaje": "La factura ya estaba validada y su presupuesto devengado"}
 
     alertas = []
     errores = []
@@ -2045,6 +2093,116 @@ def validar_cxp(cxp_id: int, db: Session = Depends(get_db),
     db.commit()
     return {"ok": True, "alertas": alertas, "devengado": float(devengado_total),
             "mensaje": "Factura validada — presupuesto devengado"}
+
+
+class DatosFiscalesCxP(BaseModel):
+    ncf: str
+    num_factura_proveedor: Optional[str] = None
+
+
+@router.put("/cxp/{cxp_id}/datos-fiscales")
+def datos_fiscales_cxp(cxp_id: int, data: DatosFiscalesCxP, db: Session = Depends(get_db),
+                       user=Depends(get_current_user)):
+    """Registra el NCF de una factura que no lo tiene (p. ej. las que creaba la recepción).
+
+    Sin NCF la DGII rechaza la línea del 606. Solo cambia datos fiscales, no montos: un
+    NCF equivocado de una factura con pagos se corrige con este mismo endpoint.
+    """
+    from routers.compras import TIPOS_NCF_COMPRA, _normalizar_ncf
+    if user.rol not in ("admin", "supervisor", "contador"):
+        raise HTTPException(403, "Solo admin, supervisor o contador")
+    cxp = db.query(models.CuentaPorPagar).get(cxp_id)
+    if not cxp or cxp.estado == "anulada":
+        raise HTTPException(404, "Factura no encontrada o anulada")
+    ncf, tipo = _normalizar_ncf(data.ncf, TIPOS_NCF_COMPRA, "una factura de compra")
+    dup = db.query(models.CuentaPorPagar).filter(
+        models.CuentaPorPagar.proveedor_id == cxp.proveedor_id, models.CuentaPorPagar.ncf == ncf,
+        models.CuentaPorPagar.id != cxp.id, models.CuentaPorPagar.estado != "anulada").first()
+    if dup:
+        raise HTTPException(400, f"El NCF {ncf} ya está registrado en {dup.numero}")
+    antes = {"ncf": cxp.ncf, "tipo_ncf": cxp.tipo_ncf, "num_factura": cxp.num_factura_proveedor}
+    cxp.ncf, cxp.tipo_ncf = ncf, tipo
+    if data.num_factura_proveedor is not None:
+        cxp.num_factura_proveedor = data.num_factura_proveedor or None
+    _audit(db, user, "EDITAR", "CXP", cxp.numero, f"Datos fiscales: NCF {antes['ncf'] or '—'} → {ncf}")
+    db.commit()
+    return {"ok": True, "numero": cxp.numero, "ncf": ncf, "tipo_ncf": tipo}
+
+
+@router.post("/cxp/{cxp_id}/anular")
+def anular_cxp(cxp_id: int, motivo: str = Query(..., min_length=5), db: Session = Depends(get_db),
+               user=Depends(get_current_user)):
+    """Anula una factura de proveedor que no tiene pagos ni notas de crédito.
+
+    Revierte su asiento, devuelve a "recibido sin facturar" lo que venía de una OC y
+    deshace el devengado presupuestario, reponiendo el compromiso de la OC.
+    """
+    if user.rol not in ("admin", "supervisor", "contador"):
+        raise HTTPException(403, "Solo admin, supervisor o contador pueden anular facturas")
+    cxp = db.query(models.CuentaPorPagar).get(cxp_id)
+    if not cxp:
+        raise HTTPException(404, "CxP no encontrada")
+    if cxp.estado == "anulada":
+        raise HTTPException(400, "La factura ya está anulada")
+    if db.query(models.Pago).filter(models.Pago.cxp_id == cxp.id).count():
+        raise HTTPException(400, "La factura tiene pagos registrados: anúlelos primero o registre una nota de crédito")
+    if db.query(models.NotaCredito).filter(models.NotaCredito.cxp_id == cxp.id,
+                                           models.NotaCredito.estado != "anulada").count():
+        raise HTTPException(400, "La factura tiene notas de crédito aplicadas y no se puede anular")
+
+    try:
+        if cxp.asiento_id:
+            a = db.query(models.AsientoContable).get(cxp.asiento_id)
+            if a and a.estado not in ("anulado", "revertido"):
+                _reversar_asiento(db, a, f"Anulación factura {cxp.numero}: {motivo}", user.nombre)
+
+        for cl in db.query(models.LineaCxP).filter(models.LineaCxP.cxp_id == cxp.id).all():
+            if cl.oc_linea_id:
+                ol = db.query(models.OrdenCompraLinea).get(cl.oc_linea_id)
+                if ol:
+                    ol.cantidad_facturada = max(0.0, float(ol.cantidad_facturada or 0) - float(cl.cantidad or 0))
+
+        hoy = date.today()
+        # Lo que la factura liberó del compromiso de la OC vuelve a quedar comprometido.
+        for lib in db.query(models.MovimientoPresupuestario).filter(
+                models.MovimientoPresupuestario.tipo == "LIBERACION",
+                models.MovimientoPresupuestario.origen_tipo == "CXP",
+                models.MovimientoPresupuestario.origen_id == cxp.numero).all():
+            monto = abs(Decimal(str(lib.monto or 0)))
+            comp = db.query(models.CompromisoPresupuestario).filter(
+                models.CompromisoPresupuestario.origen_tipo == "OC",
+                models.CompromisoPresupuestario.origen_id == cxp.oc_id,
+                models.CompromisoPresupuestario.cuenta_id == lib.cuenta_id,
+                models.CompromisoPresupuestario.estado.in_(("activo", "ejecutado")),
+            ).first() if cxp.oc_id else None
+            if not comp or monto <= 0:
+                continue
+            comp.monto_ejecutado = max(Decimal("0"), Decimal(str(comp.monto_ejecutado or 0)) - monto)
+            comp.estado = "activo"
+            _registrar_mov_pres(
+                db, tipo="LIBERACION", fecha=hoy, cuenta_id=lib.cuenta_id, monto=monto,
+                anio=lib.anio, mes=lib.mes, campo_id=lib.campo_id,
+                unidad_negocio_id=lib.unidad_negocio_id, departamento_id=lib.departamento_id,
+                origen_tipo="CXP-ANU", origen_id=cxp.numero,
+                notas=f"Compromiso repuesto por anulación de factura {cxp.numero}", usuario_id=user.id)
+        prov = db.query(models.Proveedor).get(cxp.proveedor_id) if cxp.proveedor_id else None
+        _reversar_devengado_cxp(
+            db, cxp, _monto_presupuestario(cxp.subtotal, cxp.itbis, prov, cxp.tipo_ncf), hoy,
+            origen_tipo="CXP-ANU", origen_id=cxp.numero,
+            notas=f"Reverso de devengado por anulación de factura {cxp.numero}", user=user)
+
+        cxp.estado = "anulada"
+        cxp.saldo_pendiente = 0
+        _audit(db, user, "ANULAR", "CXP", cxp.numero, f"Factura {cxp.ncf or cxp.numero} anulada — {motivo}")
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error anulando CxP %s", cxp.numero)
+        raise HTTPException(500, "Error al anular la factura")
+    return {"ok": True, "numero": cxp.numero, "estado": "anulada"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3003,7 +3161,7 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
             models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
         ).filter(
             models.LineaAsiento.cuenta_id.in_(cta_ids),
-            models.AsientoContable.estado == "contabilizado",
+            models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
             extract("year", models.AsientoContable.fecha) == anio,
         )
         if campo_id:
@@ -3100,7 +3258,7 @@ def presupuesto_drill_down(
         .filter(
             models.LineaAsiento.cuenta_id == cuenta_id,
             extract("year", models.AsientoContable.fecha) == anio,
-            models.AsientoContable.estado == "contabilizado",
+            models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
         )
         .order_by(models.AsientoContable.fecha.desc())
         .limit(300)
@@ -4219,7 +4377,7 @@ def saldo_linea_presupuesto(
         models.AsientoContable, models.LineaAsiento.asiento_id == models.AsientoContable.id
     ).filter(
         models.LineaAsiento.cuenta_id == cuenta_id,
-        models.AsientoContable.estado == "contabilizado",
+        models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
         extract("year", models.AsientoContable.fecha) == anio,
     )
     if campo_id:
@@ -5045,7 +5203,7 @@ def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)
                    models.LineaAsiento.asiento_id == models.AsientoContable.id
             ).filter(
                 models.LineaAsiento.cuenta_id.in_(cta_ids),
-                models.AsientoContable.estado == "contabilizado",
+                models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS),
                 extract("year", models.AsientoContable.fecha) == anio_actual,
                 extract("month", models.AsientoContable.fecha) == mes_actual,
             ).group_by(models.LineaAsiento.cuenta_id).all():

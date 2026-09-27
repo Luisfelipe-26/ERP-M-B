@@ -296,6 +296,7 @@ class OrdenCompraLinea(Base):
     producto_id = Column(String(10), ForeignKey("productos.id_prod"), index=True)
     cantidad = Column(Float)
     cantidad_recibida = Column(Float, default=0)
+    cantidad_facturada = Column(Float, default=0)   # neta de devoluciones ya facturadas
     precio_unitario = Column(Float)
     descuento_pct = Column(Numeric(5, 2), default=0)
     impuesto = Column(String(20), default="itbis_18")

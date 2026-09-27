@@ -6,7 +6,7 @@ import models
 from conftest import ANIO
 import pytest
 
-from routers.compras import RecepcionLinea, RecepcionPayload, recibir_oc
+from routers.compras import FacturaDatos, RecepcionLinea, RecepcionPayload, recibir_oc
 
 # Una recepción siempre contabiliza: sin regla ni período abierto no se puede recibir.
 pytestmark = pytest.mark.usefixtures("reglas_compra")
@@ -44,7 +44,7 @@ def test_el_itbis_de_la_cxp_cuadra_con_el_de_sus_lineas(db, proveedor, user):
                RecepcionPayload(lineas=[
                    RecepcionLinea(linea_id=gravada.id, cantidad_recibida=10),
                    RecepcionLinea(linea_id=exenta.id, cantidad_recibida=10),
-               ]),
+               ], factura=FacturaDatos(ncf="B0100000001")),
                db=db, current_user=user)
 
     cxp = db.query(models.CuentaPorPagar).filter_by(oc_id="OC-001").one()
@@ -66,7 +66,8 @@ def test_a_un_informal_no_se_le_carga_itbis(db, user):
     oc, gravada, exenta = _oc_mixta(db, informal)
 
     recibir_oc("OC-001",
-               RecepcionPayload(lineas=[RecepcionLinea(linea_id=gravada.id, cantidad_recibida=10)]),
+               RecepcionPayload(lineas=[RecepcionLinea(linea_id=gravada.id, cantidad_recibida=10)],
+                                factura=FacturaDatos(ncf="B1100000001")),
                db=db, current_user=user)
 
     cxp = db.query(models.CuentaPorPagar).filter_by(oc_id="OC-001").one()
@@ -85,7 +86,7 @@ def test_el_total_de_la_cxp_es_coherente(db, proveedor, user):
                RecepcionPayload(lineas=[
                    RecepcionLinea(linea_id=gravada.id, cantidad_recibida=10),
                    RecepcionLinea(linea_id=exenta.id, cantidad_recibida=10),
-               ]),
+               ], factura=FacturaDatos(ncf="B0100000001")),
                db=db, current_user=user)
 
     cxp = db.query(models.CuentaPorPagar).filter_by(oc_id="OC-001").one()

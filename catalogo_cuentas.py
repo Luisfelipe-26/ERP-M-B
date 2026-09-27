@@ -68,6 +68,7 @@ CUENTAS_DATA = [
     ("2.1.01.01", "CxP Proveedores",                  "pasivo",     "acreedora", "Balance",  4, True),
     ("2.1.01.02", "CxP Nóminas por Pagar",            "pasivo",     "acreedora", "Balance",  4, True),
     ("2.1.01.03", "Acreedores Diversos / Otras CxP",  "pasivo",     "acreedora", "Balance",  4, True),
+    ("2.1.01.04", "Compras Recibidas por Facturar",   "pasivo",     "acreedora", "Balance",  4, True),
     ("2.1.02",   "Impuestos por Pagar",               "pasivo",     "acreedora", "Balance",  3, False),
     ("2.1.02.01", "ITBIS por Pagar",                  "pasivo",     "acreedora", "Balance",  4, True),
     ("2.1.02.02", "ISR por Pagar",                    "pasivo",     "acreedora", "Balance",  4, True),
