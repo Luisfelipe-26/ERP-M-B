@@ -2484,17 +2484,37 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
     subtotal = Decimal(str(data.subtotal or 0))
     itbis = Decimal(str(data.itbis or 0))
     total = subtotal + itbis
+    moneda = (data.moneda or "DOP").upper()
+    if moneda not in ("DOP", "USD"):
+        raise HTTPException(400, "Moneda debe ser DOP o USD")
+    # El mayor se lleva en pesos: una factura en US$ se registra a su tasa. Antes el asiento
+    # tomaba el monto en dólares como si fueran pesos (US$ 10.000 entraban como RD$ 10.000).
+    tasa = Decimal(str(data.tasa_cambio or 1)) if moneda == "USD" else Decimal("1")
+    if moneda == "USD" and tasa <= 1:
+        raise HTTPException(400, "Indique la tasa de cambio de la factura (RD$ por US$)")
+    subtotal_dop = (subtotal * tasa).quantize(Decimal("0.01"))
+    itbis_dop = (itbis * tasa).quantize(Decimal("0.01"))
+    total_dop = subtotal_dop + itbis_dop
+    ncf = None
+    if data.ncf:
+        ncf = data.ncf.strip().upper().replace("-", "").replace(" ", "")
+        import re as _re
+        if not _re.match(r"^(B\d{10}|E\d{12})$", ncf):
+            raise HTTPException(400, f"NCF '{data.ncf}' inválido: B y 10 dígitos, o E y 12 si es electrónico")
+        dup = db.query(models.CuentaPorCobrar).filter(models.CuentaPorCobrar.ncf == ncf,
+                                                      models.CuentaPorCobrar.estado != "anulada").first()
+        if dup:
+            raise HTTPException(400, f"El NCF {ncf} ya está en la factura {dup.numero}")
 
     numero = get_next("CXC", db)
-    tasa = data.tasa_cambio or 1
-    total_dop = total * Decimal(str(tasa)) if data.moneda == "USD" else total
     cxc = models.CuentaPorCobrar(
         numero=numero,
         cliente_id=data.cliente_id,
-        tipo_ncf=data.tipo_ncf,
+        tipo_ncf=ncf[:3] if ncf else data.tipo_ncf,
+        ncf=ncf,
         fecha=data.fecha,
         fecha_vencimiento=data.fecha_vencimiento,
-        moneda=data.moneda,
+        moneda=moneda,
         tasa_cambio=tasa,
         subtotal=subtotal,
         itbis=itbis,
@@ -2511,19 +2531,24 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
 
     lineas = []
     r_venta = _get_regla_cuentas(db, "venta", "factura_cliente")
-    if r_venta and subtotal > 0:
-        lineas.append({"cuenta_id": r_venta[0], "debe": subtotal, "haber": 0,
+    if not r_venta:
+        raise HTTPException(400, "Configure la regla contable venta / factura_cliente")
+    etiqueta = f" (US$ {total:,.2f} a {tasa})" if moneda == "USD" else ""
+    if subtotal_dop > 0:
+        lineas.append({"cuenta_id": r_venta[0], "debe": subtotal_dop, "haber": 0,
                         "tercero_id": str(data.cliente_id), "campo_id": data.campo_id,
-                        "descripcion_linea": f"CxC {cli.nombre}"})
-        lineas.append({"cuenta_id": r_venta[1], "debe": 0, "haber": subtotal,
+                        "descripcion_linea": f"CxC {cli.nombre}{etiqueta}"})
+        lineas.append({"cuenta_id": r_venta[1], "debe": 0, "haber": subtotal_dop,
                         "campo_id": data.campo_id,
                         "descripcion_linea": f"Venta {cli.nombre}"})
     r_itbis = _get_regla_cuentas(db, "venta", "itbis_venta")
-    if r_itbis and itbis > 0:
-        lineas.append({"cuenta_id": r_itbis[0], "debe": itbis, "haber": 0,
+    if itbis_dop > 0:
+        if not r_itbis:
+            raise HTTPException(400, "Configure la regla contable venta / itbis_venta")
+        lineas.append({"cuenta_id": r_itbis[0], "debe": itbis_dop, "haber": 0,
                         "tercero_id": str(data.cliente_id),
                         "descripcion_linea": f"CxC ITBIS {cli.nombre}"})
-        lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis,
+        lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis_dop,
                         "descripcion_linea": "ITBIS por pagar"})
 
     try:
@@ -2532,12 +2557,15 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
             asiento = _crear_asiento_auto(
                 db, data.fecha, "VTA", numero,
                 f"Venta a {cli.nombre} — {numero}",
-                lineas, user.nombre
+                lineas, user.nombre, requerido=True,
             )
-            if asiento:
-                cxc.asiento_id = asiento.id
-        _audit(db, user, "CREAR", "CXC", numero, f"Venta {cli.nombre} total={total}")
+            cxc.asiento_id = asiento.id
+        _audit(db, user, "CREAR", "CXC", numero,
+               f"Venta {cli.nombre} total={total} {moneda}" + (f" = RD$ {total_dop}" if moneda == "USD" else ""))
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         logger.exception("Error creando CxC %s", numero)
@@ -2567,12 +2595,32 @@ def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
     if monto > saldo:
         raise HTTPException(400, f"Monto ({monto}) excede saldo pendiente ({saldo})")
 
+    # Una factura en US$ se cobra en dólares: el banco recibe los pesos del día del cobro y
+    # la CxC se salda a la tasa a la que se facturó; la diferencia es cambiaria. Antes el
+    # asiento tomaba los dólares como pesos.
+    en_usd = (cxc.moneda or "DOP").upper() == "USD"
+    tasa_fact = Decimal(str(cxc.tasa_cambio or 1)) if en_usd else Decimal("1")
+    tasa_cobro = Decimal("1")
+    if en_usd:
+        if not data.tasa_cambio or data.tasa_cambio <= 1:
+            raise HTTPException(400, "Indique la tasa de cambio del día del cobro (RD$ por US$)")
+        tasa_cobro = Decimal(str(data.tasa_cambio))
+    banco_dop = (monto * tasa_cobro).quantize(Decimal("0.01"))
+    cxc_dop = (monto * tasa_fact).quantize(Decimal("0.01"))
+    if en_usd and saldo - monto <= Decimal("0.005"):
+        # El último cobro salda lo que quede en pesos, sin centavos sueltos por redondeo.
+        previos = sum((Decimal(str(c.monto or 0)) * tasa_fact).quantize(Decimal("0.01"))
+                      for c in db.query(models.Cobro).filter(models.Cobro.cxc_id == cxc.id).all())
+        cxc_dop = Decimal(str(cxc.total_dop or 0)) - previos
+    diferencia = banco_dop - cxc_dop
+
     numero = get_next("COB", db)
     cobro = models.Cobro(
         numero=numero, cxc_id=data.cxc_id, fecha=data.fecha,
         monto=monto, metodo_pago=data.metodo_pago,
         referencia_bancaria=data.referencia_bancaria,
         cuenta_bancaria_id=data.cuenta_bancaria_id,
+        tasa_cambio=tasa_cobro if en_usd else None,
     )
     db.add(cobro)
 
@@ -2589,31 +2637,52 @@ def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
     if data.cuenta_bancaria_id:
         cb = db.query(models.CuentaBancaria).get(data.cuenta_bancaria_id)
         if cb:
-            cb.saldo_segun_libro = Decimal(str(cb.saldo_segun_libro or 0)) + monto
+            # Una cuenta en dólares lleva su saldo en dólares; una en pesos, en pesos.
+            en_moneda_cuenta = monto if (cb.moneda or "DOP").upper() == (cxc.moneda or "DOP").upper() else banco_dop
+            cb.saldo_segun_libro = Decimal(str(cb.saldo_segun_libro or 0)) + en_moneda_cuenta
             cuenta_banco_contable_id = cb.cuenta_contable_id
+
+    if not r_cobro:
+        raise HTTPException(400, "Configure la regla contable cobro / cobro_cliente")
+    perdida_fx = ganancia_fx = None
+    if diferencia != 0:
+        perdida_fx, ganancia_fx = _cuentas_diferencia_cambiaria(db)
+        if not (ganancia_fx if diferencia > 0 else perdida_fx):
+            raise HTTPException(400, "Configure la regla cobro / diferencia_cambiaria (cuentas de ganancia y pérdida cambiaria)")
 
     try:
         asiento = None
-        if r_cobro and monto > 0:
+        if monto > 0:
             cta_debe = cuenta_banco_contable_id or r_cobro[0]
             cli = db.query(models.Cliente).get(cxc.cliente_id) if cxc.cliente_id else None
             cli_nombre = cli.nombre if cli else "Cliente"
+            lineas = [
+                {"cuenta_id": cta_debe, "debe": banco_dop, "haber": 0,
+                 "descripcion_linea": f"Entrada banco — {data.metodo_pago or 'transferencia'}" +
+                                      (f" (US$ {monto:,.2f} a {tasa_cobro})" if en_usd else "")},
+                {"cuenta_id": r_cobro[1], "debe": 0, "haber": cxc_dop,
+                 "tercero_id": str(cxc.cliente_id),
+                 "descripcion_linea": f"Cobro CxC {cxc.numero}"},
+            ]
+            if diferencia > 0:
+                lineas.append({"cuenta_id": ganancia_fx, "debe": 0, "haber": diferencia,
+                               "descripcion_linea": f"Ganancia cambiaria {cxc.numero} ({tasa_fact} → {tasa_cobro})"})
+            elif diferencia < 0:
+                lineas.append({"cuenta_id": perdida_fx, "debe": -diferencia, "haber": 0,
+                               "descripcion_linea": f"Pérdida cambiaria {cxc.numero} ({tasa_fact} → {tasa_cobro})"})
             asiento = _crear_asiento_auto(
                 db, data.fecha, "COB", numero,
                 f"Cobro de {cli_nombre} — {numero}",
-                [
-                    {"cuenta_id": cta_debe, "debe": monto, "haber": 0,
-                     "descripcion_linea": f"Entrada banco — {data.metodo_pago or 'transferencia'}"},
-                    {"cuenta_id": r_cobro[1], "debe": 0, "haber": monto,
-                     "tercero_id": str(cxc.cliente_id),
-                     "descripcion_linea": f"Cobro CxC {cxc.numero}"},
-                ],
-                user.nombre
+                lineas, user.nombre, requerido=True,
             )
-            if asiento:
-                cobro.asiento_id = asiento.id
-        _audit(db, user, "CREAR", "COBRO", numero, f"Cobro CxC {cxc.numero} monto={monto}")
+            cobro.asiento_id = asiento.id
+        _audit(db, user, "CREAR", "COBRO", numero,
+               f"Cobro CxC {cxc.numero} monto={monto} {cxc.moneda or 'DOP'}" +
+               (f" a {tasa_cobro}: RD$ {banco_dop}, diferencia cambiaria {diferencia}" if en_usd else ""))
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         logger.exception("Error registrando cobro %s", numero)
@@ -2621,6 +2690,7 @@ def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
     db.refresh(cobro)
     return {"ok": True, "numero": numero, "id": cobro.id,
             "saldo_restante": float(cxc.saldo_pendiente),
+            "monto_dop": float(banco_dop), "diferencia_cambiaria": float(diferencia),
             "asiento": asiento.numero if asiento else None}
 
 
@@ -4901,21 +4971,140 @@ def dgii_607(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(ge
             "tipo_ingreso": "01",
             "fecha_comprobante": str(cxc.fecha) if cxc.fecha else "",
             "fecha_retencion": "",
-            "monto_facturado": float(cxc.subtotal or 0),
-            "itbis_facturado": float(cxc.itbis or 0),
+            # La DGII recibe el 607 en pesos: una factura en US$ va a su tasa.
+            "monto_facturado": float((Decimal(str(cxc.subtotal or 0)) * Decimal(str(cxc.tasa_cambio or 1))).quantize(Decimal("0.01")))
+                               if (cxc.moneda or "DOP") == "USD" else float(cxc.subtotal or 0),
+            "itbis_facturado": float((Decimal(str(cxc.itbis or 0)) * Decimal(str(cxc.tasa_cambio or 1))).quantize(Decimal("0.01")))
+                               if (cxc.moneda or "DOP") == "USD" else float(cxc.itbis or 0),
             "itbis_retenido_terceros": 0,
             "isr_retenido_terceros": 0,
-            "total": float(cxc.total or 0),
+            "total": float(cxc.total_dop or 0) if (cxc.moneda or "DOP") == "USD" else float(cxc.total or 0),
+            "moneda": cxc.moneda or "DOP",
+            "total_moneda": float(cxc.total or 0),
+            "cxc": cxc.numero,
             "cliente": cli.nombre if cli else "—",
         })
+    sin_ncf = [r["cxc"] for r in rows if not r["ncf"]]
     return {
         "rnc_empresa": rnc_empresa,
         "periodo": f"{anio}{mes:02d}",
         "cantidad_registros": len(rows),
         "total_monto": round(sum(r["monto_facturado"] for r in rows), 2),
         "total_itbis": round(sum(r["itbis_facturado"] for r in rows), 2),
+        "sin_ncf": sin_ncf,
+        "alertas": ([f"{len(sin_ncf)} factura(s) sin NCF: la DGII rechaza esos registros."] if sin_ncf else []),
         "registros": rows,
     }
+
+
+def _cuentas_diferencia_cambiaria(db: Session):
+    """(pérdida cambiaria, ganancia cambiaria): por regla, por código del catálogo o por nombre."""
+    r = _get_regla_cuentas(db, "cobro", "diferencia_cambiaria")
+    if r:
+        return r
+    def buscar(codigo, clave):
+        c = db.query(models.CuentaContable).filter(models.CuentaContable.codigo == codigo).first()
+        if c and "cambiar" in (c.nombre or "").lower():
+            return c.id
+        c = next((c for c in db.query(models.CuentaContable).filter(
+            models.CuentaContable.acepta_movimientos == True).all()
+            if "cambiar" in (c.nombre or "").lower() and clave in (c.nombre or "").lower()), None)
+        return c.id if c else None
+    return buscar("6.2.03", "rdida"), buscar("4.2.01", "ganancia") or buscar("4.2.01", "ingreso")
+
+
+@router.post("/cxc/ajuste-moneda")
+def ajuste_moneda_cxc(dry_run: bool = Query(True), fecha: Optional[date] = None,
+                      db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Lleva a pesos los asientos de facturas y cobros en US$ registrados antes de la corrección.
+
+    Aquellos asientos tomaron el monto en dólares como pesos. Por cada uno se crea un asiento
+    complementario por la diferencia a la tasa de la factura (los cobros viejos no guardaban
+    la tasa del día, así que no se estima diferencia cambiaria). En modo prueba solo lista.
+    """
+    fecha = fecha or date.today()
+    r_venta = _get_regla_cuentas(db, "venta", "factura_cliente")
+    r_itbis = _get_regla_cuentas(db, "venta", "itbis_venta")
+    if not r_venta:
+        raise HTTPException(400, "Configure la regla venta / factura_cliente")
+    hechos = {a.referencia_id for a in db.query(models.AsientoContable).filter(
+        models.AsientoContable.origen == "AJ-USD", models.AsientoContable.estado != "anulado").all()}
+
+    def mov(asiento_id, cuenta_id, lado):
+        return sum((Decimal(str(getattr(l, lado) or 0)) for l in db.query(models.LineaAsiento).filter(
+            models.LineaAsiento.asiento_id == asiento_id, models.LineaAsiento.cuenta_id == cuenta_id).all()),
+            Decimal("0"))
+
+    items, bancos = [], []
+    for cxc in db.query(models.CuentaPorCobrar).filter(
+            models.CuentaPorCobrar.moneda == "USD", models.CuentaPorCobrar.estado != "anulada",
+            models.CuentaPorCobrar.asiento_id.isnot(None)).order_by(models.CuentaPorCobrar.id).all():
+        tasa = Decimal(str(cxc.tasa_cambio or 1))
+        if tasa <= 1:
+            continue
+        # Factura: la CxC debió debitarse por el total en pesos
+        if cxc.numero not in hechos:
+            falta_sub = (Decimal(str(cxc.subtotal or 0)) * tasa).quantize(Decimal("0.01")) - mov(cxc.asiento_id, r_venta[1], "haber")
+            falta_itbis = ((Decimal(str(cxc.itbis or 0)) * tasa).quantize(Decimal("0.01")) -
+                           (mov(cxc.asiento_id, r_itbis[1], "haber") if r_itbis else Decimal("0")))
+            falta_sub = max(falta_sub, Decimal("0"))
+            falta_itbis = falta_itbis if (falta_itbis > Decimal("0.01") and r_itbis) else Decimal("0")
+            if falta_sub > Decimal("0.01") or falta_itbis > 0:
+                items.append({"documento": cxc.numero, "tipo": "factura", "moneda": "USD",
+                              "monto_usd": float(cxc.total or 0), "tasa": float(tasa),
+                              "ajuste_dop": float(falta_sub + falta_itbis)})
+                if not dry_run:
+                    lineas = [{"cuenta_id": r_venta[0], "debe": falta_sub + falta_itbis, "haber": 0,
+                               "tercero_id": str(cxc.cliente_id), "descripcion_linea": f"CxC {cxc.numero} a RD$ ({tasa})"}]
+                    if falta_sub > 0:
+                        lineas.append({"cuenta_id": r_venta[1], "debe": 0, "haber": falta_sub,
+                                       "descripcion_linea": f"Venta {cxc.numero} a RD$ ({tasa})"})
+                    if falta_itbis > 0:
+                        lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": falta_itbis,
+                                       "descripcion_linea": f"ITBIS {cxc.numero} a RD$ ({tasa})"})
+                    _crear_asiento_auto(db, fecha, "AJ-USD", cxc.numero,
+                                        f"Factura {cxc.numero} en US$ llevada a pesos ({tasa})",
+                                        lineas, user.nombre, requerido=True)
+        # Cobros: la CxC debió acreditarse en pesos a la tasa de la factura
+        for c in db.query(models.Cobro).filter(models.Cobro.cxc_id == cxc.id,
+                                               models.Cobro.asiento_id.isnot(None)).all():
+            if c.numero in hechos or c.tasa_cambio:
+                continue
+            r_cobro = _get_regla_cuentas(db, "cobro", "cobro_cliente")
+            a = db.query(models.AsientoContable).get(c.asiento_id)
+            if not a or not r_cobro:
+                continue
+            falta = (Decimal(str(c.monto or 0)) * tasa).quantize(Decimal("0.01")) - mov(a.id, r_cobro[1], "haber")
+            if falta <= Decimal("0.01"):
+                continue
+            cta_banco = next((l.cuenta_id for l in a.lineas if Decimal(str(l.debe or 0)) > 0), r_cobro[0])
+            items.append({"documento": c.numero, "tipo": "cobro", "moneda": "USD",
+                          "monto_usd": float(c.monto or 0), "tasa": float(tasa), "ajuste_dop": float(falta)})
+            cb = db.query(models.CuentaBancaria).get(c.cuenta_bancaria_id) if c.cuenta_bancaria_id else None
+            if cb and (cb.moneda or "DOP").upper() == "DOP":
+                bancos.append({"cuenta": cb.nombre_corto or cb.banco, "ajuste_saldo_libro": float(falta)})
+            if not dry_run:
+                _crear_asiento_auto(db, fecha, "AJ-USD", c.numero,
+                                    f"Cobro {c.numero} en US$ llevado a pesos ({tasa})",
+                                    [{"cuenta_id": cta_banco, "debe": falta, "haber": 0,
+                                      "descripcion_linea": f"Banco {c.numero} a RD$ ({tasa})"},
+                                     {"cuenta_id": r_cobro[1], "debe": 0, "haber": falta,
+                                      "tercero_id": str(cxc.cliente_id),
+                                      "descripcion_linea": f"Cobro {c.numero} a RD$ ({tasa})"}],
+                                    user.nombre, requerido=True)
+                if cb and (cb.moneda or "DOP").upper() == "DOP":
+                    cb.saldo_segun_libro = Decimal(str(cb.saldo_segun_libro or 0)) + falta
+
+    resumen = {"dry_run": dry_run, "fecha": str(fecha), "documentos": len(items),
+               "facturas": sum(1 for i in items if i["tipo"] == "factura"),
+               "cobros": sum(1 for i in items if i["tipo"] == "cobro"),
+               "ajuste_dop": round(sum(i["ajuste_dop"] for i in items), 2),
+               "saldos_banco_ajustados": bancos, "items": items}
+    if not dry_run:
+        _audit(db, user, "AJUSTE", "CXC", "moneda",
+               f"Facturas/cobros en US$ llevados a pesos: {len(items)} documentos, RD$ {resumen['ajuste_dop']:,.2f}")
+        db.commit()
+    return resumen
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -978,7 +978,8 @@ class Cobro(Base):
     numero = Column(String(20), unique=True, index=True, nullable=False)
     cxc_id = Column(Integer, ForeignKey("cuentas_por_cobrar.id"), nullable=False, index=True)
     fecha = Column(Date, nullable=False)
-    monto = Column(Numeric(14, 2), nullable=False)
+    monto = Column(Numeric(14, 2), nullable=False)         # en la moneda de la factura
+    tasa_cambio = Column(Numeric(10, 4))                   # del día del cobro, si la factura es en US$
     metodo_pago = Column(String(30))
     referencia_bancaria = Column(String(100))
     cuenta_bancaria_id = Column(Integer, ForeignKey("cuentas_bancarias.id"))

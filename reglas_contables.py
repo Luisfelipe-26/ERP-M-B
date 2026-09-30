@@ -27,6 +27,8 @@ REGLAS_DATA = [
     # ── Tesorería ──
     ("pago",  "pago_proveedor", "2.1.01.01", "1.1.01.03", "Pago proveedor: Db CxP, Cr Banco"),
     ("cobro", "cobro_cliente",  "1.1.01.03", "1.1.02.01", "Cobro cliente: Db Banco, Cr CxC"),
+    ("cobro", "diferencia_cambiaria", "6.2.03", "4.2.01",
+     "Diferencia cambiaria: Db Pérdida (tasa bajó), Cr Ganancia (tasa subió)"),
     # ── Nómina por Orden de Trabajo (evento 'nomina', usado en ordenes.py) ──
     ("nomina", "salario_jornada", "5.1.01",    "2.1.01.02", "Nómina MO directa: Db Costo MO, Cr Nóminas por Pagar"),
     ("nomina", "pago_nomina",     "2.1.01.02", "1.1.01.03", "Pago nómina: Db Nóminas por Pagar, Cr Banco"),

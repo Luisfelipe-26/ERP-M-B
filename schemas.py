@@ -725,6 +725,7 @@ class NotaCreditoOut(BaseModel):
 class CuentaPorCobrarCreate(BaseModel):
     cliente_id: int
     tipo_ncf: Optional[str] = None
+    ncf: Optional[str] = None
     fecha: date
     fecha_vencimiento: Optional[date] = None
     moneda: str = "DOP"
@@ -766,7 +767,8 @@ class CuentaPorCobrarOut(BaseModel):
 class CobroCreate(BaseModel):
     cxc_id: int
     fecha: date
-    monto: float
+    monto: float                               # en la moneda de la factura
+    tasa_cambio: Optional[float] = None        # RD$ por US$ del día del cobro (facturas en US$)
     metodo_pago: Optional[str] = "transferencia"
     referencia_bancaria: Optional[str] = None
     cuenta_bancaria_id: Optional[int] = None

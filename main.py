@@ -295,6 +295,8 @@ def run_migrations():
         # Asientos anulados con reverso: pasan a "revertido" para que cuenten junto a su reverso
         # en los reportes por líneas (antes solo contaba el reverso y la anulación restaba doble).
         "UPDATE asientos_contables SET estado = 'revertido' WHERE estado = 'anulado' AND asiento_reverso_id IS NOT NULL",
+        # Cobros en US$: tasa del día del cobro, para la diferencia cambiaria
+        "ALTER TABLE cobros ADD COLUMN IF NOT EXISTS tasa_cambio NUMERIC(10,4)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).
