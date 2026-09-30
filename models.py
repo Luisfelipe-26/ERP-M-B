@@ -1459,3 +1459,88 @@ class DimensionEntidad(Base):
         UniqueConstraint("dimension_id", "entidad_tipo", "entidad_id", name="uq_diment_dim_ent"),
         Index("ix_diment_entidad", "entidad_tipo", "entidad_id"),
     )
+
+
+# ─── Venta de fruta: despacho → liquidación del cliente → factura ───────────
+
+class DespachoFruta(Base):
+    """Fruta que sale de la finca hacia un cliente, por calibre de la finca.
+
+    Sale del inventario al costo promedio y queda en "Fruta despachada por liquidar"
+    hasta que el cliente la clasifica en su planta y envía su liquidación.
+    """
+    __tablename__ = "despachos_fruta"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    fecha = Column(Date, nullable=False, index=True)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"), nullable=False, index=True)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"))
+    temporada = Column(String(20), index=True)
+    conduce = Column(String(50))                  # conduce o guía que acompaña la fruta
+    observaciones = Column(Text)
+    estado = Column(String(20), default="despachado", nullable=False)   # despachado / liquidado / anulado
+    kg_total = Column(Numeric(14, 2), default=0)
+    costo_total = Column(Numeric(14, 2), default=0)
+    asiento_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    cliente = relationship("Cliente")
+    lineas = relationship("DespachoLinea", cascade="all, delete-orphan", back_populates="despacho")
+
+
+class DespachoLinea(Base):
+    __tablename__ = "despachos_fruta_lineas"
+    id = Column(Integer, primary_key=True, index=True)
+    despacho_id = Column(Integer, ForeignKey("despachos_fruta.id", ondelete="CASCADE"), nullable=False, index=True)
+    calibre_id = Column(Integer, ForeignKey("calibres.id"), nullable=False)
+    producto_id = Column(String(10), ForeignKey("productos.id_prod"), nullable=False)
+    kg = Column(Numeric(14, 2), nullable=False)
+    costo_unitario = Column(Numeric(14, 4), default=0)   # costo promedio al salir
+    movimiento_id = Column(Integer, ForeignKey("movimientos_inventario.id"))
+    despacho = relationship("DespachoFruta", back_populates="lineas")
+    calibre = relationship("Calibre")
+
+
+class LiquidacionVenta(Base):
+    """Liquidación del cliente de un despacho: kg que le reconoce por calibre, rechazo y precio.
+
+    Con ella se emite la factura de venta (CxC) y se reconoce el costo de lo despachado.
+    """
+    __tablename__ = "liquidaciones_venta"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(20), unique=True, index=True, nullable=False)
+    despacho_id = Column(Integer, ForeignKey("despachos_fruta.id"), nullable=False, index=True)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"), nullable=False, index=True)
+    fecha = Column(Date, nullable=False, index=True)
+    referencia_cliente = Column(String(50))       # número de la liquidación del cliente
+    moneda = Column(String(5), default="USD", nullable=False)
+    tasa_cambio = Column(Numeric(10, 4), default=1)
+    kg_liquidados = Column(Numeric(14, 2), default=0)
+    kg_rechazo = Column(Numeric(14, 2), default=0)
+    kg_merma = Column(Numeric(14, 2), default=0)   # despachado - liquidado - rechazo (pérdida de peso)
+    subtotal = Column(Numeric(14, 2), default=0)   # en la moneda de la venta
+    venta_dop = Column(Numeric(14, 2), default=0)
+    costo_venta = Column(Numeric(14, 2), default=0)     # RD$, parte liquidada
+    costo_rechazo = Column(Numeric(14, 2), default=0)   # RD$, rechazo y merma
+    cxc_id = Column(Integer, ForeignKey("cuentas_por_cobrar.id"))
+    asiento_costo_id = Column(Integer, ForeignKey("asientos_contables.id"))
+    estado = Column(String(20), default="activa", nullable=False)   # activa / anulada
+    observaciones = Column(Text)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    creado_en = Column(DateTime, server_default=func.now())
+    despacho = relationship("DespachoFruta")
+    cliente = relationship("Cliente")
+    lineas = relationship("LiquidacionLinea", cascade="all, delete-orphan", back_populates="liquidacion")
+
+
+class LiquidacionLinea(Base):
+    __tablename__ = "liquidaciones_venta_lineas"
+    id = Column(Integer, primary_key=True, index=True)
+    liquidacion_id = Column(Integer, ForeignKey("liquidaciones_venta.id", ondelete="CASCADE"), nullable=False, index=True)
+    calibre_id = Column(Integer, ForeignKey("calibres.id"), nullable=False)
+    kg = Column(Numeric(14, 2), nullable=False)
+    precio = Column(Numeric(14, 4), nullable=False)          # por kg, en la moneda de la venta
+    precio_libro = Column(Numeric(14, 4))                    # el del libro de precios ese día, si había
+    subtotal = Column(Numeric(14, 2), nullable=False)
+    liquidacion = relationship("LiquidacionVenta", back_populates="lineas")
+    calibre = relationship("Calibre")

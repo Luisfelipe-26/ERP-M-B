@@ -37,3 +37,21 @@ def test_reutiliza_una_cuenta_existente_con_ese_sentido(db):
     assert db.query(models.CuentaContable).count() == 1
     regla = db.query(models.ReglaContabilizacion).filter_by(concepto="recepcion_por_facturar").one()
     assert regla.cuenta_haber_id == existente.id
+
+
+def test_crea_la_cuenta_de_fruta_despachada(db):
+    from reglas_contables import asegurar_cuenta_despacho
+    padre = models.CuentaContable(codigo="1.1.03", nombre="Inventarios", naturaleza="deudora", tipo="activo",
+                                  acepta_movimientos=False)
+    fruta = models.CuentaContable(codigo="1.1.03.03", nombre="Cosecha Terminada", naturaleza="deudora", tipo="activo")
+    db.add_all([padre, fruta])
+    db.flush()
+    db.add(models.ReglaContabilizacion(evento="venta", concepto="costo_venta", cuenta_debe_id=fruta.id,
+                                       cuenta_haber_id=fruta.id, activo=True))
+    db.flush()
+    assert asegurar_cuenta_despacho(db, models) == "1.1.03.08"
+    regla = db.query(models.ReglaContabilizacion).filter_by(concepto="despacho_por_liquidar").one()
+    cuenta = db.query(models.CuentaContable).get(regla.cuenta_debe_id)
+    assert cuenta.codigo == "1.1.03.08" and cuenta.cuenta_padre_id == padre.id
+    assert regla.cuenta_haber_id == fruta.id, "acredita el inventario de fruta"
+    assert asegurar_cuenta_despacho(db, models) is None

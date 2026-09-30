@@ -2471,12 +2471,11 @@ def listar_cxc(estado: str = None, skip: int = 0, limit: int = 100,
     return {"total": total, "items": result}
 
 
-@router.post("/cxc")
-def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db),
-              user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
+def _registrar_cxc(db: Session, data: schemas.CuentaPorCobrarCreate, user, origen: str = "VTA"):
+    """Crea una factura de venta con su asiento en pesos, sin confirmar la transacción.
 
+    La usan la factura manual y la liquidación de un despacho de fruta.
+    """
     cli = db.query(models.Cliente).get(data.cliente_id)
     if not cli:
         raise HTTPException(400, f"Cliente ID {data.cliente_id} no existe")
@@ -2551,27 +2550,36 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
         lineas.append({"cuenta_id": r_itbis[1], "debe": 0, "haber": itbis_dop,
                         "descripcion_linea": "ITBIS por pagar"})
 
+    asiento = None
+    if lineas:
+        asiento = _crear_asiento_auto(
+            db, data.fecha, origen, numero,
+            f"Venta a {cli.nombre} — {numero}",
+            lineas, user.nombre, requerido=True,
+        )
+        cxc.asiento_id = asiento.id
+    _audit(db, user, "CREAR", "CXC", numero,
+           f"Venta {cli.nombre} total={total} {moneda}" + (f" = RD$ {total_dop}" if moneda == "USD" else ""))
+    return cxc, asiento
+
+
+@router.post("/cxc")
+def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db),
+              user=Depends(get_current_user)):
+    if user.rol == "operador":
+        raise HTTPException(403, "Acceso denegado")
     try:
-        asiento = None
-        if lineas:
-            asiento = _crear_asiento_auto(
-                db, data.fecha, "VTA", numero,
-                f"Venta a {cli.nombre} — {numero}",
-                lineas, user.nombre, requerido=True,
-            )
-            cxc.asiento_id = asiento.id
-        _audit(db, user, "CREAR", "CXC", numero,
-               f"Venta {cli.nombre} total={total} {moneda}" + (f" = RD$ {total_dop}" if moneda == "USD" else ""))
+        cxc, asiento = _registrar_cxc(db, data, user)
         db.commit()
     except HTTPException:
         db.rollback()
         raise
     except Exception:
         db.rollback()
-        logger.exception("Error creando CxC %s", numero)
+        logger.exception("Error creando CxC")
         raise HTTPException(500, "Error al crear cuenta por cobrar")
     db.refresh(cxc)
-    return {"ok": True, "numero": numero, "id": cxc.id,
+    return {"ok": True, "numero": cxc.numero, "id": cxc.id,
             "asiento": asiento.numero if asiento else None}
 
 

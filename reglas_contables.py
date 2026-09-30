@@ -24,6 +24,8 @@ REGLAS_DATA = [
     ("venta", "factura_cliente", "1.1.02.01", "4.1.01",    "Venta: Db CxC Clientes, Cr Ingreso Venta"),
     ("venta", "itbis_venta",     "1.1.02.01", "2.1.02.01", "ITBIS en ventas: Db CxC, Cr ITBIS por Pagar"),
     ("venta", "costo_venta",     "5.1.02",    "1.1.03.03", "Costo de venta: Db Costo, Cr Inventario Terminado"),
+    ("venta", "despacho_por_liquidar", "1.1.03.08", "1.1.03.03",
+     "Despacho: Db Fruta Despachada por Liquidar, Cr Inventario de fruta"),
     # ── Tesorería ──
     ("pago",  "pago_proveedor", "2.1.01.01", "1.1.01.03", "Pago proveedor: Db CxP, Cr Banco"),
     ("cobro", "cobro_cliente",  "1.1.01.03", "1.1.02.01", "Cobro cliente: Db Banco, Cr CxC"),
@@ -49,37 +51,60 @@ REGLAS_DATA = [
 ]
 
 
-def asegurar_cuenta_puente(db, models):
-    """Crea, si faltan, la cuenta 'Compras Recibidas por Facturar' y la regla que la usa.
+def _asegurar_cuenta_con_regla(db, models, *, evento, concepto, padre, hermana, desde, nombre,
+                               tipo, naturaleza, palabras, descripcion, lado, contraparte):
+    """Crea, si faltan, una cuenta de trabajo y la regla que la usa. Aditivo e idempotente.
 
-    La recepción acredita esta cuenta y la factura del proveedor la liquida, como en
-    Dynamics 365. Si ya hay una cuenta con ese sentido se reutiliza; si el código 2.1.01.04
-    está ocupado por otra cuenta (catálogo divergente), se toma el siguiente libre.
-    Devuelve el código de la cuenta usada si creó la regla, o None si ya existía.
+    Si ya hay una cuenta hija de `padre` cuyo nombre contiene todas las `palabras`, se reutiliza;
+    si no, se crea con el primer código libre desde `padre.desde` (el catálogo de producción
+    divergió y un código puede estar ocupado por otra cuenta). Se presenta en los estados
+    financieros junto a su `hermana`. `lado` dice si la cuenta va al debe o al haber de la
+    regla; `contraparte` es (evento, concepto, "debe"|"haber") de la regla de la que se toma
+    la otra cuenta. Devuelve el código usado si creó la regla, o None si ya existía.
     """
     C, R = models.CuentaContable, models.ReglaContabilizacion
-    if db.query(R).filter_by(evento="compra", concepto="recepcion_por_facturar").first():
+    if db.query(R).filter_by(evento=evento, concepto=concepto).first():
         return None
-    cuenta = next((c for c in db.query(C).filter(C.codigo.like("2.1.01.%")).all()
-                   if "factur" in (c.nombre or "").lower() and "recib" in (c.nombre or "").lower()), None)
+    cuenta = next((c for c in db.query(C).filter(C.codigo.like(f"{padre}.%")).all()
+                   if all(p in (c.nombre or "").lower() for p in palabras)), None)
     if cuenta is None:
         usados = {c for (c,) in db.query(C.codigo).all()}
-        codigo = next(f"2.1.01.{n:02d}" for n in range(4, 100) if f"2.1.01.{n:02d}" not in usados)
-        padre = db.query(C).filter_by(codigo="2.1.01").first()
-        hermana = db.query(C).filter_by(codigo="2.1.01.01").first()
-        cuenta = C(codigo=codigo, nombre="Compras Recibidas por Facturar", tipo="pasivo",
-                   naturaleza="acreedora", grupo="Balance", nivel=4, acepta_movimientos=True,
-                   cuenta_padre_id=padre.id if padre else None,
-                   # Se presenta en el balance junto a las CxP de proveedores.
-                   partida_id=hermana.partida_id if hermana else None, activo=True)
+        codigo = next(f"{padre}.{n:02d}" for n in range(desde, 100) if f"{padre}.{n:02d}" not in usados)
+        cta_padre = db.query(C).filter_by(codigo=padre).first()
+        cta_hermana = db.query(C).filter_by(codigo=hermana).first()
+        cuenta = C(codigo=codigo, nombre=nombre, tipo=tipo, naturaleza=naturaleza, grupo="Balance",
+                   nivel=4, acepta_movimientos=True, cuenta_padre_id=cta_padre.id if cta_padre else None,
+                   partida_id=cta_hermana.partida_id if cta_hermana else None, activo=True)
         db.add(cuenta)
         db.flush()
-    compra = db.query(R).filter_by(evento="compra", concepto="factura_proveedor").first()
-    db.add(R(evento="compra", concepto="recepcion_por_facturar",
-             cuenta_debe_id=compra.cuenta_debe_id if compra else cuenta.id,
-             cuenta_haber_id=cuenta.id, activo=True,
-             descripcion="Recepción sin factura: Db Inventario, Cr Compras Recibidas por Facturar"))
+    ref = db.query(R).filter_by(evento=contraparte[0], concepto=contraparte[1]).first()
+    otra = (getattr(ref, "cuenta_debe_id" if contraparte[2] == "debe" else "cuenta_haber_id") if ref else None) or cuenta.id
+    db.add(R(evento=evento, concepto=concepto, activo=True, descripcion=descripcion,
+             cuenta_debe_id=cuenta.id if lado == "debe" else otra,
+             cuenta_haber_id=cuenta.id if lado == "haber" else otra))
     return cuenta.codigo
+
+
+def asegurar_cuenta_puente(db, models):
+    """Cuenta 'Compras Recibidas por Facturar': la recepción la acredita y la factura del
+    proveedor la liquida, como en Dynamics 365."""
+    return _asegurar_cuenta_con_regla(
+        db, models, evento="compra", concepto="recepcion_por_facturar",
+        padre="2.1.01", hermana="2.1.01.01", desde=4, nombre="Compras Recibidas por Facturar",
+        tipo="pasivo", naturaleza="acreedora", palabras=("factur", "recib"),
+        descripcion="Recepción sin factura: Db Inventario, Cr Compras Recibidas por Facturar",
+        lado="haber", contraparte=("compra", "factura_proveedor", "debe"))
+
+
+def asegurar_cuenta_despacho(db, models):
+    """Cuenta 'Fruta Despachada por Liquidar': el despacho la debita al sacar la fruta del
+    inventario y la liquidación del cliente la acredita al reconocer el costo de venta."""
+    return _asegurar_cuenta_con_regla(
+        db, models, evento="venta", concepto="despacho_por_liquidar",
+        padre="1.1.03", hermana="1.1.03.03", desde=8, nombre="Fruta Despachada por Liquidar",
+        tipo="activo", naturaleza="deudora", palabras=("despach", "liquid"),
+        descripcion="Despacho: Db Fruta Despachada por Liquidar, Cr Inventario de fruta",
+        lado="debe", contraparte=("venta", "costo_venta", "haber"))
 
 
 def sembrar_reglas(db, models):

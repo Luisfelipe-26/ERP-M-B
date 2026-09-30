@@ -33,6 +33,8 @@ SEQUENCE_CONFIG = {
     'DEV':   ('DEV-', 4),
     'DEV-GR': ('DGR-', 4),
     'COS':   ('COS-', 4),
+    'DES':   ('DES-', 4),
+    'LIQ':   ('LIQ-', 4),
 }
 
 SEQUENCE_TABLE_MAP = {

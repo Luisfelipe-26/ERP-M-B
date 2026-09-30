@@ -10,7 +10,7 @@ from routers import (
     auth, campos, trabajadores, actividades, productos,
     contabilidad, sequences, admin, roles,
     ordenes, dashboard, inventario, reportes, compras,
-    audit_log, tipos_producto, categorias_producto, proveedores, cosecha,
+    audit_log, tipos_producto, categorias_producto, proveedores, cosecha, ventas,
     clima, sanidad, riego, analytics,
     clientes, cuentas_bancarias,
 )
@@ -429,6 +429,7 @@ def seed_rbac():
             ("actividades", "Actividades"),
             ("compras", "Compras"),
             ("cosecha", "Cosecha"),
+            ("ventas", "Ventas"),
             ("configuracion", "Configuración"),
             ("admin", "Administración"),
         ]
@@ -464,14 +465,14 @@ def seed_rbac():
             "dashboard", "ordenes", "costos", "analytics", "nomina", "clima",
             "sanidad", "riego", "contabilidad", "activos_fijos", "presupuesto",
             "clientes", "proveedores", "efectivo_banco", "campos", "trabajadores",
-            "productos", "inventario", "actividades", "compras", "cosecha",
+            "productos", "inventario", "actividades", "compras", "cosecha", "ventas",
             "configuracion", "admin",
         ]
         SUPERVISOR_READ_WRITE = [
             "dashboard", "ordenes", "costos", "analytics", "clima", "sanidad",
             "riego", "contabilidad", "campos", "trabajadores", "productos",
             "inventario", "actividades", "compras", "clientes", "proveedores",
-            "efectivo_banco", "activos_fijos", "presupuesto", "cosecha",
+            "efectivo_banco", "activos_fijos", "presupuesto", "cosecha", "ventas",
         ]
         SUPERVISOR_READ = ["nomina"]
         OPERADOR_READ_WRITE = ["ordenes", "dashboard", "costos", "inventario", "actividades", "campos", "cosecha"]
@@ -550,18 +551,18 @@ def seed_admin():
 
 
 def asegurar_cuentas_compras():
-    """Crea, si faltan, la cuenta puente de recepciones sin factura y su regla.
+    """Crea, si faltan, las cuentas de trabajo de compras y ventas y sus reglas.
 
     Aditivo e idempotente: no toca cuentas existentes, así sirve para bases de datos
     cuyo catálogo divergió del de referencia.
     """
-    from reglas_contables import asegurar_cuenta_puente
+    from reglas_contables import asegurar_cuenta_puente, asegurar_cuenta_despacho
     db = SessionLocal()
     try:
-        creada = asegurar_cuenta_puente(db, models)
+        for creada in (asegurar_cuenta_puente(db, models), asegurar_cuenta_despacho(db, models)):
+            if creada:
+                logging.getLogger(__name__).info("Cuenta de trabajo creada: %s", creada)
         db.commit()
-        if creada:
-            logging.getLogger(__name__).info("Cuenta puente de compras creada: %s", creada)
     except Exception:
         db.rollback()
         logging.getLogger(__name__).exception("No se pudo asegurar la cuenta puente de compras")
@@ -613,6 +614,7 @@ app.include_router(audit_log.router)
 app.include_router(tipos_producto.router)
 app.include_router(categorias_producto.router)
 app.include_router(cosecha.router)
+app.include_router(ventas.router)
 app.include_router(proveedores.router)
 app.include_router(clima.router)
 app.include_router(sanidad.router)

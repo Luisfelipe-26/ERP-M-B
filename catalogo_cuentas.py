@@ -30,6 +30,7 @@ CUENTAS_DATA = [
     ("1.1.03.05", "Combustibles y Lubricantes",       "activo",     "deudora",  "Balance",   4, True),
     ("1.1.03.06", "Repuestos y Herramientas",         "activo",     "deudora",  "Balance",   4, True),
     ("1.1.03.07", "Provisión Deterioro Inventario",   "activo",     "acreedora", "Balance",   4, True),
+    ("1.1.03.08", "Fruta Despachada por Liquidar",    "activo",     "deudora",  "Balance",   4, True),
     ("1.2",      "ACTIVOS NO CORRIENTES",             "activo",     "deudora",  "Balance",   2, False),
     ("1.2.01",   "Propiedad, Planta y Equipo",        "activo",     "deudora",  "Balance",   3, False),
     ("1.2.01.01", "Terrenos",                         "activo",     "deudora",  "Balance",   4, True),

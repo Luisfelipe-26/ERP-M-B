@@ -22,6 +22,8 @@ from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
 from routers.inventario import _f, _recalc_avg_cost
 from routers.sequences import get_next
 
+from routers.compras import _cuentas_producto
+
 router = APIRouter(prefix="/api/cosecha", tags=["cosecha"])
 
 
@@ -378,8 +380,15 @@ def create_cosecha(data: CosechaIn, db: Session = Depends(get_db),
                 linea.costo_unitario = round(costo, 4)
 
                 monto = Decimal(str(round(l.kg * costo, 2)))
-                if monto > 0 and prod.cuenta_inventario_id and r_cos:
-                    lineas_asiento.append({"cuenta_id": prod.cuenta_inventario_id, "debe": monto, "haber": 0,
+                # Fruta con valor que entra al stock sin asiento descuadra el inventario contra el
+                # mayor, y luego su despacho no tendría de qué cuenta salir.
+                cta_inv = _cuentas_producto(prod)[0]
+                if monto > 0 and (not cta_inv or not r_cos):
+                    raise HTTPException(400, (
+                        f"{cal.nombre}: configure la cuenta de inventario del producto {prod.id_prod} "
+                        "(o de su categoría) y la regla contable cosecha / produccion"))
+                if monto > 0:
+                    lineas_asiento.append({"cuenta_id": cta_inv, "debe": monto, "haber": 0,
                                            "campo_id": data.campo_id,
                                            "descripcion_linea": f"Fruta cosechada {cal.nombre}"})
                     total_asiento += monto
