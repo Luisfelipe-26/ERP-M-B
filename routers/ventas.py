@@ -135,7 +135,7 @@ def calibres_stock(db: Session = Depends(get_db), _=Depends(auth.get_current_use
             models.Calibre.orden, models.Calibre.nombre).all():
         p = db.query(models.Producto).filter(models.Producto.id_prod == c.producto_id).first() if c.producto_id else None
         out.append({"id": c.id, "nombre": c.nombre, "producto_id": c.producto_id,
-                    "producto": p.producto if p else None,
+                    "es_granel": bool(c.es_granel), "producto": p.producto if p else None,
                     "stock_kg": _f(p.stock_actual) if p else 0,
                     "costo_promedio": _f(p.costo_promedio) if p else 0})
     return out
@@ -147,7 +147,8 @@ def precios_sugeridos(cliente_id: int, fecha: Optional[date] = None, moneda: str
     """Precio del libro para cada calibre: el del cliente, o el base si no tiene propio."""
     fecha = fecha or date.today()
     out = {}
-    for c in db.query(models.Calibre).filter(models.Calibre.activo == True).all():
+    for c in db.query(models.Calibre).filter(models.Calibre.activo == True,
+                                             models.Calibre.es_granel.isnot(True)).all():
         p = precio_vigente(db, c.id, fecha, cliente_id, moneda.upper())
         out[str(c.id)] = ({"precio": _f(p.precio), "origen": "propio" if p.cliente_id == cliente_id else "base"}
                           if p else None)
@@ -356,6 +357,10 @@ def liquidar_despacho(despacho_id: int, data: LiquidacionIn, db: Session = Depen
         cal = db.query(models.Calibre).get(l.calibre_id)
         if not cal:
             raise HTTPException(400, f"Calibre {l.calibre_id} no existe")
+        if cal.es_granel:
+            raise HTTPException(400, (
+                f"{cal.nombre} es fruta sin clasificar: la liquidación va por los calibres "
+                "en que la clasificó el cliente"))
         libro = precio_vigente(db, cal.id, data.fecha, d.cliente_id, moneda)
         precio = l.precio if l.precio is not None else (_f(libro.precio) if libro else None)
         if precio is None:

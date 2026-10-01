@@ -1211,14 +1211,19 @@ class LineaRegistroPresupuestario(Base):
 
 
 class Calibre(Base):
-    """Clasificación de la fruta al cosechar. Cada calibre apunta al producto de
-    inventario donde entran sus kg; sin producto (p. ej. rechazo) se registra pero
-    no entra a inventario."""
+    """Clasificación de la fruta.
+
+    Lo normal es que la finca no conozca el calibre: la planta de empaque del cliente
+    clasifica y lo informa en su liquidación. Para eso hay calibres "a granel" (fruta sin
+    clasificar), con los que se registran la cosecha y el despacho, y calibres comerciales
+    (Cal 12, 14…), que se usan en el libro de precios y en la liquidación. Un calibre con
+    producto lleva sus kg al inventario; sin producto (p. ej. rechazo) no entra al stock."""
     __tablename__ = "calibres"
     id = Column(Integer, primary_key=True, index=True)
     nombre = Column(String(50), unique=True, nullable=False)
     orden = Column(Integer, default=0)
     producto_id = Column(String(10), ForeignKey("productos.id_prod"))
+    es_granel = Column(Boolean, default=False)   # fruta sin clasificar: no tiene precio ni se liquida
     activo = Column(Boolean, default=True)
     producto = relationship("Producto", foreign_keys=[producto_id])
 

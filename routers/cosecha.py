@@ -33,6 +33,7 @@ class CalibreIn(BaseModel):
     nombre: str
     orden: int = 0
     producto_id: Optional[str] = None
+    es_granel: bool = False
 
 
 class CalibreOut(BaseModel):
@@ -42,6 +43,7 @@ class CalibreOut(BaseModel):
     producto_id: Optional[str] = None
     producto_nombre: Optional[str] = None
     producto_unidad: Optional[str] = None
+    es_granel: bool = False
     activo: bool
 
 
@@ -49,7 +51,7 @@ def _calibre_out(c: models.Calibre) -> CalibreOut:
     return CalibreOut(id=c.id, nombre=c.nombre, orden=c.orden or 0, producto_id=c.producto_id,
                       producto_nombre=c.producto.producto if c.producto else None,
                       producto_unidad=c.producto.unidad if c.producto else None,
-                      activo=bool(c.activo))
+                      es_granel=bool(c.es_granel), activo=bool(c.activo))
 
 
 def _validar_producto_calibre(db: Session, producto_id: Optional[str]):
@@ -72,19 +74,28 @@ def list_calibres(incluir_inactivos: bool = False, db: Session = Depends(get_db)
     return [_calibre_out(c) for c in q.order_by(models.Calibre.orden, models.Calibre.nombre).all()]
 
 
+def _validar_granel(data: CalibreIn):
+    # La fruta sin clasificar se cosecha y se despacha: tiene que entrar a un producto.
+    if data.es_granel and not data.producto_id:
+        raise HTTPException(400, "Un calibre a granel necesita el producto de inventario donde entra la fruta sin clasificar")
+
+
 @router.post("/calibres", response_model=CalibreOut)
 def create_calibre(data: CalibreIn, db: Session = Depends(get_db), _=Depends(auth.require_admin)):
     _validar_producto_calibre(db, data.producto_id)
+    _validar_granel(data)
     nombre = data.nombre.strip()
     existente = db.query(models.Calibre).filter(models.Calibre.nombre == nombre).first()
     if existente:
         if existente.activo:
             raise HTTPException(400, f"Ya existe el calibre '{nombre}'")
         existente.activo, existente.orden, existente.producto_id = True, data.orden, data.producto_id or None
+        existente.es_granel = data.es_granel
         db.commit()
         db.refresh(existente)
         return _calibre_out(existente)
-    c = models.Calibre(nombre=nombre, orden=data.orden, producto_id=data.producto_id or None)
+    c = models.Calibre(nombre=nombre, orden=data.orden, producto_id=data.producto_id or None,
+                       es_granel=data.es_granel)
     db.add(c)
     db.commit()
     db.refresh(c)
@@ -98,10 +109,12 @@ def update_calibre(cal_id: int, data: CalibreIn, db: Session = Depends(get_db),
     if not c:
         raise HTTPException(404, "Calibre no encontrado")
     _validar_producto_calibre(db, data.producto_id)
+    _validar_granel(data)
     nombre = data.nombre.strip()
     if db.query(models.Calibre).filter(models.Calibre.nombre == nombre, models.Calibre.id != cal_id).first():
         raise HTTPException(400, f"Ya existe otro calibre '{nombre}'")
     c.nombre, c.orden, c.producto_id = nombre, data.orden, data.producto_id or None
+    c.es_granel = data.es_granel
     db.commit()
     db.refresh(c)
     return _calibre_out(c)
@@ -587,6 +600,10 @@ def registrar_lista_precios(data: ListaPreciosIn, db: Session = Depends(get_db),
     for l in lineas:
         if l.calibre_id not in calibres:
             raise HTTPException(400, f"Calibre {l.calibre_id} no existe")
+        if calibres[l.calibre_id].es_granel:
+            raise HTTPException(400, (
+                f"{calibres[l.calibre_id].nombre} es fruta sin clasificar: el cliente paga por calibre "
+                "comercial, así que no lleva precio"))
         if l.precio <= 0:
             raise HTTPException(400, f"El precio de {calibres[l.calibre_id].nombre} debe ser mayor a 0")
 
@@ -653,7 +670,8 @@ def matriz_precios(fecha: Optional[date] = None, moneda: str = "DOP", db: Sessio
     """
     fecha = fecha or date.today()
     moneda = moneda.upper()
-    calibres = db.query(models.Calibre).filter(models.Calibre.activo == True).order_by(
+    calibres = db.query(models.Calibre).filter(models.Calibre.activo == True,
+                                               models.Calibre.es_granel.isnot(True)).order_by(
         models.Calibre.orden, models.Calibre.nombre).all()
     cliente_ids = [r[0] for r in db.query(models.PrecioCalibre.cliente_id).filter(
         models.PrecioCalibre.activo == True, models.PrecioCalibre.moneda == moneda,

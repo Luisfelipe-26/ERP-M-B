@@ -225,3 +225,60 @@ def test_la_cosecha_con_valor_exige_cuenta_de_inventario(db, user, f):
     with pytest.raises(HTTPException) as e:
         _cosechar(db, user, f)
     assert "cuenta de inventario" in e.value.detail
+
+
+@pytest.fixture
+def granel(db, f):
+    """Lo normal: la finca no clasifica; cosecha y despacha a granel y el cliente pone el calibre."""
+    db.add(models.Producto(id_prod="FG", producto="Aguacate Hass a granel", unidad="kg", costo_unitario=38,
+                           costo_promedio=0, stock_actual=0, es_inventariable=True, activo=True,
+                           cuenta_inventario_id=f["1.1.03.03"].id, cuenta_costo_id=f["5.1.11"].id))
+    db.flush()
+    cal = models.Calibre(nombre="A granel", orden=0, producto_id="FG", es_granel=True)
+    db.add(cal)
+    db.commit()
+    return cal
+
+
+def test_cosecha_y_despacho_a_granel_liquidados_por_calibre_del_cliente(db, user, f, granel):
+    create_cosecha(CosechaIn(fecha=HOY, campo_id="C01", lineas=[CosechaLineaIn(calibre_id=granel.id, kg=1500)]),
+                   db=db, current_user=user)
+    d = crear_despacho(DespachoIn(cliente_id=f["cliente"].id, fecha=HOY, campo_id="C01",
+                                  lineas=[DespachoLineaIn(calibre_id=granel.id, kg=1200)]),
+                       db=db, current_user=user)
+    assert d["costo_total"] == 1200 * 38 and _stock(db, "FG") == 300
+
+    liq = _liquidar(db, user, f, d["id"], kg18=700, kg22=420, rechazo=60)
+    assert liq["subtotal"] == 700 * 1.60 + 420 * 1.40
+    assert liq["costo_total"] == 45_600
+    assert saldo_cuenta(db, f["1.1.03.08"]) == 0
+
+    r = rentabilidad(temporada=TEMP, db=db, _=user)
+    assert {k["calibre"] for k in r["por_calibre"]} == {"Cal 18", "Cal 22"}, "el reporte va por calibre del cliente"
+    assert r["por_campo"][0]["kg_cosechados"] == 1500
+
+
+def test_el_granel_no_lleva_precio_ni_se_liquida(db, user, f, granel):
+    from routers.cosecha import ListaPreciosIn, PrecioLineaIn, matriz_precios, registrar_lista_precios
+    with pytest.raises(HTTPException) as e:
+        registrar_lista_precios(ListaPreciosIn(cliente_id=f["cliente"].id, moneda="USD", fecha_desde=HOY,
+                                               lineas=[PrecioLineaIn(calibre_id=granel.id, precio=1.5)]),
+                                db=db, current_user=user)
+    assert "sin clasificar" in e.value.detail
+    db.rollback()
+    assert granel.id not in [c["id"] for c in matriz_precios(fecha=HOY, moneda="USD", db=db, _=user)["calibres"]]
+
+    _cosechar(db, user, f)
+    d = _despachar(db, user, f)
+    with pytest.raises(HTTPException) as e:
+        liquidar_despacho(d["id"], LiquidacionIn(fecha=HOY, ncf="E310000000201", tasa_cambio=60,
+                                                 lineas=[LiquidacionLineaIn(calibre_id=granel.id, kg=100, precio=1)]),
+                          db=db, current_user=user)
+    assert "clasificó el cliente" in e.value.detail
+
+
+def test_un_calibre_a_granel_necesita_producto(db, user, f):
+    from routers.cosecha import CalibreIn, create_calibre
+    with pytest.raises(HTTPException) as e:
+        create_calibre(CalibreIn(nombre="Sin clasificar", es_granel=True), db=db, _=user)
+    assert "producto de inventario" in e.value.detail
