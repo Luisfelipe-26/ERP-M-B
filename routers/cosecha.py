@@ -18,7 +18,7 @@ import audit
 import auth
 import models
 from database import get_db
-from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas
+from routers.contabilidad import _crear_asiento_auto, _get_regla_cuentas, _reversar_asiento
 from routers.inventario import _f, _recalc_avg_cost
 from routers.sequences import get_next
 
@@ -125,11 +125,14 @@ def delete_calibre(cal_id: int, db: Session = Depends(get_db), _=Depends(auth.re
     c = db.query(models.Calibre).get(cal_id)
     if not c:
         raise HTTPException(404, "Calibre no encontrado")
-    usos = db.query(models.CosechaLinea).filter(models.CosechaLinea.calibre_id == cal_id).count()
+    # Un calibre usado en cosechas, precios o ventas se desactiva: borrarlo dejaría esos
+    # registros apuntando a nada.
+    usos = sum(db.query(m).filter(m.calibre_id == cal_id).count() for m in (
+        models.CosechaLinea, models.PrecioCalibre, models.DespachoLinea, models.LiquidacionLinea))
     if usos:
         c.activo = False
         db.commit()
-        return {"ok": True, "message": f"Desactivado (usado en {usos} registros de cosecha)"}
+        return {"ok": True, "message": f"Desactivado (usado en {usos} registros de cosecha, precios o ventas)"}
     db.delete(c)
     db.commit()
     return {"ok": True}
@@ -313,6 +316,8 @@ def create_cosecha(data: CosechaIn, db: Session = Depends(get_db),
     campo = db.query(models.Campo).filter(models.Campo.id_campo == data.campo_id).first()
     if not campo or campo.activo is False:
         raise HTTPException(400, f"Campo '{data.campo_id}' no existe o está inactivo")
+    if data.fecha > date.today():
+        raise HTTPException(400, "La fecha de la cosecha no puede ser futura")
 
     lineas_in = [l for l in data.lineas if l.kg > 0]
     if not lineas_in:
@@ -369,9 +374,14 @@ def create_cosecha(data: CosechaIn, db: Session = Depends(get_db),
 
             prod = None
             if cal.producto_id:
-                prod = db.query(models.Producto).filter(models.Producto.id_prod == cal.producto_id,
-                                                        models.Producto.activo == True).first()
-            if prod and prod.es_inventariable:
+                prod = db.query(models.Producto).filter(models.Producto.id_prod == cal.producto_id).first()
+                # Antes un producto inactivo o sin inventario dejaba la fruta registrada pero fuera
+                # del stock, sin aviso, y luego no había qué despachar.
+                if not prod or prod.activo is False or not prod.es_inventariable:
+                    raise HTTPException(400, (
+                        f"{cal.nombre}: su producto {cal.producto_id} no existe, está inactivo o no lleva "
+                        "inventario. Corríjalo en Cosecha → Calibres o en Productos."))
+            if prod:
                 # Entra al costo estándar del producto del calibre (su costo unitario).
                 costo = _f(prod.costo_unitario)
                 nuevo_costo = _recalc_avg_cost(prod, l.kg, costo)
@@ -457,29 +467,31 @@ def anular_cosecha(cosecha_id: int, motivo: str = Query(..., min_length=5),
             if not prod:
                 continue
             kg = _f(l.kg)
-            if _f(prod.stock_actual) < kg - 0.0001:
+            stock = _f(prod.stock_actual)
+            if stock < kg - 0.0001:
                 raise HTTPException(400, (
-                    f"No se puede anular: '{prod.producto}' tiene {_f(prod.stock_actual):,.2f} kg y la cosecha "
-                    f"aportó {kg:,.2f}. La fruta ya salió de inventario; ajuste o devuelva primero."))
-            nuevo_stock = _f(prod.stock_actual) - kg
+                    f"No se puede anular: '{prod.producto}' tiene {stock:,.2f} kg y la cosecha aportó "
+                    f"{kg:,.2f}. Parte ya salió en un despacho: anule primero ese despacho en Ventas de fruta."))
+            # Sale al costo al que entró y lo que queda se revalúa: sin eso el valor del
+            # inventario y su cuenta en el mayor se separaban.
+            costo = _f(l.costo_unitario)
+            nuevo_stock = stock - kg
+            valor_restante = stock * _f(prod.costo_promedio) - kg * costo
+            nuevo_costo = max(0.0, valor_restante) / nuevo_stock if nuevo_stock > 0.0001 else _f(prod.costo_promedio)
             db.add(models.MovimientoInventario(
                 num_documento=cos.numero, producto_id=prod.id_prod, tipo_doc="COS", tipo="salida",
-                motivo="Anulación cosecha", cantidad=kg, costo_unitario=l.costo_unitario,
-                costo_promedio_post=prod.costo_promedio, stock_post=round(nuevo_stock, 4),
+                motivo="Anulación cosecha", cantidad=kg, costo_unitario=round(costo, 4),
+                costo_promedio_post=round(nuevo_costo, 4), stock_post=round(nuevo_stock, 4),
                 referencia=cos.numero, observacion=f"Anulación {cos.numero}: {motivo}",
                 fecha=datetime.now(), usuario_id=current_user.id,
             ))
             prod.stock_actual = round(nuevo_stock, 4)
+            prod.costo_promedio = round(nuevo_costo, 4)
 
         if cos.asiento_id:
             original = db.query(models.AsientoContable).get(cos.asiento_id)
-            if original:
-                reverso = [{"cuenta_id": ln.cuenta_id, "debe": ln.haber or 0, "haber": ln.debe or 0,
-                            "campo_id": ln.campo_id,
-                            "descripcion_linea": f"Reverso {cos.numero}"} for ln in original.lineas]
-                _crear_asiento_auto(db, date.today(), "COS", f"{cos.numero}-ANU",
-                                    f"Anulación cosecha {cos.numero}: {motivo}",
-                                    reverso, current_user.nombre, requerido=True)
+            if original and original.estado not in ("anulado", "revertido"):
+                _reversar_asiento(db, original, f"Anulación cosecha {cos.numero}: {motivo}", current_user.nombre)
 
         cos.estado = "anulada"
         cos.observaciones = ((cos.observaciones or "") + f"\n[Anulada] {motivo}").strip()

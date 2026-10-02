@@ -675,11 +675,22 @@ def list_movimientos(
     tipo_doc: Optional[str] = None,
     fecha_desde: Optional[str] = None,
     fecha_hasta: Optional[str] = None,
+    ocultar_anulados: bool = False,
     limit: int = Query(500, le=1000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db), _=Depends(auth.get_current_user)
 ):
     q = db.query(models.MovimientoInventario).options(joinedload(models.MovimientoInventario.producto))
+    if ocultar_anulados:
+        # La entrada de una cosecha o despacho anulado y su reverso netean a cero: se ocultan
+        # juntos para que los registros de prueba o corregidos no ensucien la lista.
+        M = models.MovimientoInventario
+        anulados = db.query(M.id).filter(
+            ((M.tipo_doc == "COS") & M.num_documento.in_(
+                db.query(models.Cosecha.numero).filter(models.Cosecha.estado == "anulada"))) |
+            ((M.tipo_doc == "DES") & M.num_documento.in_(
+                db.query(models.DespachoFruta.numero).filter(models.DespachoFruta.estado == "anulado"))))
+        q = q.filter(M.id.notin_(anulados))
     if producto_id:
         q = q.filter(models.MovimientoInventario.producto_id == producto_id)
     if tipo_doc:

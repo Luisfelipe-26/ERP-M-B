@@ -176,13 +176,20 @@ def crear_despacho(data: DespachoIn, db: Session = Depends(get_db),
         raise HTTPException(400, "Indique los kg de al menos un calibre")
     if len({l.calibre_id for l in lineas_in}) != len(lineas_in):
         raise HTTPException(400, "Un calibre aparece dos veces en el despacho")
+    conduce = (data.conduce or "").strip() or None
+    if conduce:
+        otro = db.query(models.DespachoFruta).filter(
+            models.DespachoFruta.cliente_id == cli.id, models.DespachoFruta.conduce == conduce,
+            models.DespachoFruta.estado != "anulado").first()
+        if otro:
+            raise HTTPException(400, f"El conduce {conduce} ya está registrado en el despacho {otro.numero}")
 
     numero = get_next("DES", db)
     try:
         d = models.DespachoFruta(
             numero=numero, fecha=data.fecha, cliente_id=cli.id, campo_id=data.campo_id,
             temporada=(data.temporada or "").strip() or str(data.fecha.year),
-            conduce=data.conduce, observaciones=data.observaciones, usuario_id=current_user.id)
+            conduce=conduce, observaciones=data.observaciones, usuario_id=current_user.id)
         db.add(d)
         db.flush()
         momento = datetime.combine(data.fecha, datetime.now().time())
@@ -342,6 +349,14 @@ def liquidar_despacho(despacho_id: int, data: LiquidacionIn, db: Session = Depen
     if len({l.calibre_id for l in lineas_in}) != len(lineas_in):
         raise HTTPException(400, "Un calibre aparece dos veces en la liquidación")
 
+    ref = (data.referencia_cliente or "").strip() or None
+    if ref:
+        otra = db.query(models.LiquidacionVenta).filter(
+            models.LiquidacionVenta.cliente_id == d.cliente_id, models.LiquidacionVenta.referencia_cliente == ref,
+            models.LiquidacionVenta.estado == "activa").first()
+        if otra:
+            raise HTTPException(400, f"La liquidación {ref} del cliente ya está registrada ({otra.numero})")
+
     kg_desp = _d(d.kg_total)
     kg_liq = sum((_d(l.kg) for l in lineas_in), Decimal("0"))
     kg_rech = _d(data.kg_rechazo)
@@ -378,7 +393,10 @@ def liquidar_despacho(despacho_id: int, data: LiquidacionIn, db: Session = Depen
     r_costo = _get_regla_cuentas(db, "venta", "costo_venta")
     r_merma = _get_regla_cuentas(db, "inventario", "ajuste")
     costo_total = _d(d.costo_total)
-    factor = min(Decimal("1"), kg_liq / kg_desp) if kg_desp > 0 else Decimal("1")
+    # Lo liquidado lleva su parte del costo; el rechazo y la merma, el resto. Si la báscula del
+    # cliente marca más que la de la finca, se reparte sobre lo que él pesó.
+    base = max(kg_desp, kg_liq + kg_rech)
+    factor = kg_liq / base if base > 0 else Decimal("1")
     debitos: dict = {}
     costo_venta = Decimal("0")
     for dl in d.lineas:
@@ -412,7 +430,7 @@ def liquidar_despacho(despacho_id: int, data: LiquidacionIn, db: Session = Depen
 
         liq = models.LiquidacionVenta(
             numero=numero, despacho_id=d.id, cliente_id=d.cliente_id, fecha=data.fecha,
-            referencia_cliente=data.referencia_cliente, moneda=moneda, tasa_cambio=cxc.tasa_cambio,
+            referencia_cliente=ref, moneda=moneda, tasa_cambio=cxc.tasa_cambio,
             kg_liquidados=kg_liq, kg_rechazo=kg_rech, kg_merma=kg_merma,
             subtotal=subtotal, venta_dop=cxc.total_dop, costo_venta=costo_venta, costo_rechazo=costo_rechazo,
             cxc_id=cxc.id, observaciones=data.observaciones, usuario_id=current_user.id)
@@ -528,6 +546,15 @@ def despachos_pendientes(db: Session = Depends(get_db), _=Depends(auth.get_curre
             "diferencia": round(total - saldo, 2) if saldo is not None else None, "items": items}
 
 
+def _rango_temporada(db: Session, temporada: str):
+    """Fechas de la temporada: el año si es un año ("2026"); si no, de su primera a su última cosecha."""
+    if temporada.isdigit() and len(temporada) == 4:
+        return date(int(temporada), 1, 1), date(int(temporada), 12, 31)
+    desde, hasta = db.query(sqlfunc.min(models.Cosecha.fecha), sqlfunc.max(models.Cosecha.fecha)).filter(
+        models.Cosecha.temporada == temporada, models.Cosecha.estado != "anulada").one()
+    return desde, hasta
+
+
 @router.get("/rentabilidad")
 def rentabilidad(temporada: Optional[str] = None, db: Session = Depends(get_db),
                  _=Depends(auth.get_current_user)):
@@ -569,11 +596,36 @@ def rentabilidad(temporada: Optional[str] = None, db: Session = Depends(get_db),
             k["venta"] += _f(x.subtotal)
             k["venta_dop"] += _f(x.subtotal) * _f(liq.tasa_cambio or 1)
 
+    # Costo real de producción del campo en la temporada: sus OT (mano de obra, insumos y
+    # equipo) y los servicios comprados para él. El margen de cada liquidación usa el costo
+    # estándar de la fruta; este es el que dice si el campo ganó o perdió.
+    desde, hasta = _rango_temporada(db, temporada)
+    if desde:
+        for campo_id, costo in db.query(models.OrdenTrabajo.campo_id,
+                                        sqlfunc.coalesce(sqlfunc.sum(models.OrdenTrabajo.costo_total), 0)).filter(
+                models.OrdenTrabajo.campo_id.isnot(None),
+                models.OrdenTrabajo.fecha_ejecucion >= datetime.combine(desde, datetime.min.time()),
+                models.OrdenTrabajo.fecha_ejecucion <= datetime.combine(hasta, datetime.max.time()),
+        ).group_by(models.OrdenTrabajo.campo_id).all():
+            campo(campo_id)["costo_produccion"] = campo(campo_id).get("costo_produccion", 0.0) + _f(costo)
+        for l, oc in db.query(models.OrdenCompraLinea, models.OrdenCompra).join(
+                models.OrdenCompra, models.OrdenCompra.oc_id == models.OrdenCompraLinea.oc_id).join(
+                models.Producto, models.Producto.id_prod == models.OrdenCompraLinea.producto_id).filter(
+                models.OrdenCompra.campo_id.isnot(None), models.OrdenCompra.estado != "Cancelada",
+                models.Producto.es_inventariable == False,
+                models.OrdenCompra.fecha >= datetime.combine(desde, datetime.min.time()),
+                models.OrdenCompra.fecha <= datetime.combine(hasta, datetime.max.time())).all():
+            servicio = _f(l.cantidad_recibida) * _f(l.precio_unitario) * (1 - _f(l.descuento_pct) / 100)
+            campo(oc.campo_id)["costo_produccion"] = campo(oc.campo_id).get("costo_produccion", 0.0) + servicio
+
     nombres = {c.id_campo: c.nombre for c in db.query(models.Campo).all()}
     filas = []
     for f in campos.values():
         f["campo"] = nombres.get(f["campo_id"], "Sin campo") if f["campo_id"] else "Sin campo"
         f["margen_dop"] = round(f["venta_dop"] - f["costo"], 2)
+        f["costo_produccion"] = round(f.get("costo_produccion", 0.0), 2)
+        f["costo_kg"] = round(f["costo_produccion"] / f["kg_cosechados"], 2) if f["kg_cosechados"] else None
+        f["resultado"] = round(f["venta_dop"] - f["costo_produccion"], 2)
         f["pct_rechazo"] = round(f["kg_rechazo"] / f["kg_despachados"] * 100, 1) if f["kg_despachados"] else None
         for k in ("kg_cosechados", "kg_despachados", "kg_liquidados", "kg_rechazo", "kg_merma",
                   "venta_dop", "costo", "kg_por_liquidar"):
@@ -585,6 +637,8 @@ def rentabilidad(temporada: Optional[str] = None, db: Session = Depends(get_db),
         k["kg"], k["venta"], k["venta_dop"] = round(k["kg"], 2), round(k["venta"], 2), round(k["venta_dop"], 2)
     tot = {k: round(sum(f[k] for f in filas), 2) for k in
            ("kg_cosechados", "kg_despachados", "kg_liquidados", "kg_rechazo", "kg_merma",
-            "venta_dop", "costo", "margen_dop", "kg_por_liquidar")}
+            "venta_dop", "costo", "margen_dop", "kg_por_liquidar", "costo_produccion", "resultado")}
+    tot["costo_kg"] = round(tot["costo_produccion"] / tot["kg_cosechados"], 2) if tot["kg_cosechados"] else None
     return {"temporada": temporada, "moneda_venta": sorted(monedas)[0] if len(monedas) == 1 else None,
+            "periodo_costos": {"desde": desde, "hasta": hasta},
             "por_campo": sorted(filas, key=lambda f: f["campo"]), "por_calibre": calibres, "totales": tot}

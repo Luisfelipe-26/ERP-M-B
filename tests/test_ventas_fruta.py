@@ -282,3 +282,104 @@ def test_un_calibre_a_granel_necesita_producto(db, user, f):
     with pytest.raises(HTTPException) as e:
         create_calibre(CalibreIn(nombre="Sin clasificar", es_granel=True), db=db, _=user)
     assert "producto de inventario" in e.value.detail
+
+
+# ── Auditoría de cosecha y venta (2026-10) ───────────────────────────────────
+
+def test_anular_una_cosecha_revalua_lo_que_queda(db, user, f):
+    from routers.cosecha import anular_cosecha
+    _cosechar(db, user, f, kg18=1000, kg22=0)                         # 1.000 kg a 40
+    p = db.query(models.Producto).filter_by(id_prod="F18").one()
+    p.costo_unitario = 50
+    db.commit()
+    create_cosecha(CosechaIn(fecha=HOY, campo_id="C01", lineas=[CosechaLineaIn(calibre_id=f["cal18"].id, kg=500)]),
+                   db=db, current_user=user)                          # 500 kg a 50
+    segunda = db.query(models.Cosecha).order_by(models.Cosecha.id.desc()).first()
+
+    anular_cosecha(segunda.id, motivo="Registro de prueba", db=db, current_user=user)
+    db.refresh(p)
+    assert float(p.stock_actual) == 1000 and float(p.costo_promedio) == pytest.approx(40, abs=0.01)
+    assert saldo_cuenta(db, f["1.1.03.03"]) == pytest.approx(1000 * 40, abs=0.05), "mayor = valuación"
+
+
+def test_anular_cosecha_ya_despachada_indica_que_hacer(db, user, f):
+    from routers.cosecha import anular_cosecha
+    _cosechar(db, user, f)
+    _despachar(db, user, f)
+    cos = db.query(models.Cosecha).one()
+    with pytest.raises(HTTPException) as e:
+        anular_cosecha(cos.id, motivo="Registro de prueba", db=db, current_user=user)
+    assert "anule primero ese despacho" in e.value.detail
+
+
+@pytest.mark.parametrize("cambio,msg", [("inactivo", "inactivo"), ("futura", "futura")])
+def test_cosecha_rechaza_producto_inactivo_y_fecha_futura(db, user, f, cambio, msg):
+    fecha = HOY
+    if cambio == "inactivo":
+        db.query(models.Producto).filter_by(id_prod="F18").one().activo = False
+        db.commit()
+    else:
+        fecha = HOY + dt.timedelta(days=1)
+    with pytest.raises(HTTPException) as e:
+        create_cosecha(CosechaIn(fecha=fecha, campo_id="C01", lineas=[CosechaLineaIn(calibre_id=f["cal18"].id, kg=10)]),
+                       db=db, current_user=user)
+    assert msg in e.value.detail
+
+
+def test_no_se_repite_conduce_ni_liquidacion_del_cliente(db, user, f):
+    _cosechar(db, user, f)
+    d = _despachar(db, user, f, kg18=100, kg22=50)                    # conduce CD-100
+    with pytest.raises(HTTPException) as e:
+        _despachar(db, user, f, kg18=100, kg22=50)
+    assert "CD-100" in e.value.detail
+    db.rollback()
+
+    _liquidar(db, user, f, d["id"], kg18=90, kg22=50, rechazo=10)     # referencia LQ-77
+    d2 = crear_despacho(DespachoIn(cliente_id=f["cliente"].id, fecha=HOY, conduce="CD-101",
+                                   lineas=[DespachoLineaIn(calibre_id=f["cal18"].id, kg=100)]),
+                        db=db, current_user=user)
+    with pytest.raises(HTTPException) as e:
+        _liquidar(db, user, f, d2["id"], kg18=100, kg22=0, rechazo=0, ncf="E310000000301")
+    assert "LQ-77" in e.value.detail
+
+
+def test_si_la_bascula_del_cliente_pesa_mas_el_rechazo_igual_lleva_su_costo(db, user, f):
+    _cosechar(db, user, f, kg18=1500, kg22=0)
+    d = _despachar(db, user, f, kg18=1200, kg22=0)                    # 1.200 kg, costo 48.000
+    liq = _liquidar(db, user, f, d["id"], kg18=1150, kg22=0, rechazo=70)   # 1.220 kg, dentro del 2%
+    assert liq["costo_rechazo"] == pytest.approx(48_000 * 70 / 1220, abs=0.02)
+    assert liq["costo_total"] == 48_000
+
+
+def test_rentabilidad_con_costo_real_de_produccion(db, user, f):
+    _cosechar(db, user, f)                                            # 1.500 kg
+    db.add(models.OrdenTrabajo(ot_id=501, campo_id="C01", actividad_id="A1", estado="Cerrada",
+                               fecha_ejecucion=dt.datetime.combine(HOY, dt.time(8)), costo_total=30_000))
+    db.commit()
+    d = _despachar(db, user, f)
+    _liquidar(db, user, f, d["id"])
+    c01 = rentabilidad(temporada=TEMP, db=db, _=user)["por_campo"][0]
+    assert c01["costo_produccion"] == 30_000
+    assert c01["costo_kg"] == 20.0
+    assert c01["resultado"] == pytest.approx(102_480 - 30_000)
+
+
+def test_los_movimientos_de_cosechas_anuladas_se_pueden_ocultar(db, user, f):
+    from routers.cosecha import anular_cosecha
+    from routers.inventario import list_movimientos
+    _cosechar(db, user, f, kg18=100, kg22=0)
+    _cosechar(db, user, f, kg18=50, kg22=0)
+    prueba = db.query(models.Cosecha).order_by(models.Cosecha.id.desc()).first()
+    anular_cosecha(prueba.id, motivo="Registro de prueba", db=db, current_user=user)
+
+    def contar(ocultar):
+        return list_movimientos(producto_id=None, tipo_doc=None, fecha_desde=None, fecha_hasta=None,
+                                ocultar_anulados=ocultar, limit=500, offset=0, db=db, _=user)["total"]
+    assert contar(False) == 3 and contar(True) == 1
+
+
+def test_un_calibre_con_precios_se_desactiva_en_vez_de_borrarse(db, user, f):
+    from routers.cosecha import delete_calibre
+    r = delete_calibre(f["cal22"].id, db=db, _=user)
+    assert "Desactivado" in r["message"]
+    assert db.query(models.Calibre).get(f["cal22"].id).activo is False
