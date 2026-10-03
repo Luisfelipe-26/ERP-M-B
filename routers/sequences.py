@@ -35,6 +35,7 @@ SEQUENCE_CONFIG = {
     'COS':   ('COS-', 4),
     'DES':   ('DES-', 4),
     'LIQ':   ('LIQ-', 4),
+    'PLAN':  ('PLAN-', 4),
 }
 
 SEQUENCE_TABLE_MAP = {

@@ -13,6 +13,7 @@ from routers import (
     audit_log, tipos_producto, categorias_producto, proveedores, cosecha, ventas,
     clima, sanidad, riego, analytics,
     clientes, cuentas_bancarias,
+    planificaciones,
 )
 from sync_odoo import start_sync
 
@@ -299,6 +300,9 @@ def run_migrations():
         "ALTER TABLE cobros ADD COLUMN IF NOT EXISTS tasa_cambio NUMERIC(10,4)",
         # Calibre "a granel": fruta sin clasificar (la clasifica la planta del cliente)
         "ALTER TABLE calibres ADD COLUMN IF NOT EXISTS es_granel BOOLEAN DEFAULT FALSE",
+        # Planificación de Labores — relación con OT
+        "ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS planificacion_id INTEGER REFERENCES planificaciones_labores(id)",
+        "CREATE INDEX IF NOT EXISTS ix_ordenes_trabajo_planificacion_id ON ordenes_trabajo(planificacion_id)",
     ]
     # Each migration runs in its own transaction so one failure does not
     # abort the rest (PostgreSQL poisons the whole tx on any error).
@@ -429,6 +433,7 @@ def seed_rbac():
             ("productos", "Productos"),
             ("inventario", "Inventario"),
             ("actividades", "Actividades"),
+            ("planificacion", "Planificación de Labores"),
             ("compras", "Compras"),
             ("cosecha", "Cosecha"),
             ("ventas", "Ventas"),
@@ -626,6 +631,7 @@ app.include_router(contabilidad.router)
 app.include_router(clientes.router)
 app.include_router(cuentas_bancarias.router)
 app.include_router(sequences.router)
+app.include_router(planificaciones.router)
 app.include_router(admin.router)
 app.include_router(roles.router)
 

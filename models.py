@@ -192,6 +192,99 @@ class Producto(Base):
 ESTADOS_OT = ["Abierta", "En Proceso", "En Pausa", "Cerrada"]
 
 
+class PlanificacionLabor(Base):
+    __tablename__ = "planificaciones_labores"
+    id = Column(Integer, primary_key=True, index=True)
+    numero = Column(String(30), unique=True, index=True, nullable=False)  # PLAN-0001
+    anio = Column(Integer, nullable=False, index=True)
+    semana = Column(Integer, nullable=False, index=True)
+    fecha_inicio_estimada = Column(Date)
+    fecha_fin_estimada = Column(Date)
+    actividad_id = Column(String(10), ForeignKey("actividades.id_act"), nullable=False, index=True)
+    etapa_fenologica = Column(String(50))
+    prioridad = Column(String(20), default="Normal")  # Crítica, Alta, Normal, Baja
+    responsable_id = Column(String(10), ForeignKey("trabajadores.id_trab"), index=True)
+    responsable_nombre = Column(String(100))
+    presupuesto_id = Column(Integer, ForeignKey("presupuestos.id"), index=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_contables.id"), index=True)
+    labor_previa_id = Column(Integer, ForeignKey("planificaciones_labores.id"), index=True)
+    estado = Column(String(20), default="Pendiente", index=True)  # Pendiente, Parcial, Completa, Vencida, Reprogramada, Cancelada
+    es_recurrente = Column(Boolean, default=False)
+    frecuencia_semanas = Column(Integer, default=0)
+    grupo_recurrencia_id = Column(String(50), index=True)
+    repeticion_num = Column(Integer, default=1)
+    total_repeticiones = Column(Integer, default=1)
+    reprogramada_de_id = Column(Integer, ForeignKey("planificaciones_labores.id"))
+    motivo_reprogramacion = Column(String(300))
+    veces_reprogramada = Column(Integer, default=0)
+    horas_mo_estimadas = Column(Float, default=0)
+    jornales_estimados = Column(Float, default=0)
+    costo_mo_estimado = Column(Float, default=0)
+    costo_insumos_estimado = Column(Float, default=0)
+    costo_equipo_estimado = Column(Float, default=0)
+    costo_total_estimado = Column(Float, default=0)
+    observaciones = Column(Text)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    actividad_rel = relationship("Actividad")
+    responsable_rel = relationship("Trabajador", foreign_keys=[responsable_id])
+    cuenta_rel = relationship("CuentaContable", foreign_keys=[cuenta_id])
+    presupuesto_rel = relationship("Presupuesto", foreign_keys=[presupuesto_id])
+    labor_previa = relationship("PlanificacionLabor", remote_side=[id], foreign_keys=[labor_previa_id])
+    campos_plan = relationship("PlanificacionCampo", back_populates="planificacion", cascade="all, delete-orphan")
+    insumos_plan = relationship("PlanificacionInsumo", back_populates="planificacion", cascade="all, delete-orphan")
+    reprogramaciones = relationship("PlanificacionReprogramacion", back_populates="planificacion", cascade="all, delete-orphan", order_by="PlanificacionReprogramacion.id.desc()")
+    ordenes = relationship("OrdenTrabajo", back_populates="planificacion")
+    usuario_rel = relationship("Usuario", foreign_keys=[usuario_id])
+
+
+class PlanificacionCampo(Base):
+    __tablename__ = "planificaciones_campos"
+    id = Column(Integer, primary_key=True, index=True)
+    planificacion_id = Column(Integer, ForeignKey("planificaciones_labores.id", ondelete="CASCADE"), nullable=False, index=True)
+    campo_id = Column(String(10), ForeignKey("campos.id_campo"), nullable=False, index=True)
+    area_ha = Column(Float, default=0)
+    completado = Column(Boolean, default=False)
+    ot_id = Column(Integer, ForeignKey("ordenes_trabajo.ot_id"), nullable=True)
+
+    planificacion = relationship("PlanificacionLabor", back_populates="campos_plan")
+    campo = relationship("Campo")
+
+
+class PlanificacionInsumo(Base):
+    __tablename__ = "planificaciones_insumos"
+    id = Column(Integer, primary_key=True, index=True)
+    planificacion_id = Column(Integer, ForeignKey("planificaciones_labores.id", ondelete="CASCADE"), nullable=False, index=True)
+    producto_id = Column(String(10), ForeignKey("productos.id_prod"), nullable=False, index=True)
+    dosis_por_ha = Column(Float, default=0)
+    cantidad_total = Column(Float, default=0)
+    unidad = Column(String(20))
+    costo_unitario_estimado = Column(Float, default=0)
+    costo_total_estimado = Column(Float, default=0)
+    observacion = Column(String(200))
+
+    planificacion = relationship("PlanificacionLabor", back_populates="insumos_plan")
+    producto = relationship("Producto")
+
+
+class PlanificacionReprogramacion(Base):
+    __tablename__ = "planificaciones_reprogramaciones"
+    id = Column(Integer, primary_key=True, index=True)
+    planificacion_id = Column(Integer, ForeignKey("planificaciones_labores.id", ondelete="CASCADE"), nullable=False, index=True)
+    semana_anterior = Column(Integer, nullable=False)
+    anio_anterior = Column(Integer, nullable=False)
+    semana_nueva = Column(Integer, nullable=False)
+    anio_nuevo = Column(Integer, nullable=False)
+    motivo = Column(String(300), nullable=False)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    usuario_nombre = Column(String(100))
+    fecha_cambio = Column(DateTime, server_default=func.now())
+
+    planificacion = relationship("PlanificacionLabor", back_populates="reprogramaciones")
+
+
 class OrdenTrabajo(Base):
     __tablename__ = "ordenes_trabajo"
     id = Column(Integer, primary_key=True, index=True)
@@ -217,10 +310,12 @@ class OrdenTrabajo(Base):
     creado_en = Column(DateTime, server_default=func.now())
     unidad_negocio_id = Column(Integer, ForeignKey("unidades_negocio.id"), index=True)
     departamento_id = Column(Integer, ForeignKey("departamentos.id"), index=True)
+    planificacion_id = Column(Integer, ForeignKey("planificaciones_labores.id"), nullable=True, index=True)
     campo = relationship("Campo", back_populates="ordenes")
     actividad_rel = relationship("Actividad")
     mano_obra = relationship("OTManoObra", back_populates="orden")
     detalles = relationship("OTDetalle", back_populates="orden")
+    planificacion = relationship("PlanificacionLabor", back_populates="ordenes", foreign_keys=[planificacion_id])
 
 
 class OTManoObra(Base):

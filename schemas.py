@@ -228,6 +228,171 @@ class OTDetalleOut(OTDetalleCreate):
     class Config:
         from_attributes = True
 
+# ── Planificación de Labores ────────────────────────────────────────────────
+class PlanificacionCampoCreate(BaseModel):
+    campo_id: str
+    area_ha: Optional[float] = 0
+
+class PlanificacionCampoOut(BaseModel):
+    id: int
+    planificacion_id: int
+    campo_id: str
+    area_ha: float
+    completado: bool
+    ot_id: Optional[int] = None
+    campo_nombre: Optional[str] = None
+    bloque: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class PlanificacionInsumoCreate(BaseModel):
+    producto_id: str
+    dosis_por_ha: Optional[float] = 0
+    cantidad_total: Optional[float] = 0
+    unidad: Optional[str] = None
+    costo_unitario_estimado: Optional[float] = 0
+    costo_total_estimado: Optional[float] = 0
+    observacion: Optional[str] = None
+
+class PlanificacionInsumoOut(BaseModel):
+    id: int
+    planificacion_id: int
+    producto_id: str
+    producto_nombre: Optional[str] = None
+    dosis_por_ha: float
+    cantidad_total: float
+    unidad: Optional[str] = None
+    costo_unitario_estimado: float
+    costo_total_estimado: float
+    observacion: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class PlanificacionReprogramacionCreate(BaseModel):
+    semana_nueva: int
+    anio_nuevo: int
+    motivo: str
+
+class PlanificacionReprogramacionOut(BaseModel):
+    id: int
+    planificacion_id: int
+    semana_anterior: int
+    anio_anterior: int
+    semana_nueva: int
+    anio_nuevo: int
+    motivo: str
+    usuario_id: Optional[int] = None
+    usuario_nombre: Optional[str] = None
+    fecha_cambio: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+class PlanificacionLaborCreate(BaseModel):
+    anio: int
+    semana: int
+    fecha_inicio_estimada: Optional[date] = None
+    fecha_fin_estimada: Optional[date] = None
+    actividad_id: str
+    etapa_fenologica: Optional[str] = None
+    prioridad: str = "Normal"  # Crítica, Alta, Normal, Baja
+    responsable_id: Optional[str] = None
+    responsable_nombre: Optional[str] = None
+    presupuesto_id: Optional[int] = None
+    cuenta_id: Optional[int] = None
+    labor_previa_id: Optional[int] = None
+    es_recurrente: bool = False
+    frecuencia_semanas: int = 0
+    total_repeticiones: int = 1
+    horas_mo_estimadas: Optional[float] = 0
+    jornales_estimados: Optional[float] = 0
+    costo_mo_estimado: Optional[float] = 0
+    costo_insumos_estimado: Optional[float] = 0
+    costo_equipo_estimado: Optional[float] = 0
+    costo_total_estimado: Optional[float] = 0
+    observaciones: Optional[str] = None
+    campos: List[PlanificacionCampoCreate] = []
+    insumos: Optional[List[PlanificacionInsumoCreate]] = []
+
+class PlanificacionLaborUpdate(BaseModel):
+    anio: Optional[int] = None
+    semana: Optional[int] = None
+    fecha_inicio_estimada: Optional[date] = None
+    fecha_fin_estimada: Optional[date] = None
+    actividad_id: Optional[str] = None
+    etapa_fenologica: Optional[str] = None
+    prioridad: Optional[str] = None
+    responsable_id: Optional[str] = None
+    responsable_nombre: Optional[str] = None
+    presupuesto_id: Optional[int] = None
+    cuenta_id: Optional[int] = None
+    labor_previa_id: Optional[int] = None
+    horas_mo_estimadas: Optional[float] = None
+    jornales_estimados: Optional[float] = None
+    costo_mo_estimado: Optional[float] = None
+    costo_insumos_estimado: Optional[float] = None
+    costo_equipo_estimado: Optional[float] = None
+    costo_total_estimado: Optional[float] = None
+    observaciones: Optional[str] = None
+    campos: Optional[List[PlanificacionCampoCreate]] = None
+    insumos: Optional[List[PlanificacionInsumoCreate]] = None
+
+class PlanificacionLaborOut(BaseModel):
+    id: int
+    numero: str
+    anio: int
+    semana: int
+    fecha_inicio_estimada: Optional[date] = None
+    fecha_fin_estimada: Optional[date] = None
+    actividad_id: str
+    actividad_nombre: Optional[str] = None
+    etapa_fenologica: Optional[str] = None
+    prioridad: str
+    responsable_id: Optional[str] = None
+    responsable_nombre: Optional[str] = None
+    presupuesto_id: Optional[int] = None
+    presupuesto_nombre: Optional[str] = None
+    cuenta_id: Optional[int] = None
+    cuenta_codigo: Optional[str] = None
+    cuenta_nombre: Optional[str] = None
+    labor_previa_id: Optional[int] = None
+    labor_previa_numero: Optional[str] = None
+    labor_previa_actividad: Optional[str] = None
+    labor_previa_estado: Optional[str] = None
+    labor_previa_completada: bool = True
+    estado: str
+    es_recurrente: bool
+    frecuencia_semanas: int
+    grupo_recurrencia_id: Optional[str] = None
+    repeticion_num: int
+    total_repeticiones: int
+    reprogramada_de_id: Optional[int] = None
+    motivo_reprogramacion: Optional[str] = None
+    veces_reprogramada: int
+    horas_mo_estimadas: float
+    jornales_estimados: float
+    costo_mo_estimado: float
+    costo_insumos_estimado: float
+    costo_equipo_estimado: float
+    costo_total_estimado: float
+    observaciones: Optional[str] = None
+    created_at: Optional[datetime] = None
+    campos_count: int = 0
+    campos_completados_count: int = 0
+    porcentaje_avance: float = 0.0
+    ots_count: int = 0
+    campos_resumen: Optional[str] = None
+    costo_real_total: float = 0.0
+    dias_atraso: int = 0
+    class Config:
+        from_attributes = True
+
+class PlanificacionLaborDetailOut(PlanificacionLaborOut):
+    campos: List[PlanificacionCampoOut] = []
+    insumos: List[PlanificacionInsumoOut] = []
+    reprogramaciones: List[PlanificacionReprogramacionOut] = []
+    ordenes: List[OrdenTrabajoOut] = []
+    comparativa_costos: Optional[dict] = None
+
 # Orden Trabajo
 class OrdenTrabajoCreate(BaseModel):
     ot_id: Optional[int] = None
@@ -241,6 +406,7 @@ class OrdenTrabajoCreate(BaseModel):
     horas_equipo: Optional[float] = None
     tarifa_equipo: Optional[float] = None
     observaciones: Optional[str] = None
+    planificacion_id: Optional[int] = None
     mano_obra: Optional[List[OTManoObraCreate]] = []
     detalles: Optional[List[OTDetalleCreate]] = []
 
@@ -264,6 +430,8 @@ class OrdenTrabajoOut(BaseModel):
     observaciones: Optional[str]
     hora_cierre: Optional[str]
     creado_en: Optional[datetime]
+    planificacion_id: Optional[int] = None
+    planificacion_numero: Optional[str] = None
     class Config:
         from_attributes = True
 

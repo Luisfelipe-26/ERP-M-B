@@ -349,6 +349,7 @@ def create_orden(data: schemas.OrdenTrabajoCreate, db: Session = Depends(get_db)
         horas_equipo=data.horas_equipo,
         tarifa_equipo=data.tarifa_equipo,
         observaciones=data.observaciones,
+        planificacion_id=data.planificacion_id,
     )
     db.add(orden)
     db.flush()
@@ -535,6 +536,7 @@ def update_orden(ot_id: int, data: schemas.OrdenTrabajoCreate, db: Session = Dep
     orden.horas_equipo = data.horas_equipo
     orden.tarifa_equipo = data.tarifa_equipo
     orden.observaciones = data.observaciones
+    orden.planificacion_id = data.planificacion_id
 
     # Re-add MO
     costo_mo_total = 0.0
@@ -722,6 +724,32 @@ def update_estado(ot_id: int, estado: str = Query(...), hora_cierre: Optional[st
                     )
                     if asiento:
                         asiento_num = asiento.numero
+
+            # Si la OT está vinculada a una planificación, actualizar el progreso y estado
+            if orden.planificacion_id:
+                plan = db.query(models.PlanificacionLabor).filter(models.PlanificacionLabor.id == orden.planificacion_id).first()
+                if plan:
+                    # Marcar el campo de la planificación como completado si coincide
+                    if orden.campo_id:
+                        db.query(models.PlanificacionCampo).filter(
+                            models.PlanificacionCampo.planificacion_id == plan.id,
+                            models.PlanificacionCampo.campo_id == orden.campo_id
+                        ).update({"completado": True, "ot_id": orden.ot_id}, synchronize_session=False)
+
+                    # Evaluar si todos los campos están listos
+                    total_campos = len(plan.campos_plan or [])
+                    completados = db.query(models.PlanificacionCampo).filter(
+                        models.PlanificacionCampo.planificacion_id == plan.id,
+                        models.PlanificacionCampo.completado == True
+                    ).count()
+
+                    if total_campos > 0:
+                        if completados >= total_campos:
+                            plan.estado = "Completa"
+                        else:
+                            plan.estado = "Parcial"
+                    else:
+                        plan.estado = "Completa"
 
         audit.log(db, current_user, "ESTADO", "OT", str(ot_id),
                   f"OT #{ot_id}: {estado_anterior} → {estado}",
