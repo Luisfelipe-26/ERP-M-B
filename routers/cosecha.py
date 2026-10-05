@@ -310,9 +310,11 @@ def resumen_cosecha(temporada: Optional[str] = None, fecha_desde: Optional[date]
     }
 
 
-@router.post("")
-def create_cosecha(data: CosechaIn, db: Session = Depends(get_db),
-                   current_user: models.Usuario = Depends(auth.require_operador)):
+def _registrar_cosecha(db: Session, data: CosechaIn, current_user) -> models.Cosecha:
+    """Valida y registra una cosecha con su entrada a inventario y su asiento, sin confirmar.
+
+    La usan el registro manual y la importación de liquidaciones.
+    """
     campo = db.query(models.Campo).filter(models.Campo.id_campo == data.campo_id).first()
     if not campo or campo.activo is False:
         raise HTTPException(400, f"Campo '{data.campo_id}' no existe o está inactivo")
@@ -354,88 +356,95 @@ def create_cosecha(data: CosechaIn, db: Session = Depends(get_db),
 
     numero = get_next("COS", db)
     temporada = (data.temporada or "").strip() or str(data.fecha.year)
-    try:
-        cos = models.Cosecha(
-            numero=numero, fecha=data.fecha, campo_id=data.campo_id, temporada=temporada,
-            ot_id=data.ot_id, observaciones=data.observaciones, usuario_id=current_user.id,
-            carencia_forzada=bool(vigentes), justificacion_carencia=(data.justificacion_carencia if vigentes else None),
-        )
-        db.add(cos)
-        db.flush()
+    cos = models.Cosecha(
+        numero=numero, fecha=data.fecha, campo_id=data.campo_id, temporada=temporada,
+        ot_id=data.ot_id, observaciones=data.observaciones, usuario_id=current_user.id,
+        carencia_forzada=bool(vigentes), justificacion_carencia=(data.justificacion_carencia if vigentes else None),
+    )
+    db.add(cos)
+    db.flush()
 
-        total_kg = 0.0
-        lineas_asiento, total_asiento = [], Decimal("0")
-        r_cos = _get_regla_cuentas(db, "cosecha", "produccion")
-        for l in lineas_in:
-            cal = calibres[l.calibre_id]
-            linea = models.CosechaLinea(cosecha_id=cos.id, calibre_id=cal.id, kg=l.kg,
-                                        producto_id=cal.producto_id, costo_unitario=0)
-            total_kg += l.kg
+    total_kg = 0.0
+    lineas_asiento, total_asiento = [], Decimal("0")
+    r_cos = _get_regla_cuentas(db, "cosecha", "produccion")
+    for l in lineas_in:
+        cal = calibres[l.calibre_id]
+        linea = models.CosechaLinea(cosecha_id=cos.id, calibre_id=cal.id, kg=l.kg,
+                                    producto_id=cal.producto_id, costo_unitario=0)
+        total_kg += l.kg
 
-            prod = None
-            if cal.producto_id:
-                prod = db.query(models.Producto).filter(models.Producto.id_prod == cal.producto_id).first()
-                # Antes un producto inactivo o sin inventario dejaba la fruta registrada pero fuera
-                # del stock, sin aviso, y luego no había qué despachar.
-                if not prod or prod.activo is False or not prod.es_inventariable:
-                    raise HTTPException(400, (
-                        f"{cal.nombre}: su producto {cal.producto_id} no existe, está inactivo o no lleva "
-                        "inventario. Corríjalo en Cosecha → Calibres o en Productos."))
-            if prod:
-                # Entra al costo estándar del producto del calibre (su costo unitario).
-                costo = _f(prod.costo_unitario)
-                nuevo_costo = _recalc_avg_cost(prod, l.kg, costo)
-                nuevo_stock = _f(prod.stock_actual) + l.kg
-                mov = models.MovimientoInventario(
-                    num_documento=numero, producto_id=prod.id_prod, tipo_doc="COS", tipo="entrada",
-                    motivo="Cosecha", cantidad=l.kg, costo_unitario=round(costo, 4),
-                    costo_promedio_post=round(nuevo_costo, 4), stock_post=round(nuevo_stock, 4),
-                    lote=f"{data.campo_id}/{data.fecha:%Y%m%d}", referencia=numero,
-                    observacion=f"Cosecha {numero} — {campo.nombre or data.campo_id} — {cal.nombre}",
-                    fecha=datetime.combine(data.fecha, datetime.now().time()),
-                    usuario_id=current_user.id,
-                )
-                db.add(mov)
-                db.flush()
-                prod.stock_actual = round(nuevo_stock, 4)
-                prod.costo_promedio = round(nuevo_costo, 4)
-                linea.movimiento_id = mov.id
-                linea.costo_unitario = round(costo, 4)
-
-                monto = Decimal(str(round(l.kg * costo, 2)))
-                # Fruta con valor que entra al stock sin asiento descuadra el inventario contra el
-                # mayor, y luego su despacho no tendría de qué cuenta salir.
-                cta_inv = _cuentas_producto(prod)[0]
-                if monto > 0 and (not cta_inv or not r_cos):
-                    raise HTTPException(400, (
-                        f"{cal.nombre}: configure la cuenta de inventario del producto {prod.id_prod} "
-                        "(o de su categoría) y la regla contable cosecha / produccion"))
-                if monto > 0:
-                    lineas_asiento.append({"cuenta_id": cta_inv, "debe": monto, "haber": 0,
-                                           "campo_id": data.campo_id,
-                                           "descripcion_linea": f"Fruta cosechada {cal.nombre}"})
-                    total_asiento += monto
-            db.add(linea)
-
-        cos.total_kg = round(total_kg, 2)
-
-        if lineas_asiento:
-            lineas_asiento.append({"cuenta_id": r_cos[1], "debe": 0, "haber": total_asiento,
-                                   "campo_id": data.campo_id,
-                                   "descripcion_linea": f"Producción agrícola {numero}"})
-            asiento = _crear_asiento_auto(
-                db, data.fecha, "COS", numero,
-                f"Cosecha {numero} — {campo.nombre or data.campo_id} — {total_kg:,.2f} kg",
-                lineas_asiento, current_user.nombre, requerido=True,
+        prod = None
+        if cal.producto_id:
+            prod = db.query(models.Producto).filter(models.Producto.id_prod == cal.producto_id).first()
+            # Antes un producto inactivo o sin inventario dejaba la fruta registrada pero fuera
+            # del stock, sin aviso, y luego no había qué despachar.
+            if not prod or prod.activo is False or not prod.es_inventariable:
+                raise HTTPException(400, (
+                    f"{cal.nombre}: su producto {cal.producto_id} no existe, está inactivo o no lleva "
+                    "inventario. Corríjalo en Cosecha → Calibres o en Productos."))
+        if prod:
+            # Entra al costo estándar del producto del calibre (su costo unitario).
+            costo = _f(prod.costo_unitario)
+            nuevo_costo = _recalc_avg_cost(prod, l.kg, costo)
+            nuevo_stock = _f(prod.stock_actual) + l.kg
+            mov = models.MovimientoInventario(
+                num_documento=numero, producto_id=prod.id_prod, tipo_doc="COS", tipo="entrada",
+                motivo="Cosecha", cantidad=l.kg, costo_unitario=round(costo, 4),
+                costo_promedio_post=round(nuevo_costo, 4), stock_post=round(nuevo_stock, 4),
+                lote=f"{data.campo_id}/{data.fecha:%Y%m%d}", referencia=numero,
+                observacion=f"Cosecha {numero} — {campo.nombre or data.campo_id} — {cal.nombre}",
+                fecha=datetime.combine(data.fecha, datetime.now().time()),
+                usuario_id=current_user.id,
             )
-            cos.asiento_id = asiento.id if asiento else None
+            db.add(mov)
+            db.flush()
+            prod.stock_actual = round(nuevo_stock, 4)
+            prod.costo_promedio = round(nuevo_costo, 4)
+            linea.movimiento_id = mov.id
+            linea.costo_unitario = round(costo, 4)
 
-        audit.log(db, current_user, "CREAR", "COSECHA", numero,
-                  f"Cosecha {numero}: {data.campo_id} {total_kg:,.2f} kg"
-                  + (" (CARENCIA FORZADA)" if vigentes else ""),
-                  {"campo_id": data.campo_id, "fecha": str(data.fecha), "total_kg": total_kg,
-                   "carencia_forzada": bool(vigentes),
-                   "aplicaciones_vigentes": [v["spray_code"] for v in vigentes]})
+            monto = Decimal(str(round(l.kg * costo, 2)))
+            # Fruta con valor que entra al stock sin asiento descuadra el inventario contra el
+            # mayor, y luego su despacho no tendría de qué cuenta salir.
+            cta_inv = _cuentas_producto(prod)[0]
+            if monto > 0 and (not cta_inv or not r_cos):
+                raise HTTPException(400, (
+                    f"{cal.nombre}: configure la cuenta de inventario del producto {prod.id_prod} "
+                    "(o de su categoría) y la regla contable cosecha / produccion"))
+            if monto > 0:
+                lineas_asiento.append({"cuenta_id": cta_inv, "debe": monto, "haber": 0,
+                                       "campo_id": data.campo_id,
+                                       "descripcion_linea": f"Fruta cosechada {cal.nombre}"})
+                total_asiento += monto
+        db.add(linea)
+
+    cos.total_kg = round(total_kg, 2)
+
+    if lineas_asiento:
+        lineas_asiento.append({"cuenta_id": r_cos[1], "debe": 0, "haber": total_asiento,
+                               "campo_id": data.campo_id,
+                               "descripcion_linea": f"Producción agrícola {numero}"})
+        asiento = _crear_asiento_auto(
+            db, data.fecha, "COS", numero,
+            f"Cosecha {numero} — {campo.nombre or data.campo_id} — {total_kg:,.2f} kg",
+            lineas_asiento, current_user.nombre, requerido=True,
+        )
+        cos.asiento_id = asiento.id if asiento else None
+
+    audit.log(db, current_user, "CREAR", "COSECHA", numero,
+              f"Cosecha {numero}: {data.campo_id} {total_kg:,.2f} kg"
+              + (" (CARENCIA FORZADA)" if vigentes else ""),
+              {"campo_id": data.campo_id, "fecha": str(data.fecha), "total_kg": total_kg,
+               "carencia_forzada": bool(vigentes),
+               "aplicaciones_vigentes": [v["spray_code"] for v in vigentes]})
+    return cos
+
+
+@router.post("")
+def create_cosecha(data: CosechaIn, db: Session = Depends(get_db),
+                   current_user: models.Usuario = Depends(auth.require_operador)):
+    try:
+        cos = _registrar_cosecha(db, data, current_user)
         db.commit()
         db.refresh(cos)
     except HTTPException:
@@ -444,7 +453,7 @@ def create_cosecha(data: CosechaIn, db: Session = Depends(get_db),
     except Exception:
         db.rollback()
         import logging
-        logging.getLogger(__name__).exception("Error registrando cosecha %s", numero)
+        logging.getLogger(__name__).exception("Error registrando cosecha")
         raise HTTPException(500, "Error al registrar la cosecha")
     return _cosecha_out(db, cos)
 

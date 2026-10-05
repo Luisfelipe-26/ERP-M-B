@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# Reportes reales para pruebas locales (datos comerciales: no se suben)
+tests/data/

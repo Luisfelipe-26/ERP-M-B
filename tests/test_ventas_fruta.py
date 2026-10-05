@@ -335,7 +335,7 @@ def test_no_se_repite_conduce_ni_liquidacion_del_cliente(db, user, f):
     db.rollback()
 
     _liquidar(db, user, f, d["id"], kg18=90, kg22=50, rechazo=10)     # referencia LQ-77
-    d2 = crear_despacho(DespachoIn(cliente_id=f["cliente"].id, fecha=HOY, conduce="CD-101",
+    d2 = crear_despacho(DespachoIn(cliente_id=f["cliente"].id, fecha=HOY, campo_id="C01", conduce="CD-101",
                                    lineas=[DespachoLineaIn(calibre_id=f["cal18"].id, kg=100)]),
                         db=db, current_user=user)
     with pytest.raises(HTTPException) as e:
@@ -414,3 +414,32 @@ def test_packout_retorno_y_distribucion_por_calibre(db, user, f):
     cal18 = next(k for k in r["por_calibre"] if k["calibre"] == "Cal 18")
     assert cal18["pct"] == 62.5
     assert r["totales"]["packout_pct"] == c01["packout_pct"]
+
+
+def test_liquidar_sin_facturar_y_facturar_despues(db, user, f):
+    from routers.ventas import FacturaVentaIn, facturar_liquidaciones
+    _cosechar(db, user, f)
+    d = _despachar(db, user, f)
+    liq = _liquidar(db, user, f, d["id"], ncf=None, tasa=None, facturar=False)
+    assert liq["por_facturar"] and liq["cxc_id"] is None
+    assert db.query(models.CuentaPorCobrar).count() == 0
+    assert saldo_cuenta(db, f["1.1.03.08"]) == 46_000, "el costo sigue por liquidar hasta facturar"
+    p = despachos_pendientes(db=db, _=user)
+    assert p["liquidaciones_por_facturar"] == 1 and p["diferencia"] == 0
+
+    fac = facturar_liquidaciones(FacturaVentaIn(liquidacion_ids=[liq["id"]], ncf="E310000000101", tasa_cambio=60),
+                                 db=db, current_user=user)
+    assert fac["total"] == 1708 and fac["total_dop"] == 1708 * 60
+    assert saldo_cuenta(db, f["1.1.03.08"]) == 0
+    assert despachos_pendientes(db=db, _=user)["diferencia"] == 0
+
+
+def test_el_mismo_conduce_puede_traer_fruta_de_otro_campo(db, user, f):
+    db.add(models.Campo(id_campo="C02", nombre="Lote Sur", area_ha=3, variedad="Hass", activo=True))
+    db.commit()
+    _cosechar(db, user, f)
+    _despachar(db, user, f, kg18=100, kg22=50)                        # CD-100, campo C01
+    d2 = crear_despacho(DespachoIn(cliente_id=f["cliente"].id, fecha=HOY, campo_id="C02", conduce="CD-100",
+                                   lineas=[DespachoLineaIn(calibre_id=f["cal18"].id, kg=100)]),
+                        db=db, current_user=user)
+    assert d2["conduce"] == "CD-100" and d2["campo_id"] == "C02"
