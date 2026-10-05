@@ -463,7 +463,7 @@ def anular_cosecha(cosecha_id: int, motivo: str = Query(..., min_length=5),
         for l in cos.lineas:
             if not l.movimiento_id:
                 continue
-            prod = db.query(models.Producto).filter(models.Producto.id_prod == l.producto_id).first()
+            prod = db.query(models.Producto).filter(models.Producto.id_prod == l.producto_id).with_for_update().first()
             if not prod:
                 continue
             kg = _f(l.kg)

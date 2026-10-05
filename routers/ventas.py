@@ -201,7 +201,9 @@ def crear_despacho(data: DespachoIn, db: Session = Depends(get_db),
                 raise HTTPException(400, f"Calibre {l.calibre_id} no existe")
             if not cal.producto_id:
                 raise HTTPException(400, f"El calibre {cal.nombre} no está vinculado a un producto de inventario")
-            prod = db.query(models.Producto).filter(models.Producto.id_prod == cal.producto_id).first()
+            # Se bloquea la fila: otra operación simultánea sobre la misma fruta espera a que
+            # esta termine y ve la existencia ya descontada.
+            prod = db.query(models.Producto).filter(models.Producto.id_prod == cal.producto_id).with_for_update().first()
             if not prod or not prod.es_inventariable:
                 raise HTTPException(400, f"El producto del calibre {cal.nombre} no lleva inventario")
             stock = _f(prod.stock_actual)
@@ -291,7 +293,7 @@ def anular_despacho(despacho_id: int, motivo: str = Query(..., min_length=5), db
         raise HTTPException(400, f"El despacho está {d.estado}")
     try:
         for l in d.lineas:
-            prod = db.query(models.Producto).filter(models.Producto.id_prod == l.producto_id).first()
+            prod = db.query(models.Producto).filter(models.Producto.id_prod == l.producto_id).with_for_update().first()
             costo = _f(l.costo_unitario)
             nuevo_costo = _recalc_avg_cost(prod, _f(l.kg), costo)
             nuevo_stock = _f(prod.stock_actual) + _f(l.kg)
@@ -390,7 +392,6 @@ def liquidar_despacho(despacho_id: int, data: LiquidacionIn, db: Session = Depen
 
     # Cuentas del costo: la parte liquidada a costo de venta, el rechazo y la merma a merma.
     r_desp = _get_regla_cuentas(db, "venta", "despacho_por_liquidar")
-    r_costo = _get_regla_cuentas(db, "venta", "costo_venta")
     r_merma = _get_regla_cuentas(db, "inventario", "ajuste")
     costo_total = _d(d.costo_total)
     # Lo liquidado lleva su parte del costo; el rechazo y la merma, el resto. Si la báscula del
@@ -403,9 +404,13 @@ def liquidar_despacho(despacho_id: int, data: LiquidacionIn, db: Session = Depen
         prod = db.query(models.Producto).filter(models.Producto.id_prod == dl.producto_id).first()
         costo_l = (_d(dl.kg) * _d(dl.costo_unitario)).quantize(D2)
         parte = (costo_l * factor).quantize(D2)
-        cta = _cuentas_producto(prod)[1] or (r_costo[0] if r_costo else None)
+        # El costo de la fruta vendida va a la cuenta de costo de su producto. Caer en la regla
+        # genérica (por defecto "Insumos agrícolas (consumo)") clasificaba mal la utilidad bruta.
+        cta = _cuentas_producto(prod)[1]
         if parte > 0 and not cta:
-            raise HTTPException(400, f"Configure la cuenta de costo del producto {dl.producto_id} o la regla venta / costo_venta")
+            raise HTTPException(400, (
+                f"El producto {dl.producto_id} no tiene Cuenta Costo (ni su categoría): asígnele en "
+                "Productos la cuenta de costo de ventas de la fruta"))
         if parte > 0:
             debitos[cta] = debitos.get(cta, Decimal("0")) + parte
         costo_venta += parte
@@ -565,7 +570,8 @@ def rentabilidad(temporada: Optional[str] = None, db: Session = Depends(get_db),
     def campo(cid):
         return campos.setdefault(cid or "—", {
             "campo_id": cid, "kg_cosechados": 0.0, "kg_despachados": 0.0, "kg_liquidados": 0.0,
-            "kg_rechazo": 0.0, "kg_merma": 0.0, "venta_dop": 0.0, "costo": 0.0, "kg_por_liquidar": 0.0})
+            "kg_rechazo": 0.0, "kg_merma": 0.0, "venta_dop": 0.0, "costo": 0.0, "kg_por_liquidar": 0.0,
+            "kg_desp_liquidados": 0.0})
 
     for c in db.query(models.Cosecha).filter(models.Cosecha.temporada == temporada,
                                              models.Cosecha.estado != "anulada").all():
@@ -582,6 +588,7 @@ def rentabilidad(temporada: Optional[str] = None, db: Session = Depends(get_db),
             fila["kg_por_liquidar"] += _f(d.kg_total)
             continue
         monedas.add(liq.moneda)
+        fila["kg_desp_liquidados"] += _f(d.kg_total)
         fila["kg_liquidados"] += _f(liq.kg_liquidados)
         fila["kg_rechazo"] += _f(liq.kg_rechazo)
         fila["kg_merma"] += _f(liq.kg_merma)
@@ -626,19 +633,31 @@ def rentabilidad(temporada: Optional[str] = None, db: Session = Depends(get_db),
         f["costo_produccion"] = round(f.get("costo_produccion", 0.0), 2)
         f["costo_kg"] = round(f["costo_produccion"] / f["kg_cosechados"], 2) if f["kg_cosechados"] else None
         f["resultado"] = round(f["venta_dop"] - f["costo_produccion"], 2)
-        f["pct_rechazo"] = round(f["kg_rechazo"] / f["kg_despachados"] * 100, 1) if f["kg_despachados"] else None
+        # Sobre lo ya liquidado: lo que aún está en la planta no tiene clasificación.
+        base = f["kg_desp_liquidados"]
+        f["pct_rechazo"] = round(f["kg_rechazo"] / base * 100, 1) if base else None
+        # Packout: parte de lo despachado que la planta paga; retorno: pesos por kg despachado.
+        f["packout_pct"] = round(f["kg_liquidados"] / base * 100, 1) if base else None
+        f["retorno_kg"] = round(f["venta_dop"] / base, 2) if base else None
         for k in ("kg_cosechados", "kg_despachados", "kg_liquidados", "kg_rechazo", "kg_merma",
-                  "venta_dop", "costo", "kg_por_liquidar"):
+                  "venta_dop", "costo", "kg_por_liquidar", "kg_desp_liquidados"):
             f[k] = round(f[k], 2)
         filas.append(f)
     calibres = sorted(por_calibre.values(), key=lambda k: (k["orden"] or 0, k["calibre"] or ""))
+    kg_cal_total = sum(k["kg"] for k in calibres)
     for k in calibres:
         k["precio_promedio"] = round(k["venta"] / k["kg"], 4) if k["kg"] else None
+        k["pct"] = round(k["kg"] / kg_cal_total * 100, 1) if kg_cal_total else None
         k["kg"], k["venta"], k["venta_dop"] = round(k["kg"], 2), round(k["venta"], 2), round(k["venta_dop"], 2)
     tot = {k: round(sum(f[k] for f in filas), 2) for k in
            ("kg_cosechados", "kg_despachados", "kg_liquidados", "kg_rechazo", "kg_merma",
-            "venta_dop", "costo", "margen_dop", "kg_por_liquidar", "costo_produccion", "resultado")}
+            "venta_dop", "costo", "margen_dop", "kg_por_liquidar", "costo_produccion", "resultado",
+            "kg_desp_liquidados")}
     tot["costo_kg"] = round(tot["costo_produccion"] / tot["kg_cosechados"], 2) if tot["kg_cosechados"] else None
+    b = tot["kg_desp_liquidados"]
+    tot["packout_pct"] = round(tot["kg_liquidados"] / b * 100, 1) if b else None
+    tot["pct_rechazo"] = round(tot["kg_rechazo"] / b * 100, 1) if b else None
+    tot["retorno_kg"] = round(tot["venta_dop"] / b, 2) if b else None
     return {"temporada": temporada, "moneda_venta": sorted(monedas)[0] if len(monedas) == 1 else None,
             "periodo_costos": {"desde": desde, "hasta": hasta},
             "por_campo": sorted(filas, key=lambda f: f["campo"]), "por_calibre": calibres, "totales": tot}

@@ -383,3 +383,34 @@ def test_un_calibre_con_precios_se_desactiva_en_vez_de_borrarse(db, user, f):
     r = delete_calibre(f["cal22"].id, db=db, _=user)
     assert "Desactivado" in r["message"]
     assert db.query(models.Calibre).get(f["cal22"].id).activo is False
+
+
+def test_el_costo_de_venta_exige_la_cuenta_de_costo_del_producto(db, user, f):
+    _cosechar(db, user, f)
+    d = _despachar(db, user, f)
+    db.query(models.Producto).filter_by(id_prod="F18").one().cuenta_costo_id = None
+    db.commit()
+    with pytest.raises(HTTPException) as e:
+        _liquidar(db, user, f, d["id"])
+    assert "Cuenta Costo" in e.value.detail
+    db.rollback()
+    assert db.query(models.CuentaPorCobrar).count() == 0, "sin cuenta de costo no se factura a medias"
+
+
+def test_packout_retorno_y_distribucion_por_calibre(db, user, f):
+    _cosechar(db, user, f)
+    d = _despachar(db, user, f)                                       # 1.200 kg
+    _liquidar(db, user, f, d["id"], kg18=700, kg22=420, rechazo=60)   # 1.120 kg pagados
+    _despachar_pendiente = crear_despacho(DespachoIn(cliente_id=f["cliente"].id, fecha=HOY, campo_id="C01",
+                                                     conduce="CD-200",
+                                                     lineas=[DespachoLineaIn(calibre_id=f["cal18"].id, kg=100)]),
+                                          db=db, current_user=user)
+    r = rentabilidad(temporada=TEMP, db=db, _=user)
+    c01 = r["por_campo"][0]
+    assert c01["packout_pct"] == round(1120 / 1200 * 100, 1), "lo aún no liquidado no cuenta en el packout"
+    assert c01["pct_rechazo"] == 5.0
+    assert c01["retorno_kg"] == round(102_480 / 1200, 2)
+    assert c01["kg_por_liquidar"] == 100
+    cal18 = next(k for k in r["por_calibre"] if k["calibre"] == "Cal 18")
+    assert cal18["pct"] == 62.5
+    assert r["totales"]["packout_pct"] == c01["packout_pct"]
