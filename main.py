@@ -590,20 +590,47 @@ async def lifespan(app: FastAPI):
     start_sync()
     yield
 
+import os
+
+# Render define RENDER=true en todos sus servicios; ENV=production|development lo fuerza.
+ENV = (os.environ.get("ENV") or ("production" if os.environ.get("RENDER") else "development")).lower()
+EN_PRODUCCION = ENV == "production"
+
 app = FastAPI(
     title="ERP Finca Aguacates CORVUS",
     version="1.0.0",
     lifespan=lifespan,
+    # La documentación interactiva publica todas las rutas y esquemas: solo en desarrollo.
+    docs_url=None if EN_PRODUCCION else "/docs",
+    redoc_url=None if EN_PRODUCCION else "/redoc",
+    openapi_url=None if EN_PRODUCCION else "/openapi.json",
 )
 
-import os
-_cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
+# Frontends de las dos empresas. CORS_ORIGINS puede añadir otros, siempre explícitos.
+FRONTENDS = ["https://erp-m-f-1.onrender.com", "https://vision-agricola.onrender.com"]
+
+
+def origenes_cors(valor_env: str = "") -> list:
+    """Orígenes que pueden llamar al API desde el navegador.
+
+    Nunca "*": con él y credenciales, Starlette devuelve el origen que pregunte, y
+    cualquier página podía leer las respuestas del API.
+    """
+    extra = [o.strip().rstrip("/") for o in (valor_env or "").split(",") if o.strip()]
+    if any("*" in o for o in extra):
+        logging.getLogger(__name__).warning("CORS_ORIGINS trae un comodín: se ignora")
+    return list(dict.fromkeys(FRONTENDS + [o for o in extra if "*" not in o]))
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=origenes_cors(os.environ.get("CORS_ORIGINS", "")),
+    # En desarrollo, el frontend local en cualquier puerto.
+    allow_origin_regex=None if EN_PRODUCCION else r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    # El token viaja en el encabezado Authorization, no en cookies: no hacen falta credenciales.
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Register all routers
@@ -638,7 +665,7 @@ app.include_router(roles.router)
 
 @app.get("/")
 def root():
-    return {"message": "ERP Finca CORVUS API v1.0", "docs": "/docs"}
+    return {"message": "ERP Finca CORVUS API v1.0", **({} if EN_PRODUCCION else {"docs": "/docs"})}
 
 
 @app.get("/health")

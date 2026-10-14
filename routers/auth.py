@@ -1,5 +1,9 @@
 """Auth — login, token, user-me endpoints."""
-from fastapi import APIRouter, Depends, HTTPException, status
+import threading
+import time
+from collections import deque
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from database import get_db
@@ -8,34 +12,102 @@ import models, schemas, auth
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-@router.post("/token", response_model=schemas.Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(models.Usuario).filter(models.Usuario.email == form_data.username).first()
-    if not user or not auth.verify_password(form_data.password, user.hashed_password):
+class LimiteIntentos:
+    """Intentos fallidos por clave en una ventana deslizante, en la memoria del proceso.
+
+    Cuenta solo los fallos: una oficina que comparte IP puede entrar sin tropezar con el
+    límite, pero adivinar contraseñas queda en unos pocos intentos por ventana.
+    """
+
+    def __init__(self, maximo: int, ventana_seg: int):
+        self.maximo, self.ventana = maximo, ventana_seg
+        self._fallos: dict = {}
+        self._lock = threading.Lock()
+
+    def _vigentes(self, clave, ahora):
+        q = self._fallos.get(clave)
+        while q and ahora - q[0] >= self.ventana:
+            q.popleft()
+        if q is not None and not q:
+            del self._fallos[clave]
+            return None
+        return q
+
+    def espera(self, clave: str) -> int:
+        """Segundos hasta que la clave pueda volver a intentar; 0 si puede ya."""
+        ahora = time.monotonic()
+        with self._lock:
+            q = self._vigentes(clave, ahora)
+            if not q or len(q) < self.maximo:
+                return 0
+            return int(self.ventana - (ahora - q[-self.maximo])) + 1
+
+    def fallo(self, clave: str):
+        ahora = time.monotonic()
+        with self._lock:
+            if len(self._fallos) > 10_000:          # que un barrido de IPs no llene la memoria
+                for k in list(self._fallos):
+                    self._vigentes(k, ahora)
+            self._fallos.setdefault(clave, deque()).append(ahora)
+
+    def limpiar(self, clave: str):
+        with self._lock:
+            self._fallos.pop(clave, None)
+
+
+limite_ip = LimiteIntentos(maximo=5, ventana_seg=60)           # por conexión
+limite_cuenta = LimiteIntentos(maximo=10, ventana_seg=15 * 60)  # por cuenta, venga de donde venga
+
+
+def _ip_cliente(request: Request) -> str:
+    """IP del navegador. Render pasa por Cloudflare, que la pone en CF-Connecting-IP;
+    sin ella, la primera de X-Forwarded-For y, en local, la de la conexión."""
+    h = request.headers
+    ip = h.get("cf-connecting-ip") or h.get("true-client-ip") or (h.get("x-forwarded-for") or "").split(",")[0].strip()
+    return ip or (request.client.host if request.client else "desconocida")
+
+
+def _frenar_si_excede(ip: str, cuenta: str = None):
+    espera = limite_ip.espera(ip)
+    msg = "Demasiados intentos fallidos desde esta conexión."
+    if not espera and cuenta:
+        espera = limite_cuenta.espera(cuenta)
+        msg = "Demasiados intentos fallidos para esta cuenta."
+    if espera:
+        cuando = f"{espera} segundos" if espera < 120 else f"{(espera + 59) // 60} minutos"
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail=f"{msg} Espere {cuando} y vuelva a intentarlo.",
+                            headers={"Retry-After": str(espera)})
+
+
+def _autenticar(request: Request, email: str, password: str, db: Session) -> dict:
+    ip, cuenta = _ip_cliente(request), (email or "").strip().lower()
+    _frenar_si_excede(ip, cuenta)
+    user = db.query(models.Usuario).filter(models.Usuario.email == email).first()
+    if not user or not auth.verify_password(password, user.hashed_password):
+        limite_ip.fallo(ip)
+        limite_cuenta.fallo(cuenta)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email o contraseña incorrectos")
     if not user.activo:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario inactivo")
+    limite_ip.limpiar(ip)
+    limite_cuenta.limpiar(cuenta)
     token = auth.create_access_token({"sub": user.email})
     return {
         "access_token": token,
         "token_type": "bearer",
         "user": auth._build_user_payload(user, db),
     }
+
+
+@router.post("/token", response_model=schemas.Token)
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    return _autenticar(request, form_data.username, form_data.password, db)
 
 
 @router.post("/login", response_model=schemas.Token)
-def login_json(data: schemas.LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(models.Usuario).filter(models.Usuario.email == data.email).first()
-    if not user or not auth.verify_password(data.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email o contraseña incorrectos")
-    if not user.activo:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario inactivo")
-    token = auth.create_access_token({"sub": user.email})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": auth._build_user_payload(user, db),
-    }
+def login_json(request: Request, data: schemas.LoginRequest, db: Session = Depends(get_db)):
+    return _autenticar(request, data.email, data.password, db)
 
 
 @router.get("/me")
@@ -67,10 +139,13 @@ def create_user(data: schemas.UsuarioCreate, db: Session = Depends(get_db),
 
 
 @router.post("/recover")
-def recover_admin(data: schemas.LoginRequest, db: Session = Depends(get_db)):
+def recover_admin(request: Request, data: schemas.LoginRequest, db: Session = Depends(get_db)):
     """Emergency: resets admin credentials when no users can log in.
     Only works when the usuarios table is empty (DB was wiped)."""
+    ip = _ip_cliente(request)
+    _frenar_si_excede(ip)
     if db.query(models.Usuario).count() > 0:
+        limite_ip.fallo(ip)
         raise HTTPException(status_code=403, detail="Operacion no permitida — ya existen usuarios")
     perfil = db.query(models.PerfilAcceso).filter(
         models.PerfilAcceso.nombre == "Administrador").first()
