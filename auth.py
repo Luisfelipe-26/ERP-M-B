@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Callable
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from database import get_db
@@ -120,6 +120,41 @@ def require_permission_any(module: str) -> Callable:
                 detail=f"Permisos insuficientes — se requiere acceso al módulo '{module}'",
             )
         return current_user
+    return _check
+
+
+_ACCIONES_METODO = {"POST": ("create", "update"), "PUT": ("update",), "PATCH": ("update",), "DELETE": ("delete",)}
+_VERBO = {"create": "crear", "update": "modificar", "delete": "eliminar"}
+
+
+def permiso_escritura(*modulos: str, por_ruta: Optional[dict] = None) -> Callable:
+    """Dependencia de router: crear, modificar o eliminar exige permiso en uno de `modulos`.
+
+    El frontend solo muestra una pantalla si el rol tiene su módulo, pero el API no lo
+    revisaba: cualquier usuario logueado podía escribir llamando a la ruta directamente.
+    Las lecturas pasan sin cambios. `por_ruta` ({prefijo: módulos}) cubre las pantallas que
+    escriben en rutas de otro módulo, como Efectivo y Banco al registrar pagos en
+    contabilidad.
+    """
+    reglas = sorted((por_ruta or {}).items(), key=lambda kv: -len(kv[0]))
+
+    def _check(request: Request, db: Session = Depends(get_db)):
+        acciones = _ACCIONES_METODO.get(request.method)
+        if not acciones:
+            return None
+        ruta = getattr(request.scope.get("route"), "path", request.url.path)
+        mods = next((m for prefijo, m in reglas if ruta.startswith(prefijo)), modulos)
+        encabezado = request.headers.get("authorization", "")
+        user = get_current_user(token=encabezado[7:] if encabezado.lower().startswith("bearer ") else "", db=db)
+        perms = _get_user_permissions(user)
+        if "*" in perms or any(f"{m}.{a}" in perms for m in mods for a in acciones):
+            return user
+        nombres = " o ".join(m.replace("_", " ").capitalize() for m in mods)
+        raise HTTPException(status_code=403, detail=(
+            f"Su rol no tiene permiso para {_VERBO[acciones[0]]} en {nombres}. "
+            "Un administrador puede asignarlo en Administración → Roles."))
+
+    _check.modulos = modulos
     return _check
 
 

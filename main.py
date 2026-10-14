@@ -1,6 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text, inspect, func
 from database import engine, SessionLocal
@@ -465,8 +465,9 @@ def seed_rbac():
         def all_perms():
             return [p.id for p in perms.values() if p.activo]
 
-        def perms_for(mods_subset):
-            return [p.id for p in perms.values() if p.activo and p.modulo in mods_subset]
+        def perms_for(mods_subset, acciones=None):
+            return [p.id for p in perms.values() if p.activo and p.modulo in mods_subset
+                    and (acciones is None or p.accion in acciones)]
 
         ADMIN_FULL = [
             "dashboard", "ordenes", "costos", "analytics", "nomina", "clima",
@@ -482,19 +483,35 @@ def seed_rbac():
             "efectivo_banco", "activos_fijos", "presupuesto", "cosecha", "ventas",
         ]
         SUPERVISOR_READ = ["nomina"]
-        OPERADOR_READ_WRITE = ["ordenes", "dashboard", "costos", "inventario", "actividades", "campos", "cosecha"]
+        OPERADOR_READ_WRITE = ["ordenes", "dashboard", "costos", "inventario", "actividades", "campos", "cosecha",
+                               "riego", "sanidad"]          # registros de campo
         OPERADOR_READ = [
-            "analytics", "nomina", "clima", "sanidad", "riego", "trabajadores",
+            "analytics", "nomina", "clima", "trabajadores",
             "productos", "contabilidad", "clientes", "proveedores", "presupuesto",
             "activos_fijos", "efectivo_banco", "compras",
         ]
 
+        # Antes las listas *_READ daban también crear, modificar y eliminar. Un rol que sigue
+        # exactamente como lo dejó ese error queda en solo lectura en esos módulos; si un
+        # administrador lo cambió, se respeta. Corregido, ya no coincide y no se repite.
+        for nombre, rw, solo_lectura in (("operador", OPERADOR_READ_WRITE, OPERADOR_READ),
+                                         ("supervisor", SUPERVISOR_READ_WRITE, SUPERVISOR_READ)):
+            rol = db.query(models.Rol).filter(models.Rol.nombre == nombre).first()
+            con_error = {i for i in perms_for(rw + solo_lectura)
+                         if db.query(models.Permiso).get(i).codigo not in nuevos}
+            if rol and con_error and {p.id for p in rol.permisos} == con_error:
+                rol.permisos = [p for p in rol.permisos if p.modulo not in solo_lectura or p.accion == "read"]
+                logging.getLogger(__name__).warning(
+                    "Rol %s: solo lectura en %s (antes podía crear, modificar y eliminar)", nombre, ", ".join(solo_lectura))
+        db.commit()
+
         default_roles = [
             ("admin", "Acceso total al sistema", True, all_perms()),
+            # Las listas *_READ daban también crear, modificar y eliminar: solo lectura.
             ("supervisor", "Supervisión de operaciones de campo y finanzas", False,
-             perms_for(SUPERVISOR_READ_WRITE) + perms_for(SUPERVISOR_READ)),
+             perms_for(SUPERVISOR_READ_WRITE) + perms_for(SUPERVISOR_READ, ("read",))),
             ("operador", "Acceso básico operativo", False,
-             perms_for(OPERADOR_READ_WRITE) + perms_for(OPERADOR_READ)),
+             perms_for(OPERADOR_READ_WRITE) + perms_for(OPERADOR_READ, ("read",))),
         ]
         for nombre, desc, es_sistema, perm_ids in default_roles:
             rol = db.query(models.Rol).filter(models.Rol.nombre == nombre).first()
@@ -633,34 +650,58 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+# Módulos de permisos que exige cada router para crear, modificar o eliminar: los de las
+# pantallas que escriben en él. Las lecturas solo piden sesión. Login y recuperación
+# (routers/auth) quedan públicos.
+_CXP = ("contabilidad", "compras", "efectivo_banco", "proveedores")
+PERMISOS_ESCRITURA = {
+    campos: auth_module.permiso_escritura("campos", "contabilidad"),     # Contabilidad: centros de costo
+    trabajadores: auth_module.permiso_escritura("trabajadores"),
+    actividades: auth_module.permiso_escritura("actividades"),
+    productos: auth_module.permiso_escritura("productos", "inventario"),
+    ordenes: auth_module.permiso_escritura("ordenes", por_ruta={
+        "/api/ordenes/{ot_id}/mano-obra": ("ordenes", "nomina")}),         # Nómina ajusta horas
+    dashboard: auth_module.permiso_escritura("dashboard"),
+    inventario: auth_module.permiso_escritura("inventario", "productos"),
+    reportes: auth_module.permiso_escritura("costos", "analytics"),
+    compras: auth_module.permiso_escritura("compras"),
+    audit_log: auth_module.permiso_escritura("admin"),
+    tipos_producto: auth_module.permiso_escritura("productos"),
+    categorias_producto: auth_module.permiso_escritura("productos", "contabilidad"),
+    cosecha: auth_module.permiso_escritura("cosecha"),
+    ventas: auth_module.permiso_escritura("ventas"),
+    proveedores: auth_module.permiso_escritura("proveedores"),
+    clima: auth_module.permiso_escritura("clima"),
+    sanidad: auth_module.permiso_escritura("sanidad"),
+    riego: auth_module.permiso_escritura("riego"),
+    analytics: auth_module.permiso_escritura("analytics"),
+    contabilidad: auth_module.permiso_escritura("contabilidad", por_ruta={
+        "/api/contabilidad/empresa": ("contabilidad", "configuracion"),
+        "/api/contabilidad/cxp": _CXP,
+        "/api/contabilidad/pagos": _CXP,
+        "/api/contabilidad/notas-credito": ("contabilidad", "compras", "efectivo_banco"),
+        "/api/contabilidad/cxc": ("contabilidad", "efectivo_banco"),
+        "/api/contabilidad/cobros": ("contabilidad", "efectivo_banco"),
+        "/api/contabilidad/conciliaciones": ("contabilidad", "efectivo_banco"),
+        "/api/contabilidad/activos-fijos": ("contabilidad", "activos_fijos"),
+        "/api/contabilidad/presupuesto": ("contabilidad", "presupuesto"),   # presupuestos y presupuestos-documento
+        "/api/contabilidad/registros-presupuestarios": ("contabilidad", "presupuesto"),
+        "/api/contabilidad/compromisos-presupuestarios": ("contabilidad", "presupuesto", "compras"),
+        "/api/contabilidad/entidad-dimensiones": ("contabilidad", "compras"),
+        "/api/contabilidad/nomina": ("contabilidad", "nomina"),
+    }),
+    clientes: auth_module.permiso_escritura("clientes"),
+    cuentas_bancarias: auth_module.permiso_escritura("efectivo_banco", "contabilidad"),
+    sequences: auth_module.permiso_escritura("configuracion", "admin"),
+    planificaciones: auth_module.permiso_escritura("ordenes", "planificacion"),
+    admin: auth_module.permiso_escritura("admin"),
+    roles: auth_module.permiso_escritura("admin"),
+}
+
 # Register all routers
 app.include_router(auth.router)
-app.include_router(campos.router)
-app.include_router(trabajadores.router)
-app.include_router(actividades.router)
-app.include_router(productos.router)
-app.include_router(ordenes.router)
-app.include_router(dashboard.router)
-app.include_router(inventario.router)
-app.include_router(reportes.router)
-app.include_router(compras.router)
-app.include_router(audit_log.router)
-app.include_router(tipos_producto.router)
-app.include_router(categorias_producto.router)
-app.include_router(cosecha.router)
-app.include_router(ventas.router)
-app.include_router(proveedores.router)
-app.include_router(clima.router)
-app.include_router(sanidad.router)
-app.include_router(riego.router)
-app.include_router(analytics.router)
-app.include_router(contabilidad.router)
-app.include_router(clientes.router)
-app.include_router(cuentas_bancarias.router)
-app.include_router(sequences.router)
-app.include_router(planificaciones.router)
-app.include_router(admin.router)
-app.include_router(roles.router)
+for _modulo, _permiso in PERMISOS_ESCRITURA.items():
+    app.include_router(_modulo.router, dependencies=[Depends(_permiso)])
 
 
 @app.get("/")
