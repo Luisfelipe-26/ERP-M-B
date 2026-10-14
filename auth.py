@@ -29,6 +29,39 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
+MIN_CONTRASENA = 10
+# Palabras que cualquiera probaría primero: el nombre de la empresa, del sistema o del cultivo.
+_PALABRAS_OBVIAS = ("password", "contraseña", "contrasena", "corvus", "vision", "agricola",
+                    "aguacate", "admin", "123456", "qwerty", "abc123")
+
+
+def problemas_contrasena(password: str, email: str = "", nombre: str = "") -> list:
+    """Lo que le falta a una contraseña para ser aceptable; lista vacía si cumple."""
+    p = password or ""
+    bajo = p.lower()
+    problemas = []
+    if len(p) < MIN_CONTRASENA:
+        problemas.append(f"tener al menos {MIN_CONTRASENA} caracteres")
+    if len(p.encode("utf-8")) > 72:
+        problemas.append("tener como máximo 72 caracteres")           # bcrypt ignora el resto
+    if not any(c.isalpha() for c in p) or not any(c.isdigit() for c in p):
+        problemas.append("combinar letras y números")
+    if p and len(set(p)) < 4:
+        problemas.append("no repetir los mismos caracteres")
+    personales = [(email or "").split("@")[0].lower()] + [w.lower() for w in (nombre or "").split()]
+    if any(len(w) >= 3 and w in bajo for w in personales):
+        problemas.append("no incluir el nombre ni el correo del usuario")
+    if any(w in bajo for w in _PALABRAS_OBVIAS):
+        problemas.append("no incluir palabras obvias (corvus, admin, aguacate, 123456…)")
+    return problemas
+
+
+def exigir_contrasena_segura(password: str, email: str = "", nombre: str = ""):
+    problemas = problemas_contrasena(password, email, nombre)
+    if problemas:
+        raise HTTPException(status_code=400, detail="La contraseña debe " + "; ".join(problemas) + ".")
+
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))

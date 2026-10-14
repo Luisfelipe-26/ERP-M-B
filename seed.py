@@ -4,7 +4,7 @@ import secrets
 
 from database import SessionLocal, engine
 import models
-from auth import get_password_hash
+from auth import get_password_hash, problemas_contrasena
 
 models.Base.metadata.create_all(bind=engine)
 db = SessionLocal()
@@ -20,7 +20,9 @@ users = [
 creados = []
 for nombre, email, variable, rol in users:
     if not db.query(models.Usuario).filter_by(email=email).first():
-        pwd = os.environ.get(variable) or secrets.token_urlsafe(12)
+        pwd = os.environ.get(variable) or secrets.token_urlsafe(12) + "7"    # siempre lleva un número
+        if problemas_contrasena(pwd, email, nombre):
+            print(f"Aviso: la contraseña de {variable} es débil: debe {'; '.join(problemas_contrasena(pwd, email, nombre))}")
         db.add(models.Usuario(nombre=nombre, email=email, hashed_password=get_password_hash(pwd), rol=rol))
         creados.append((email, pwd if not os.environ.get(variable) else f"(la de {variable})"))
 

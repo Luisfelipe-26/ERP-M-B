@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from auth import get_current_user, require_admin, get_password_hash, _get_user_permissions
+from auth import get_current_user, require_admin, get_password_hash, _get_user_permissions, exigir_contrasena_segura
 import models
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -103,6 +103,7 @@ def crear_usuario(data: dict, db: Session = Depends(get_db), user=Depends(requir
     exists = db.query(models.Usuario).filter(models.Usuario.email == data["email"]).first()
     if exists:
         raise HTTPException(400, f"Ya existe un usuario con email '{data['email']}'")
+    exigir_contrasena_segura(data["password"], data["email"], data["nombre"])
     rol = data.get("rol", "operador")
     u = models.Usuario(
         nombre=data["nombre"],
@@ -167,6 +168,7 @@ def reset_password(usuario_id: int, data: dict, db: Session = Depends(get_db),
         raise HTTPException(404, "Usuario no encontrado")
     if not data.get("password"):
         raise HTTPException(400, "password es requerido")
+    exigir_contrasena_segura(data["password"], u.email, u.nombre)
     u.hashed_password = get_password_hash(data["password"])
     db.commit()
     return {"ok": True, "msg": f"Contraseña de {u.nombre} actualizada"}

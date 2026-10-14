@@ -555,6 +555,9 @@ def seed_admin():
     admin_pass = os.environ.get("ADMIN_PASSWORD")
     if not admin_pass:
         return
+    debil = auth_module.problemas_contrasena(admin_pass, admin_email)
+    if debil:
+        logging.getLogger(__name__).warning("ADMIN_PASSWORD es débil: debe %s", "; ".join(debil))
     db = SessionLocal()
     try:
         exists = db.query(models.Usuario).filter(models.Usuario.email == admin_email).first()

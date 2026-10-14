@@ -120,6 +120,7 @@ def create_user(data: schemas.UsuarioCreate, db: Session = Depends(get_db),
                 current_user: models.Usuario = Depends(auth.require_admin)):
     if db.query(models.Usuario).filter(models.Usuario.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email ya registrado")
+    auth.exigir_contrasena_segura(data.password, data.email, data.nombre)
     user = models.Usuario(
         nombre=data.nombre,
         email=data.email,
@@ -147,6 +148,7 @@ def recover_admin(request: Request, data: schemas.LoginRequest, db: Session = De
     if db.query(models.Usuario).count() > 0:
         limite_ip.fallo(ip)
         raise HTTPException(status_code=403, detail="Operacion no permitida — ya existen usuarios")
+    auth.exigir_contrasena_segura(data.password, data.email)
     perfil = db.query(models.PerfilAcceso).filter(
         models.PerfilAcceso.nombre == "Administrador").first()
     user = models.Usuario(
