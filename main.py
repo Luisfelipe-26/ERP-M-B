@@ -674,5 +674,7 @@ def health_check():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return {"status": "ok", "database": "connected"}
-    except Exception as e:
-        return {"status": "degraded", "database": str(e)}
+    except Exception:
+        # El motivo (host, usuario, error del driver) va al log, no a una respuesta pública.
+        logging.getLogger(__name__).exception("Health check: la base de datos no responde")
+        return {"status": "degraded", "database": "error"}

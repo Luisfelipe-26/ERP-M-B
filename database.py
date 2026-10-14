@@ -4,10 +4,13 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 # PostgreSQL connection (migrated from SQLite for robustness)
 # Format: postgresql://user:password@host:port/database
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:Corvus2024!@127.0.0.1:5432/corvus_finca"
-)
+# En Render la define el servicio. En local, defina DATABASE_URL o, con el valor por
+# defecto, la contraseña en PGPASSWORD: nunca en el código, que el repositorio es público.
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    if os.environ.get("RENDER"):
+        raise RuntimeError("Falta la variable de entorno DATABASE_URL")
+    DATABASE_URL = "postgresql://postgres@127.0.0.1:5432/corvus_finca"
 
 # Driver explícito: SQLAlchemy 2.1 cambió el de por defecto para "postgresql://" de
 # psycopg2 a psycopg (v3), que no está instalado, y el arranque moría sin conectar.

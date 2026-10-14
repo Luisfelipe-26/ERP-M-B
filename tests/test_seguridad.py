@@ -123,7 +123,34 @@ def test_documentacion_apagada_en_produccion():
     from pathlib import Path
     codigo = "import main; print(main.app.docs_url, main.app.redoc_url, main.app.openapi_url)"
     env = {k: v for k, v in os.environ.items() if k != "ENV"}
-    prod = subprocess.run([sys.executable, "-c", codigo], env={**env, "RENDER": "true"},
+    prod = subprocess.run([sys.executable, "-c", codigo], env={**env, "RENDER": "true", "DATABASE_URL": "sqlite://", "CORVUS_SECRET_KEY": "clave-de-prueba"},
                           cwd=Path(__file__).parent.parent, capture_output=True, text=True, timeout=120)
     assert prod.stdout.strip().splitlines()[-1] == "None None None", prod.stderr[-500:]
     assert app.docs_url == "/docs" and app.openapi_url == "/openapi.json"
+
+
+def test_health_no_expone_el_error_de_la_base(cliente, monkeypatch):
+    import main
+
+    class Caida:
+        def connect(self):
+            raise RuntimeError('password authentication failed for user "postgres" host=10.0.0.5')
+
+    monkeypatch.setattr(main, "engine", Caida())
+    r = cliente.get("/health")
+    assert r.json() == {"status": "degraded", "database": "error"}
+    assert "postgres" not in r.text and "10.0.0.5" not in r.text
+
+
+def test_sin_contrasena_en_el_codigo():
+    """Sin DATABASE_URL, en Render no arranca con una base inventada; en local usa PGPASSWORD."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    raiz = Path(__file__).parent.parent
+    assert "Corvus2024" not in (raiz / "database.py").read_text(encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+    r = subprocess.run([sys.executable, "-c", "import database"], env={**env, "RENDER": "true"},
+                       cwd=raiz, capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0 and "Falta la variable de entorno DATABASE_URL" in r.stderr
