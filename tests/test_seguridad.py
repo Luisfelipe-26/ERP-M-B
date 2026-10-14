@@ -149,7 +149,10 @@ def test_sin_contrasena_en_el_codigo():
     import sys
     from pathlib import Path
     raiz = Path(__file__).parent.parent
-    assert "Corvus2024" not in (raiz / "database.py").read_text(encoding="utf-8")
+    for archivo in ("database.py", "seed.py", "main.py"):
+        texto = (raiz / archivo).read_text(encoding="utf-8")
+        for clave in ("Corvus2024", "Super2024", "Oper2024"):
+            assert clave not in texto, f"{clave} en {archivo}"
     env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
     r = subprocess.run([sys.executable, "-c", "import database"], env={**env, "RENDER": "true"},
                        cwd=raiz, capture_output=True, text=True, timeout=120)

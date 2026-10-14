@@ -1,4 +1,7 @@
 """Seed completo basado en Excel CORVUS 1ra Quincena Junio"""
+import os
+import secrets
+
 from database import SessionLocal, engine
 import models
 from auth import get_password_hash
@@ -6,15 +9,20 @@ from auth import get_password_hash
 models.Base.metadata.create_all(bind=engine)
 db = SessionLocal()
 
-# Usuarios
+# Usuarios. Las contraseñas no van en el código (el repositorio es público): se toman de
+# ADMIN_PASSWORD, SUPERVISOR_PASSWORD y OPERADOR_PASSWORD o, si faltan, se generan al azar
+# y se muestran una sola vez al final.
 users = [
-    ("Administrador CORVUS", "admin@corvus.do", "Corvus2024!", "admin"),
-    ("Supervisor Finca", "supervisor@corvus.do", "Super2024!", "supervisor"),
-    ("Operador Finca", "operador@corvus.do", "Oper2024!", "operador"),
+    ("Administrador CORVUS", "admin@corvus.do", "ADMIN_PASSWORD", "admin"),
+    ("Supervisor Finca", "supervisor@corvus.do", "SUPERVISOR_PASSWORD", "supervisor"),
+    ("Operador Finca", "operador@corvus.do", "OPERADOR_PASSWORD", "operador"),
 ]
-for nombre, email, pwd, rol in users:
+creados = []
+for nombre, email, variable, rol in users:
     if not db.query(models.Usuario).filter_by(email=email).first():
+        pwd = os.environ.get(variable) or secrets.token_urlsafe(12)
         db.add(models.Usuario(nombre=nombre, email=email, hashed_password=get_password_hash(pwd), rol=rol))
+        creados.append((email, pwd if not os.environ.get(variable) else f"(la de {variable})"))
 
 # 17 Campos productivos (datos del Excel CAT_Campos)
 campos_data = [
@@ -227,7 +235,9 @@ print(f"  - 20 trabajadores")
 print(f"  - 25 actividades")
 print(f"  - 30 productos")
 print()
-print("Credenciales:")
-print("  Admin:      admin@corvus.do      / Corvus2024!")
-print("  Supervisor: supervisor@corvus.do  / Super2024!")
-print("  Operador:   operador@corvus.do   / Oper2024!")
+if creados:
+    print("Usuarios creados (anote las contraseñas generadas: no se vuelven a mostrar):")
+    for email, pwd in creados:
+        print(f"  {email:<24} {pwd}")
+else:
+    print("Los usuarios ya existían: sus contraseñas no se tocaron.")
