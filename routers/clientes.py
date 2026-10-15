@@ -40,8 +40,6 @@ def ver_cliente(id: int, db: Session = Depends(get_db), user=Depends(get_current
 @router.post("")
 def crear_cliente(data: schemas.ClienteCreate, db: Session = Depends(get_db),
                   user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     id_cliente = get_next_cli(db)
     cliente = models.Cliente(id_cliente=id_cliente, **data.model_dump())
     db.add(cliente)
@@ -53,8 +51,6 @@ def crear_cliente(data: schemas.ClienteCreate, db: Session = Depends(get_db),
 @router.put("/{id}")
 def actualizar_cliente(id: int, data: schemas.ClienteCreate,
                        db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     c = db.query(models.Cliente).get(id)
     if not c:
         raise HTTPException(404, "Cliente no encontrado")

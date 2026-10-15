@@ -5,8 +5,10 @@ from collections import deque
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db
+import audit
 import models, schemas, auth
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -108,6 +110,35 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
 @router.post("/login", response_model=schemas.Token)
 def login_json(request: Request, data: schemas.LoginRequest, db: Session = Depends(get_db)):
     return _autenticar(request, data.email, data.password, db)
+
+
+class CambioContrasena(BaseModel):
+    actual: str
+    nueva: str
+
+
+@router.post("/cambiar-contrasena")
+def cambiar_contrasena(data: CambioContrasena, request: Request, db: Session = Depends(get_db),
+                       user: models.Usuario = Depends(auth.get_current_user)):
+    """Cada usuario cambia su propia contraseña: pide la actual y aplica la política.
+
+    La clave actual equivocada responde 400, no 401: el frontend cierra la sesión ante un 401.
+    Los intentos fallidos cuentan como en el login, para que una sesión abierta y olvidada
+    no sirva para adivinar la contraseña.
+    """
+    ip, cuenta = _ip_cliente(request), user.email.lower()
+    _frenar_si_excede(ip, cuenta)
+    if not auth.verify_password(data.actual, user.hashed_password):
+        limite_ip.fallo(ip)
+        limite_cuenta.fallo(cuenta)
+        raise HTTPException(status_code=400, detail="La contraseña actual no es correcta")
+    if data.nueva == data.actual:
+        raise HTTPException(status_code=400, detail="La contraseña nueva debe ser distinta de la actual")
+    auth.exigir_contrasena_segura(data.nueva, user.email, user.nombre)
+    user.hashed_password = auth.get_password_hash(data.nueva)
+    audit.log(db, user, "CAMBIAR_CONTRASENA", "USUARIO", user.email, f"{user.nombre} cambió su contraseña")
+    db.commit()
+    return {"ok": True, "msg": "Contraseña actualizada"}
 
 
 @router.get("/me")

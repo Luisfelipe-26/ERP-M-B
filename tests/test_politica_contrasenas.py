@@ -107,3 +107,53 @@ def test_recuperacion_de_emergencia_tambien(monkeypatch):
     finally:
         main.app.dependency_overrides.clear()
         db.close()
+
+
+# ─── Cada usuario cambia su propia contraseña ────────────────────────────────
+
+def _con_clave(db, email, clave):
+    u = models.Usuario(nombre="Rosa Díaz", email=email, hashed_password=auth.get_password_hash(clave),
+                       rol="operador", activo=True)
+    u.roles = [db.query(models.Rol).filter_by(nombre="operador").one()]
+    db.add(u)
+    db.commit()
+    return u, {"Authorization": f"Bearer {auth.create_access_token({'sub': email})}"}
+
+
+def test_un_usuario_cambia_su_propia_contrasena(entorno):
+    db, c, _ = entorno
+    u, h = _con_clave(db, "rosa@test.local", "Clave-vieja-2025")
+    r = c.post("/api/auth/cambiar-contrasena", json={"actual": "Clave-vieja-2025", "nueva": "Lote7-riego-norte"}, headers=h)
+    assert r.status_code == 200
+    db.refresh(u)
+    assert auth.verify_password("Lote7-riego-norte", u.hashed_password)
+    assert c.post("/api/auth/login", json={"email": "rosa@test.local", "password": "Lote7-riego-norte"}).status_code == 200
+
+
+@pytest.mark.parametrize("actual,nueva,msg", [
+    ("otra-cosa-123", "Lote7-riego-norte", "actual no es correcta"),
+    ("Clave-vieja-2025", "Clave-vieja-2025", "distinta de la actual"),
+    ("Clave-vieja-2025", "rosa2026diaz", "nombre ni el correo"),
+    ("Clave-vieja-2025", "corta1", "al menos 10"),
+])
+def test_cambio_rechazado(entorno, actual, nueva, msg):
+    db, c, _ = entorno
+    u, h = _con_clave(db, "rosa@test.local", "Clave-vieja-2025")
+    r = c.post("/api/auth/cambiar-contrasena", json={"actual": actual, "nueva": nueva}, headers=h)
+    assert r.status_code == 400 and msg in r.json()["detail"], "400 y no 401: un 401 cerraría la sesión"
+    db.refresh(u)
+    assert auth.verify_password("Clave-vieja-2025", u.hashed_password), "la clave no cambió"
+
+
+def test_adivinar_la_actual_tiene_limite(entorno):
+    db, c, _ = entorno
+    _, h = _con_clave(db, "rosa@test.local", "Clave-vieja-2025")
+    for _ in range(5):
+        c.post("/api/auth/cambiar-contrasena", json={"actual": "mala-mala-1", "nueva": "Lote7-riego-norte"}, headers=h)
+    r = c.post("/api/auth/cambiar-contrasena", json={"actual": "Clave-vieja-2025", "nueva": "Lote7-riego-norte"}, headers=h)
+    assert r.status_code == 429
+
+
+def test_sin_sesion_no_se_cambia(entorno):
+    _, c, _ = entorno
+    assert c.post("/api/auth/cambiar-contrasena", json={"actual": "x", "nueva": "Lote7-riego-norte"}).status_code == 401

@@ -208,39 +208,41 @@ def permiso_modulo(*modulos: str, por_ruta: Optional[dict] = None) -> Callable:
     return _check
 
 
-# ── Legacy helpers (kept for backward compat, now check RBAC first) ────────
+# ── Niveles de rol (admin, supervisor, contador) ───────────────────────────
+# Para lo que es jerarquía y no permiso de módulo: anular, cerrar períodos, autorizar un
+# sobregiro. Antes se miraba el texto `usuario.rol`, que Administración copia del primer rol
+# asignado por orden alfabético: alguien con "contador" y "supervisor" quedaba como
+# "contador" y no podía hacer lo de supervisor. Ahora cuentan todos los roles asignados.
+
+def roles_de(user: models.Usuario) -> set:
+    """Nombres de los roles asignados; el texto `rol` solo si no tiene ninguno (usuarios viejos)."""
+    nombres = {r.nombre.strip().lower() for r in user.roles if r.activo}
+    return nombres or {(user.rol or "").strip().lower()}
+
+
+def tiene_rol(user: models.Usuario, *nombres: str) -> bool:
+    """True si el usuario tiene alguno de esos roles, o es administrador."""
+    perms = _get_user_permissions(user)
+    if "*" in perms or any(p.startswith("admin.") for p in perms):
+        return True
+    return bool(roles_de(user) & {n.lower() for n in nombres})
+
 
 def require_admin(current_user: models.Usuario = Depends(get_current_user)):
-    """Require admin role. Checks both legacy rol field and RBAC roles."""
-    user_perms = _get_user_permissions(current_user)
-    if "*" in user_perms:
-        return current_user
-    if any(p.startswith("admin.") for p in user_perms):
-        return current_user
-    if current_user.rol in ["admin"]:
+    if tiene_rol(current_user, "admin"):
         return current_user
     raise HTTPException(status_code=403, detail="Permisos insuficientes — se requiere rol Admin")
 
 
 def require_supervisor(current_user: models.Usuario = Depends(get_current_user)):
-    """Supervisor or Admin — for inventory movements (GI, AJ), OC management."""
-    user_perms = _get_user_permissions(current_user)
-    if "*" in user_perms:
-        return current_user
-    if any(p.startswith("admin.") for p in user_perms):
-        return current_user
-    if current_user.rol in ["admin", "supervisor"]:
+    """Supervisor o admin: anular, ajustar inventario, aprobar compras y otras acciones de mando."""
+    if tiene_rol(current_user, "admin", "supervisor"):
         return current_user
     raise HTTPException(status_code=403, detail="Permisos insuficientes — se requiere rol Supervisor o Admin")
 
 
 def require_operador(current_user: models.Usuario = Depends(get_current_user)):
-    """Operador, Supervisor or Admin — for inventory entries (GR)."""
-    user_perms = _get_user_permissions(current_user)
-    if "*" in user_perms:
-        return current_user
-    if any(p.startswith("admin.") for p in user_perms):
-        return current_user
-    if current_user.rol in ["admin", "supervisor", "operador"]:
-        return current_user
-    raise HTTPException(status_code=403, detail="Permisos insuficientes — se requiere rol Operador, Supervisor o Admin")
+    """Cualquier usuario con sesión. Lo que puede registrar lo deciden los permisos del módulo
+    (main.PERMISOS_MODULO); antes también exigía el texto de rol admin, supervisor u
+    operador, y un rol propio (p. ej. "Jefe de campo") no podía registrar cosechas."""
+    return current_user

@@ -644,7 +644,7 @@ def aprobar_oc(oc_id: str, override: bool = Query(False),
                 "detalle": ver.get("detalle", []),
                 "requiere_override": True,
             })
-        if ver.get("bloqueado") and override and current_user.rol != "admin":
+        if ver.get("bloqueado") and override and not auth.tiene_rol(current_user, "admin"):
             raise HTTPException(403, "Solo un administrador puede autorizar sobregiro presupuestario")
 
         for e in entradas:
@@ -858,7 +858,7 @@ def _registrar_factura(db: Session, oc, prov, data: FacturaPayload, user):
                 raise HTTPException(400, (
                     f"{nombre}: la factura cobra {precio:,.2f} por unidad y la OC dice {precio_oc:,.2f} "
                     f"(más de {TOL_PRECIO:.0%} de diferencia). Si es correcto, un administrador puede aceptarla."))
-            if user.rol != "admin":
+            if not auth.tiene_rol(user, "admin"):
                 raise HTTPException(403, "Solo un administrador puede aceptar una diferencia de precio fuera de tolerancia")
 
         recibido = Decimal(str(round(item.cantidad * precio_oc, 2)))

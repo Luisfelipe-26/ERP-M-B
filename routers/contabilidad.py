@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func as sqlfunc, cast, Date as SqlDate, and_, extract
 from database import get_db
-from auth import get_current_user, require_admin, _get_user_permissions
+from auth import get_current_user, require_admin, _get_user_permissions, tiene_rol
 from datetime import date, datetime, timedelta
 from calendar import monthrange
 from decimal import Decimal
@@ -884,8 +884,8 @@ def ver_asiento(numero: str, db: Session = Depends(get_db), user=Depends(get_cur
 @router.post("/asientos")
 def crear_asiento(data: schemas.AsientoContableCreate, db: Session = Depends(get_db),
                   user=Depends(get_current_user)):
-    if user.rol not in ("admin", "supervisor"):
-        raise HTTPException(403, "Solo admin o supervisor pueden crear asientos manuales")
+    if not tiene_rol(user, "admin", "supervisor", "contador"):
+        raise HTTPException(403, "Solo admin, supervisor o contador pueden crear asientos manuales")
     if not data.lineas or len(data.lineas) < 2:
         raise HTTPException(400, "Un asiento requiere al menos 2 líneas")
 
@@ -1094,8 +1094,6 @@ def libro_mayor(
     skip: int = 0, limit: int = 100,
     db: Session = Depends(get_db), user=Depends(get_current_user)
 ):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.LineaAsiento).join(models.AsientoContable).filter(
         models.AsientoContable.estado.in_(ESTADOS_EN_LIBROS)
     )
@@ -1152,8 +1150,6 @@ def balance_comprobacion(periodo_id: int = None, anio: int = None, mes: int = No
                          campo_id: str = None, unidad_negocio_id: int = None,
                          departamento_id: int = None, almacen_id: int = None,
                          db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
 
     if periodo_id:
         periodos = [db.query(models.PeriodoContable).get(periodo_id)]
@@ -1233,8 +1229,6 @@ def balance_general(anio: int = None, mes: int = None,
                     campo_id: str = None, unidad_negocio_id: int = None,
                     departamento_id: int = None, almacen_id: int = None,
                     db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     if not anio:
         anio = date.today().year
     if not mes:
@@ -1403,8 +1397,6 @@ def estado_resultados(anio: int = None, mes: int = None, campo_id: str = None,
                       unidad_negocio_id: int = None, departamento_id: int = None,
                       almacen_id: int = None,
                       db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     if not anio:
         anio = date.today().year
 
@@ -1598,8 +1590,6 @@ def actualizar_empresa(data: schemas.ConfiguracionEmpresaUpdate,
 @router.get("/cxp")
 def listar_cxp(estado: str = None, skip: int = 0, limit: int = 100,
                db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.CuentaPorPagar)
     if estado:
         q = q.filter(models.CuentaPorPagar.estado == estado)
@@ -1617,8 +1607,6 @@ def listar_cxp(estado: str = None, skip: int = 0, limit: int = 100,
 @router.get("/cxp/{cxp_id}")
 def detalle_cxp(cxp_id: int, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     cxp = db.query(models.CuentaPorPagar).get(cxp_id)
     if not cxp:
         raise HTTPException(404, "CxP no encontrada")
@@ -1687,8 +1675,6 @@ def _calcular_cxp_desde_lineas(lineas_data, prov):
 def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
               db: Session = Depends(get_db),
               user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
 
     prov = db.query(models.Proveedor).get(data.proveedor_id)
     if not prov:
@@ -1733,7 +1719,7 @@ def crear_cxp(data: schemas.CuentaPorPagarCreate, override: bool = Query(False),
                     "detalle": ver["detalle"],
                     "requiere_override": True,
                 })
-            if ver["bloqueado"] and override and user.rol != "admin":
+            if ver["bloqueado"] and override and not tiene_rol(user, "admin"):
                 raise HTTPException(403, "Solo un administrador puede autorizar sobregiro presupuestario")
 
     numero = get_next("CXP", db)
@@ -2014,8 +2000,6 @@ def _devengar_cxp_contra_compromisos(db: Session, cxp, user) -> Decimal:
 def validar_cxp(cxp_id: int, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
     """Three-way match: factura vs OC vs recepción. Marca compromiso como ejecutado."""
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
 
     cxp = db.query(models.CuentaPorPagar).get(cxp_id)
     if not cxp:
@@ -2109,7 +2093,7 @@ def datos_fiscales_cxp(cxp_id: int, data: DatosFiscalesCxP, db: Session = Depend
     NCF equivocado de una factura con pagos se corrige con este mismo endpoint.
     """
     from routers.compras import TIPOS_NCF_COMPRA, _normalizar_ncf
-    if user.rol not in ("admin", "supervisor", "contador"):
+    if not tiene_rol(user, "admin", "supervisor", "contador"):
         raise HTTPException(403, "Solo admin, supervisor o contador")
     cxp = db.query(models.CuentaPorPagar).get(cxp_id)
     if not cxp or cxp.estado == "anulada":
@@ -2137,7 +2121,7 @@ def anular_cxp(cxp_id: int, motivo: str = Query(..., min_length=5), db: Session 
     Revierte su asiento, devuelve a "recibido sin facturar" lo que venía de una OC y
     deshace el devengado presupuestario, reponiendo el compromiso de la OC.
     """
-    if user.rol not in ("admin", "supervisor", "contador"):
+    if not tiene_rol(user, "admin", "supervisor", "contador"):
         raise HTTPException(403, "Solo admin, supervisor o contador pueden anular facturas")
     cxp = db.query(models.CuentaPorPagar).get(cxp_id)
     if not cxp:
@@ -2212,8 +2196,6 @@ def anular_cxp(cxp_id: int, motivo: str = Query(..., min_length=5), db: Session 
 @router.post("/pagos")
 def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
                    user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     cxp = db.query(models.CuentaPorPagar).get(data.cxp_id)
     if not cxp:
         raise HTTPException(404, "CxP no encontrada")
@@ -2289,8 +2271,6 @@ def registrar_pago(data: schemas.PagoCreate, db: Session = Depends(get_db),
 @router.get("/pagos")
 def listar_pagos(cxp_id: int = None, skip: int = 0, limit: int = 50,
                  db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.Pago)
     if cxp_id:
         q = q.filter(models.Pago.cxp_id == cxp_id)
@@ -2305,8 +2285,6 @@ def listar_pagos(cxp_id: int = None, skip: int = 0, limit: int = 50,
 @router.post("/notas-credito")
 def crear_nota_credito(data: schemas.NotaCreditoCreate, db: Session = Depends(get_db),
                        user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
 
     prov = db.query(models.Proveedor).get(data.proveedor_id)
     if not prov:
@@ -2408,8 +2386,6 @@ def listar_notas_credito(
     skip: int = 0, limit: int = 100,
     db: Session = Depends(get_db), user=Depends(get_current_user),
 ):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.NotaCredito)
     if tipo:
         q = q.filter(models.NotaCredito.tipo == tipo)
@@ -2434,8 +2410,6 @@ def listar_notas_credito(
 @router.get("/notas-credito/{nc_id}")
 def detalle_nota_credito(nc_id: int, db: Session = Depends(get_db),
                          user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     nc = db.query(models.NotaCredito).get(nc_id)
     if not nc:
         raise HTTPException(404, "Nota de crédito no encontrada")
@@ -2455,8 +2429,6 @@ def detalle_nota_credito(nc_id: int, db: Session = Depends(get_db),
 @router.get("/cxc")
 def listar_cxc(estado: str = None, skip: int = 0, limit: int = 100,
                db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.CuentaPorCobrar)
     if estado:
         q = q.filter(models.CuentaPorCobrar.estado == estado)
@@ -2566,8 +2538,6 @@ def _registrar_cxc(db: Session, data: schemas.CuentaPorCobrarCreate, user, orige
 @router.post("/cxc")
 def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db),
               user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     try:
         cxc, asiento = _registrar_cxc(db, data, user)
         db.commit()
@@ -2590,8 +2560,6 @@ def crear_cxc(data: schemas.CuentaPorCobrarCreate, db: Session = Depends(get_db)
 @router.post("/cobros")
 def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
                     user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     cxc = db.query(models.CuentaPorCobrar).get(data.cxc_id)
     if not cxc:
         raise HTTPException(404, "CxC no encontrada")
@@ -2705,8 +2673,6 @@ def registrar_cobro(data: schemas.CobroCreate, db: Session = Depends(get_db),
 @router.get("/cobros")
 def listar_cobros(cxc_id: int = None, skip: int = 0, limit: int = 50,
                   db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.Cobro)
     if cxc_id:
         q = q.filter(models.Cobro.cxc_id == cxc_id)
@@ -2784,8 +2750,6 @@ def _enrich_activo(a: models.ActivoFijo, db: Session) -> dict:
 @router.get("/activos-fijos")
 def listar_activos(categoria: str = None, campo_id: str = None,
                    db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.ActivoFijo).filter(models.ActivoFijo.activo == True)
     if categoria:
         q = q.filter(models.ActivoFijo.categoria == categoria)
@@ -2796,8 +2760,6 @@ def listar_activos(categoria: str = None, campo_id: str = None,
 
 @router.get("/activos-fijos/{id}")
 def ver_activo(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     a = db.query(models.ActivoFijo).get(id)
     if not a:
         raise HTTPException(404, "Activo no encontrado")
@@ -2942,8 +2904,6 @@ def antiguedad_cxp(
     agrupar: bool = False,
     db: Session = Depends(get_db), user=Depends(get_current_user),
 ):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     hoy = date.today()
     q = db.query(models.CuentaPorPagar).filter(
         models.CuentaPorPagar.estado.notin_(["pagada", "anulada"])
@@ -3025,8 +2985,6 @@ def antiguedad_cxc(
     agrupar: bool = False,
     db: Session = Depends(get_db), user=Depends(get_current_user),
 ):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     hoy = date.today()
     q = db.query(models.CuentaPorCobrar).filter(
         models.CuentaPorCobrar.estado.notin_(["cobrada", "anulada"])
@@ -3108,8 +3066,6 @@ def antiguedad_cxc(
 @router.get("/presupuestos")
 def listar_presupuestos(anio: int = None, db: Session = Depends(get_db),
                         user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.Presupuesto)
     if anio:
         q = q.filter(models.Presupuesto.anio == anio)
@@ -3192,8 +3148,6 @@ def presupuesto_vs_real(anio: int = Query(...), campo_id: str = None,
                         unidad_negocio_id: int = None, departamento_id: int = None,
                         escenario: str = "principal",
                         db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.Presupuesto).filter(
         models.Presupuesto.anio == anio,
         models.Presupuesto.estado == "aprobado",
@@ -3327,8 +3281,6 @@ def presupuesto_drill_down(
     anio: int = Query(...), cuenta_id: int = Query(...),
     db: Session = Depends(get_db), user=Depends(get_current_user)
 ):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     from sqlalchemy import extract
     lineas = (
         db.query(models.LineaAsiento)
@@ -3393,8 +3345,6 @@ def transferir_presupuesto(data: schemas.TransferenciaPresupuestoIn,
 @router.get("/presupuestos/transferencias")
 def listar_transferencias(anio: int = Query(...), db: Session = Depends(get_db),
                           user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     pres_ids = [p.id for p in db.query(models.Presupuesto.id).filter(
         models.Presupuesto.anio == anio).all()]
     if not pres_ids:
@@ -3549,8 +3499,6 @@ def _registrar_mov_pres(db, *, tipo: str, fecha, cuenta_id: int, monto,
 def listar_mov_pres(anio: int = Query(...), tipo: str = None, cuenta_id: int = None,
                     origen_id: str = None, skip: int = 0, limit: int = 200,
                     db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.MovimientoPresupuestario).filter(
         models.MovimientoPresupuestario.anio == anio)
     if tipo:
@@ -3588,8 +3536,6 @@ def ejecucion_presupuestaria(anio: int = Query(...),
     el consumo, de MovimientoPresupuestario. `mes=N` acumula enero..N (YTD); sin `mes`, el año completo.
     `agrupar=linea` abre por cuenta + dimensiones; `agrupar=cuenta` consolida por cuenta.
     """
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
 
     hasta_mes = mes or 12
     por_linea = agrupar == "linea"
@@ -3682,8 +3628,6 @@ def ejecucion_presupuestaria_detalle(
     db: Session = Depends(get_db), user=Depends(get_current_user),
 ):
     """Documentos que componen una línea presupuestaria: las OC y facturas detrás del saldo."""
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
 
     M = models.MovimientoPresupuestario
     q = db.query(M).filter(M.anio == anio, M.mes <= (mes or 12), M.cuenta_id == cuenta_id)
@@ -4343,8 +4287,6 @@ def _build_lookups(db, lineas):
 def listar_registros_presupuestarios(anio: int = None, tipo: str = None,
                                      db: Session = Depends(get_db),
                                      user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.RegistroPresupuestario)
     if anio:
         q = q.filter(models.RegistroPresupuestario.anio == anio)
@@ -4383,8 +4325,6 @@ def listar_registros_presupuestarios(anio: int = None, tipo: str = None,
 @router.get("/registros-presupuestarios/{id}")
 def obtener_registro_presupuestario(id: int, db: Session = Depends(get_db),
                                     user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     r = db.query(models.RegistroPresupuestario).options(
         joinedload(models.RegistroPresupuestario.lineas)).get(id)
     if not r:
@@ -4425,8 +4365,6 @@ def saldo_linea_presupuesto(
     db: Session = Depends(get_db), user=Depends(get_current_user),
 ):
     """Retorna presupuestado, ejecutado y disponible para una cuenta+dimensión."""
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.Presupuesto).filter(
         models.Presupuesto.anio == anio,
         models.Presupuesto.estado == "aprobado",
@@ -4689,8 +4627,6 @@ def actualizar_config_presupuesto(data: schemas.ConfigPresupuestoIn,
 def verificar_disponibilidad(data: schemas.VerificarPresupuestoIn,
                              db: Session = Depends(get_db),
                              user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     lineas = [{"cuenta_id": l.cuenta_id, "debe": l.monto,
                "campo_id": l.campo_id, "unidad_negocio_id": l.unidad_negocio_id,
                "departamento_id": l.departamento_id} for l in data.lineas]
@@ -4703,8 +4639,6 @@ def verificar_disponibilidad(data: schemas.VerificarPresupuestoIn,
 
 @router.get("/flujo-efectivo")
 def flujo_efectivo(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     periodo = db.query(models.PeriodoContable).filter(
         models.PeriodoContable.anio == anio, models.PeriodoContable.mes == mes
     ).first()
@@ -4762,8 +4696,6 @@ def flujo_efectivo(anio: int, mes: int, db: Session = Depends(get_db), user=Depe
 
 @router.get("/asientos-recurrentes")
 def listar_recurrentes(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     items = db.query(models.AsientoRecurrente).order_by(models.AsientoRecurrente.id.desc()).all()
     result = []
     for ar in items:
@@ -4788,7 +4720,7 @@ def listar_recurrentes(db: Session = Depends(get_db), user=Depends(get_current_u
 
 @router.post("/asientos-recurrentes")
 def crear_recurrente(data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     ar = models.AsientoRecurrente(
         nombre=data["nombre"], descripcion_asiento=data.get("descripcion_asiento", ""),
@@ -4808,7 +4740,7 @@ def crear_recurrente(data: dict, db: Session = Depends(get_db), user=Depends(get
 
 @router.put("/asientos-recurrentes/{id}")
 def editar_recurrente(id: int, data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     ar = db.query(models.AsientoRecurrente).get(id)
     if not ar:
@@ -4831,7 +4763,7 @@ def editar_recurrente(id: int, data: dict, db: Session = Depends(get_db), user=D
 
 @router.delete("/asientos-recurrentes/{id}")
 def eliminar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     ar = db.query(models.AsientoRecurrente).get(id)
     if not ar:
@@ -4843,7 +4775,7 @@ def eliminar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get
 
 @router.post("/asientos-recurrentes/{id}/ejecutar")
 def ejecutar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     ar = db.query(models.AsientoRecurrente).get(id)
     if not ar:
@@ -4889,7 +4821,7 @@ def ejecutar_recurrente(id: int, db: Session = Depends(get_db), user=Depends(get
 @router.get("/dgii-606")
 def dgii_606(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     """Formato 606 — Compras de bienes y servicios (CxP del período)."""
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     inicio = date(anio, mes, 1)
     _, ultimo = monthrange(anio, mes)
@@ -4950,7 +4882,7 @@ def dgii_606(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(ge
 @router.get("/dgii-607")
 def dgii_607(anio: int, mes: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     """Formato 607 — Ventas de bienes y servicios (CxC del período)."""
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     inicio = date(anio, mes, 1)
     _, ultimo = monthrange(anio, mes)
@@ -5121,8 +5053,6 @@ def ajuste_moneda_cxc(dry_run: bool = Query(True), fecha: Optional[date] = None,
 
 @router.get("/conciliaciones")
 def listar_conciliaciones(cuenta_bancaria_id: int = None, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     q = db.query(models.ConciliacionBancaria)
     if cuenta_bancaria_id:
         q = q.filter(models.ConciliacionBancaria.cuenta_bancaria_id == cuenta_bancaria_id)
@@ -5147,7 +5077,7 @@ def listar_conciliaciones(cuenta_bancaria_id: int = None, db: Session = Depends(
 
 @router.post("/conciliaciones")
 def crear_conciliacion(data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     try:
         c = models.ConciliacionBancaria(
@@ -5175,8 +5105,6 @@ def crear_conciliacion(data: dict, db: Session = Depends(get_db), user=Depends(g
 
 @router.get("/conciliaciones/{id}")
 def detalle_conciliacion(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     c = db.query(models.ConciliacionBancaria).get(id)
     if not c:
         raise HTTPException(404, "No encontrada")
@@ -5206,7 +5134,7 @@ def detalle_conciliacion(id: int, db: Session = Depends(get_db), user=Depends(ge
 
 @router.put("/conciliaciones/{id}")
 def actualizar_conciliacion(id: int, data: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     c = db.query(models.ConciliacionBancaria).get(id)
     if not c:
@@ -5259,8 +5187,6 @@ def eliminar_conciliacion(id: int, db: Session = Depends(get_db), user=Depends(r
 
 @router.get("/dashboard-financiero")
 def dashboard_financiero(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol == "operador":
-        raise HTTPException(403, "Acceso denegado")
     hoy = date.today()
 
     cxp_pend = db.query(models.CuentaPorPagar).filter(models.CuentaPorPagar.estado.notin_(["pagada", "anulada"])).all()
@@ -5461,7 +5387,7 @@ def listar_unidades_negocio(db: Session = Depends(get_db), user=Depends(get_curr
 
 @router.post("/unidades-negocio", response_model=schemas.UnidadNegocioOut)
 def crear_unidad_negocio(data: schemas.UnidadNegocioCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     existe = db.query(models.UnidadNegocio).filter(models.UnidadNegocio.codigo == data.codigo).first()
     if existe:
@@ -5472,7 +5398,7 @@ def crear_unidad_negocio(data: schemas.UnidadNegocioCreate, db: Session = Depend
 
 @router.put("/unidades-negocio/{id}", response_model=schemas.UnidadNegocioOut)
 def actualizar_unidad_negocio(id: int, data: schemas.UnidadNegocioCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.UnidadNegocio).get(id)
     if not obj:
@@ -5484,7 +5410,7 @@ def actualizar_unidad_negocio(id: int, data: schemas.UnidadNegocioCreate, db: Se
 
 @router.delete("/unidades-negocio/{id}")
 def eliminar_unidad_negocio(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.UnidadNegocio).get(id)
     if not obj:
@@ -5500,7 +5426,7 @@ def listar_departamentos(db: Session = Depends(get_db), user=Depends(get_current
 
 @router.post("/departamentos", response_model=schemas.DepartamentoOut)
 def crear_departamento(data: schemas.DepartamentoCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     existe = db.query(models.Departamento).filter(models.Departamento.codigo == data.codigo).first()
     if existe:
@@ -5511,7 +5437,7 @@ def crear_departamento(data: schemas.DepartamentoCreate, db: Session = Depends(g
 
 @router.put("/departamentos/{id}", response_model=schemas.DepartamentoOut)
 def actualizar_departamento(id: int, data: schemas.DepartamentoCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.Departamento).get(id)
     if not obj:
@@ -5523,7 +5449,7 @@ def actualizar_departamento(id: int, data: schemas.DepartamentoCreate, db: Sessi
 
 @router.delete("/departamentos/{id}")
 def eliminar_departamento(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.Departamento).get(id)
     if not obj:
@@ -5539,7 +5465,7 @@ def listar_almacenes(db: Session = Depends(get_db), user=Depends(get_current_use
 
 @router.post("/almacenes", response_model=schemas.AlmacenOut)
 def crear_almacen(data: schemas.AlmacenCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     existe = db.query(models.Almacen).filter(models.Almacen.codigo == data.codigo).first()
     if existe:
@@ -5550,7 +5476,7 @@ def crear_almacen(data: schemas.AlmacenCreate, db: Session = Depends(get_db), us
 
 @router.put("/almacenes/{id}", response_model=schemas.AlmacenOut)
 def actualizar_almacen(id: int, data: schemas.AlmacenCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.Almacen).get(id)
     if not obj:
@@ -5562,7 +5488,7 @@ def actualizar_almacen(id: int, data: schemas.AlmacenCreate, db: Session = Depen
 
 @router.delete("/almacenes/{id}")
 def eliminar_almacen(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.Almacen).get(id)
     if not obj:
@@ -5606,7 +5532,7 @@ def listar_dimensiones(entidad_tipo: str = None, db: Session = Depends(get_db), 
 @router.post("/dimensiones")
 def crear_dimension(data: schemas.DimensionCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
     import json
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = models.Dimension(
         codigo=data.codigo.upper().strip(),
@@ -5621,7 +5547,7 @@ def crear_dimension(data: schemas.DimensionCreate, db: Session = Depends(get_db)
 @router.put("/dimensiones/{id}")
 def actualizar_dimension(id: int, data: schemas.DimensionCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
     import json
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.Dimension).get(id)
     if not obj:
@@ -5636,7 +5562,7 @@ def actualizar_dimension(id: int, data: schemas.DimensionCreate, db: Session = D
 
 @router.delete("/dimensiones/{id}")
 def eliminar_dimension(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.Dimension).get(id)
     if not obj:
@@ -5649,7 +5575,7 @@ def eliminar_dimension(id: int, db: Session = Depends(get_db), user=Depends(get_
 
 @router.post("/dimensiones/{dim_id}/valores")
 def crear_dimension_valor(dim_id: int, data: schemas.DimensionValorCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     dim = db.query(models.Dimension).get(dim_id)
     if not dim:
@@ -5666,7 +5592,7 @@ def crear_dimension_valor(dim_id: int, data: schemas.DimensionValorCreate, db: S
 
 @router.put("/dimension-valores/{id}")
 def actualizar_dimension_valor(id: int, data: schemas.DimensionValorCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.DimensionValor).get(id)
     if not obj:
@@ -5680,7 +5606,7 @@ def actualizar_dimension_valor(id: int, data: schemas.DimensionValorCreate, db: 
 
 @router.delete("/dimension-valores/{id}")
 def eliminar_dimension_valor(id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     obj = db.query(models.DimensionValor).get(id)
     if not obj:
@@ -5756,7 +5682,7 @@ def listar_nomina_periodos(db: Session = Depends(get_db), user=Depends(get_curre
 @router.post("/nomina/procesar")
 def procesar_nomina(data: schemas.NominaProcesar, db: Session = Depends(get_db),
                     user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
 
     existe = db.query(models.NominaPeriodo).filter(
@@ -5927,7 +5853,7 @@ def detalle_nomina_periodo(id: int, db: Session = Depends(get_db), user=Depends(
 def vincular_partida_asiento(conc_id: int, partida_id: int = Query(...),
                               asiento_id: int = Query(...),
                               db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     partida = db.query(models.ConciliacionPartida).filter(
         models.ConciliacionPartida.id == partida_id,
@@ -5947,7 +5873,7 @@ def vincular_partida_asiento(conc_id: int, partida_id: int = Query(...),
 @router.delete("/conciliaciones/{conc_id}/desvincular-asiento")
 def desvincular_partida_asiento(conc_id: int, partida_id: int = Query(...),
                                  db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if user.rol not in ("admin", "contador"):
+    if not tiene_rol(user, "admin", "contador"):
         raise HTTPException(403, "Solo admin/contador")
     partida = db.query(models.ConciliacionPartida).filter(
         models.ConciliacionPartida.id == partida_id,
