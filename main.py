@@ -653,32 +653,32 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# Módulos de permisos que exige cada router para crear, modificar o eliminar: los de las
-# pantallas que escriben en él. Las lecturas solo piden sesión. Login y recuperación
-# (routers/auth) quedan públicos.
+# Módulos de permisos de cada router: para escribir, los de las pantallas que escriben en
+# él; para leer, esos más los de las pantallas que leen cada ruta (permisos_lectura.py).
+# Login y recuperación (routers/auth) quedan públicos.
 _CXP = ("contabilidad", "compras", "efectivo_banco", "proveedores")
-PERMISOS_ESCRITURA = {
-    campos: auth_module.permiso_escritura("campos", "contabilidad"),     # Contabilidad: centros de costo
-    trabajadores: auth_module.permiso_escritura("trabajadores"),
-    actividades: auth_module.permiso_escritura("actividades"),
-    productos: auth_module.permiso_escritura("productos", "inventario"),
-    ordenes: auth_module.permiso_escritura("ordenes", por_ruta={
+PERMISOS_MODULO = {
+    campos: auth_module.permiso_modulo("campos", "contabilidad"),     # Contabilidad: centros de costo
+    trabajadores: auth_module.permiso_modulo("trabajadores"),
+    actividades: auth_module.permiso_modulo("actividades"),
+    productos: auth_module.permiso_modulo("productos", "inventario"),
+    ordenes: auth_module.permiso_modulo("ordenes", por_ruta={
         "/api/ordenes/{ot_id}/mano-obra": ("ordenes", "nomina")}),         # Nómina ajusta horas
-    dashboard: auth_module.permiso_escritura("dashboard"),
-    inventario: auth_module.permiso_escritura("inventario", "productos"),
-    reportes: auth_module.permiso_escritura("costos", "analytics"),
-    compras: auth_module.permiso_escritura("compras"),
-    audit_log: auth_module.permiso_escritura("admin"),
-    tipos_producto: auth_module.permiso_escritura("productos"),
-    categorias_producto: auth_module.permiso_escritura("productos", "contabilidad"),
-    cosecha: auth_module.permiso_escritura("cosecha"),
-    ventas: auth_module.permiso_escritura("ventas"),
-    proveedores: auth_module.permiso_escritura("proveedores"),
-    clima: auth_module.permiso_escritura("clima"),
-    sanidad: auth_module.permiso_escritura("sanidad"),
-    riego: auth_module.permiso_escritura("riego"),
-    analytics: auth_module.permiso_escritura("analytics"),
-    contabilidad: auth_module.permiso_escritura("contabilidad", por_ruta={
+    dashboard: auth_module.permiso_modulo("dashboard"),
+    inventario: auth_module.permiso_modulo("inventario", "productos"),
+    reportes: auth_module.permiso_modulo("costos", "analytics"),
+    compras: auth_module.permiso_modulo("compras"),
+    audit_log: auth_module.permiso_modulo("admin"),
+    tipos_producto: auth_module.permiso_modulo("productos"),
+    categorias_producto: auth_module.permiso_modulo("productos", "contabilidad"),
+    cosecha: auth_module.permiso_modulo("cosecha"),
+    ventas: auth_module.permiso_modulo("ventas"),
+    proveedores: auth_module.permiso_modulo("proveedores"),
+    clima: auth_module.permiso_modulo("clima"),
+    sanidad: auth_module.permiso_modulo("sanidad"),
+    riego: auth_module.permiso_modulo("riego"),
+    analytics: auth_module.permiso_modulo("analytics"),
+    contabilidad: auth_module.permiso_modulo("contabilidad", por_ruta={
         "/api/contabilidad/empresa": ("contabilidad", "configuracion"),
         "/api/contabilidad/cxp": _CXP,
         "/api/contabilidad/pagos": _CXP,
@@ -693,17 +693,17 @@ PERMISOS_ESCRITURA = {
         "/api/contabilidad/entidad-dimensiones": ("contabilidad", "compras"),
         "/api/contabilidad/nomina": ("contabilidad", "nomina"),
     }),
-    clientes: auth_module.permiso_escritura("clientes"),
-    cuentas_bancarias: auth_module.permiso_escritura("efectivo_banco", "contabilidad"),
-    sequences: auth_module.permiso_escritura("configuracion", "admin"),
-    planificaciones: auth_module.permiso_escritura("ordenes", "planificacion"),
-    admin: auth_module.permiso_escritura("admin"),
-    roles: auth_module.permiso_escritura("admin"),
+    clientes: auth_module.permiso_modulo("clientes"),
+    cuentas_bancarias: auth_module.permiso_modulo("efectivo_banco", "contabilidad"),
+    sequences: auth_module.permiso_modulo("configuracion", "admin"),
+    planificaciones: auth_module.permiso_modulo("ordenes", "planificacion"),
+    admin: auth_module.permiso_modulo("admin"),
+    roles: auth_module.permiso_modulo("admin"),
 }
 
 # Register all routers
 app.include_router(auth.router)
-for _modulo, _permiso in PERMISOS_ESCRITURA.items():
+for _modulo, _permiso in PERMISOS_MODULO.items():
     app.include_router(_modulo.router, dependencies=[Depends(_permiso)])
 
 

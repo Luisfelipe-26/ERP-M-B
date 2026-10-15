@@ -160,31 +160,48 @@ _ACCIONES_METODO = {"POST": ("create", "update"), "PUT": ("update",), "PATCH": (
 _VERBO = {"create": "crear", "update": "modificar", "delete": "eliminar"}
 
 
-def permiso_escritura(*modulos: str, por_ruta: Optional[dict] = None) -> Callable:
-    """Dependencia de router: crear, modificar o eliminar exige permiso en uno de `modulos`.
+# Rutas GET que se usan sin sesión (la plantilla de carga masiva de órdenes).
+RUTAS_PUBLICAS = {"/api/ordenes/plantilla/descargar"}
+
+
+def permiso_modulo(*modulos: str, por_ruta: Optional[dict] = None) -> Callable:
+    """Dependencia de router: aplica en el API los permisos por módulo de los roles.
 
     El frontend solo muestra una pantalla si el rol tiene su módulo, pero el API no lo
-    revisaba: cualquier usuario logueado podía escribir llamando a la ruta directamente.
-    Las lecturas pasan sin cambios. `por_ruta` ({prefijo: módulos}) cubre las pantallas que
-    escriben en rutas de otro módulo, como Efectivo y Banco al registrar pagos en
-    contabilidad.
+    revisaba: cualquier usuario logueado podía leer y escribir de todo llamando a las rutas.
+    - Escribir: POST exige create o update, PUT/PATCH update, DELETE delete, en uno de
+      `modulos` (o los de `por_ruta`, {prefijo: módulos}, para las pantallas que escriben
+      en rutas de otro módulo, como Efectivo y Banco al registrar pagos en contabilidad).
+    - Leer: cualquier permiso en uno de esos módulos o en los de las pantallas que leen la
+      ruta (permisos_lectura.LECTURAS), igual que el frontend decide si muestra la pantalla.
     """
+    from permisos_lectura import LECTURAS
     reglas = sorted((por_ruta or {}).items(), key=lambda kv: -len(kv[0]))
 
     def _check(request: Request, db: Session = Depends(get_db)):
-        acciones = _ACCIONES_METODO.get(request.method)
-        if not acciones:
-            return None
         ruta = getattr(request.scope.get("route"), "path", request.url.path)
+        leer = request.method in ("GET", "HEAD")
+        acciones = _ACCIONES_METODO.get(request.method)
+        if not leer and not acciones:
+            return None
+        lectores = LECTURAS.get(ruta, ()) if leer else ()
+        if leer and (ruta in RUTAS_PUBLICAS or lectores == "*"):
+            return None
         mods = next((m for prefijo, m in reglas if ruta.startswith(prefijo)), modulos)
+        mods = tuple(dict.fromkeys(mods + tuple(lectores)))
         encabezado = request.headers.get("authorization", "")
         user = get_current_user(token=encabezado[7:] if encabezado.lower().startswith("bearer ") else "", db=db)
         perms = _get_user_permissions(user)
-        if "*" in perms or any(f"{m}.{a}" in perms for m in mods for a in acciones):
+        if "*" in perms:
             return user
-        nombres = " o ".join(m.replace("_", " ").capitalize() for m in mods)
+        if leer and any(p.split(".")[0] in mods for p in perms):
+            return user
+        if not leer and any(f"{m}.{a}" in perms for m in mods for a in acciones):
+            return user
+        nombres = " o ".join(m.replace("_", " ").capitalize() for m in mods[:3]) + (" u otro módulo" if len(mods) > 3 else "")
+        verbo = "ver" if leer else _VERBO[acciones[0]]
         raise HTTPException(status_code=403, detail=(
-            f"Su rol no tiene permiso para {_VERBO[acciones[0]]} en {nombres}. "
+            f"Su rol no tiene permiso para {verbo} en {nombres}. "
             "Un administrador puede asignarlo en Administración → Roles."))
 
     _check.modulos = modulos

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func as sqlfunc, cast, Date as SqlDate, and_, extract
 from database import get_db
-from auth import get_current_user, require_admin
+from auth import get_current_user, require_admin, _get_user_permissions
 from datetime import date, datetime, timedelta
 from calendar import monthrange
 from decimal import Decimal
@@ -5333,10 +5333,16 @@ def dashboard_financiero(db: Session = Depends(get_db), user=Depends(get_current
 
 @router.get("/notificaciones")
 def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Alertas de la campana del menú. La pide toda página, así que cada alerta se muestra
+    solo a quien tiene su módulo: antes cualquier usuario veía los totales por pagar y cobrar."""
     hoy = date.today()
     alertas = []
+    perms = _get_user_permissions(user)
 
-    cxp_venc = db.query(models.CuentaPorPagar).filter(
+    def ve(*modulos):
+        return "*" in perms or any(p.split(".")[0] in modulos for p in perms)
+
+    cxp_venc = [] if not ve("contabilidad", "compras", "efectivo_banco", "proveedores") else db.query(models.CuentaPorPagar).filter(
         models.CuentaPorPagar.estado.notin_(["pagada", "anulada"]),
         models.CuentaPorPagar.fecha_vencimiento != None,
         models.CuentaPorPagar.fecha_vencimiento <= hoy,
@@ -5345,7 +5351,7 @@ def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)
         total = round(sum(float(c.saldo_pendiente or 0) for c in cxp_venc), 2)
         alertas.append({"tipo": "cxp_vencida", "nivel": "danger", "titulo": f"{len(cxp_venc)} facturas por pagar vencidas", "detalle": f"Total: RD$ {total:,.2f}", "accion": "/contabilidad"})
 
-    cxp_prox = db.query(models.CuentaPorPagar).filter(
+    cxp_prox = [] if not ve("contabilidad", "compras", "efectivo_banco", "proveedores") else db.query(models.CuentaPorPagar).filter(
         models.CuentaPorPagar.estado.notin_(["pagada", "anulada"]),
         models.CuentaPorPagar.fecha_vencimiento != None,
         models.CuentaPorPagar.fecha_vencimiento > hoy,
@@ -5355,7 +5361,7 @@ def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)
         total = round(sum(float(c.saldo_pendiente or 0) for c in cxp_prox), 2)
         alertas.append({"tipo": "cxp_proxima", "nivel": "warning", "titulo": f"{len(cxp_prox)} facturas vencen en 7 días", "detalle": f"Total: RD$ {total:,.2f}", "accion": "/contabilidad"})
 
-    cxc_venc = db.query(models.CuentaPorCobrar).filter(
+    cxc_venc = [] if not ve("contabilidad", "efectivo_banco", "ventas") else db.query(models.CuentaPorCobrar).filter(
         models.CuentaPorCobrar.estado.notin_(["cobrada", "anulada"]),
         models.CuentaPorCobrar.fecha_vencimiento != None,
         models.CuentaPorCobrar.fecha_vencimiento <= hoy,
@@ -5364,14 +5370,17 @@ def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)
         total = round(sum(float(c.saldo_pendiente or 0) for c in cxc_venc), 2)
         alertas.append({"tipo": "cxc_vencida", "nivel": "warning", "titulo": f"{len(cxc_venc)} facturas por cobrar vencidas", "detalle": f"Total: RD$ {total:,.2f}", "accion": "/contabilidad"})
 
-    inv_bajo = db.query(models.Inventario).filter(
-        models.Inventario.cantidad <= models.Inventario.stock_minimo,
-        models.Inventario.stock_minimo > 0,
+    # Antes consultaba un modelo `Inventario` que no existe y la campana fallaba siempre.
+    inv_bajo = [] if not ve("inventario", "productos", "compras") else db.query(models.Producto).filter(
+        models.Producto.activo == True,
+        models.Producto.es_inventariable == True,
+        models.Producto.stock_minimo > 0,
+        models.Producto.stock_actual <= models.Producto.stock_minimo,
     ).all()
     if inv_bajo:
-        alertas.append({"tipo": "inventario_bajo", "nivel": "warning", "titulo": f"{len(inv_bajo)} productos con stock bajo", "detalle": ", ".join(i.producto_id for i in inv_bajo[:5]), "accion": "/inventario"})
+        alertas.append({"tipo": "inventario_bajo", "nivel": "warning", "titulo": f"{len(inv_bajo)} productos con stock bajo", "detalle": ", ".join(i.producto or i.id_prod for i in inv_bajo[:5]), "accion": "/inventario"})
 
-    per_abiertos = db.query(models.PeriodoContable).filter(
+    per_abiertos = [] if not ve("contabilidad") else db.query(models.PeriodoContable).filter(
         models.PeriodoContable.estado == "abierto",
         models.PeriodoContable.anio < hoy.year if hoy.month > 1 else models.PeriodoContable.anio < hoy.year,
     ).all()
@@ -5380,7 +5389,7 @@ def notificaciones(db: Session = Depends(get_db), user=Depends(get_current_user)
         alertas.append({"tipo": "periodo_abierto", "nivel": "info", "titulo": f"{len(old_periods)} período(s) contable(s) sin cerrar", "detalle": ", ".join(f"{p.mes:02d}/{p.anio}" for p in old_periods[:3]), "accion": "/contabilidad"})
 
     cfg_pres = db.query(models.ConfigPresupuesto).first()
-    if cfg_pres and cfg_pres.control_habilitado:
+    if cfg_pres and cfg_pres.control_habilitado and ve("presupuesto", "contabilidad"):
         anio_actual = hoy.year
         mes_actual = hoy.month
         mk_actual = ["monto_ene", "monto_feb", "monto_mar", "monto_abr", "monto_may",
