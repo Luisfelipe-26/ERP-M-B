@@ -1352,8 +1352,33 @@ class CosechaLinea(Base):
     producto_id = Column(String(10), ForeignKey("productos.id_prod"))   # snapshot del calibre al registrar
     kg = Column(Numeric(12, 2), nullable=False)
     costo_unitario = Column(Numeric(14, 4), default=0)
+    base_valor = Column(String(80))        # de dónde salió costo_unitario: costo estándar o valor razonable
     movimiento_id = Column(Integer, ForeignKey("movimientos_inventario.id"))
     calibre = relationship("Calibre")
+
+
+class ConfigCosecha(Base):
+    """Cómo se valora la fruta cosechada. Con valor razonable (NIC 41 párr. 13; NIIF para
+    PYMES 34.5 y 34.9), la fruta a granel entra al valor de mercado por kg del mes menos los
+    costos de venta; si no, al costo estándar de su producto."""
+    __tablename__ = "config_cosecha"
+    id = Column(Integer, primary_key=True, index=True)
+    valor_razonable = Column(Boolean, default=False)
+    costo_venta_kg = Column(Numeric(14, 4), default=0)      # RD$ por kg: flete a la planta, comisiones…
+    actualizado_en = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ValorFrutaMes(Base):
+    """Valor de mercado por kg fijado a mano para las cosechas de un mes (reemplaza al calculado)."""
+    __tablename__ = "valores_fruta_mes"
+    __table_args__ = (UniqueConstraint("anio", "mes", name="uq_valor_fruta_mes"),)
+    id = Column(Integer, primary_key=True, index=True)
+    anio = Column(Integer, nullable=False)
+    mes = Column(Integer, nullable=False)
+    valor_kg = Column(Numeric(14, 4), nullable=False)       # RD$ por kg, antes de costos de venta
+    observacion = Column(String(300))
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    actualizado_en = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class PrecioCalibre(Base):

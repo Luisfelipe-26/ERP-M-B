@@ -224,7 +224,7 @@ def _cosecha_out(db: Session, c: models.Cosecha) -> dict:
         "lineas": [{
             "id": l.id, "calibre_id": l.calibre_id, "calibre": l.calibre.nombre if l.calibre else None,
             "producto_id": l.producto_id, "kg": _f(l.kg), "costo_unitario": _f(l.costo_unitario),
-            "valor": round(_f(l.kg) * _f(l.costo_unitario), 2),
+            "valor": round(_f(l.kg) * _f(l.costo_unitario), 2), "base_valor": l.base_valor,
         } for l in c.lineas],
     }
 
@@ -310,10 +310,165 @@ def resumen_cosecha(temporada: Optional[str] = None, fecha_desde: Optional[date]
     }
 
 
-def _registrar_cosecha(db: Session, data: CosechaIn, current_user) -> models.Cosecha:
+# ─── Valor razonable de la fruta cosechada ──────────────────────────────────
+# NIC 41 párr. 13 y NIIF para PYMES 34.5/34.9: el producto agrícola se mide al cosecharlo a
+# su valor razonable menos los costos de venta. El valor de mercado de la fruta a granel sale
+# de lo que paga la planta: venta en pesos por kg despachado de las liquidaciones facturadas.
+
+def _mes_anterior(anio: int, mes: int):
+    return (anio - 1, 12) if mes == 1 else (anio, mes - 1)
+
+
+def _config_cosecha(db: Session) -> models.ConfigCosecha:
+    cfg = db.query(models.ConfigCosecha).first()
+    if not cfg:
+        cfg = models.ConfigCosecha(valor_razonable=False, costo_venta_kg=0)
+        db.add(cfg)
+        db.flush()
+    return cfg
+
+
+def valor_calculado_mes(db: Session, anio: int, mes: int) -> dict:
+    """Venta en pesos por kg despachado de las liquidaciones facturadas con fecha en el mes."""
+    desde = date(anio, mes, 1)
+    hasta = date(anio + 1, 1, 1) if mes == 12 else date(anio, mes + 1, 1)
+    liqs = db.query(models.LiquidacionVenta).filter(
+        models.LiquidacionVenta.estado == "activa", models.LiquidacionVenta.cxc_id.isnot(None),
+        models.LiquidacionVenta.fecha >= desde, models.LiquidacionVenta.fecha < hasta).all()
+    # Por kg despachado, no liquidado: así el valor ya descuenta el rechazo y la merma.
+    kg = sum(_f(l.despacho.kg_total) for l in liqs if l.despacho)
+    venta = sum(_f(l.venta_dop) for l in liqs)
+    return {"anio": anio, "mes": mes, "liquidaciones": len(liqs), "kg": round(kg, 2),
+            "venta_dop": round(venta, 2), "valor_kg": round(venta / kg, 4) if kg else None}
+
+
+def valor_para_fecha(db: Session, fecha: date, _calculados: Optional[dict] = None) -> Optional[dict]:
+    """Valor por kg al que entra la fruta a granel cosechada en `fecha`.
+
+    El fijado a mano para su mes; si no hay, el calculado del mes anterior, que ya cerró, para
+    que todo el mes se valore igual; si ese mes no tuvo liquidaciones, el último que las tuvo
+    (hasta dos años atrás). Se restan los costos de venta por kg. None si no hay ninguno.
+    """
+    cfg = _config_cosecha(db)
+    fijado = db.query(models.ValorFrutaMes).filter_by(anio=fecha.year, mes=fecha.month).first()
+    if fijado:
+        mercado, origen = _f(fijado.valor_kg), f"fijado para {fecha.month:02d}/{fecha.year}"
+    else:
+        a, m = _mes_anterior(fecha.year, fecha.month)
+        calculados = _calculados if _calculados is not None else {}
+        for _ in range(24):
+            if (a, m) not in calculados:
+                calculados[(a, m)] = valor_calculado_mes(db, a, m)
+            calc = calculados[(a, m)]
+            if calc["valor_kg"]:
+                mercado, origen = calc["valor_kg"], f"liquidaciones de {m:02d}/{a}"
+                break
+            a, m = _mes_anterior(a, m)
+        else:
+            return None
+    costo_venta = _f(cfg.costo_venta_kg)
+    return {"valor_kg": round(max(mercado - costo_venta, 0), 4), "valor_mercado_kg": round(mercado, 4),
+            "costo_venta_kg": round(costo_venta, 4), "origen": origen}
+
+
+class ConfigCosechaIn(BaseModel):
+    valor_razonable: bool
+    costo_venta_kg: float = 0
+
+    @field_validator("costo_venta_kg")
+    @classmethod
+    def _no_negativo(cls, v):
+        if v < 0:
+            raise ValueError("los costos de venta no pueden ser negativos")
+        return v
+
+
+class ValorMesIn(BaseModel):
+    valor_kg: Optional[float] = None          # None borra el valor fijado y vuelve al calculado
+    observacion: Optional[str] = None
+
+
+@router.get("/valor-razonable")
+def ver_valor_razonable(meses: int = Query(12, ge=1, le=36), db: Session = Depends(get_db),
+                        _=Depends(auth.get_current_user)):
+    """Configuración y valor por kg de los últimos meses: el calculado de sus liquidaciones,
+    el fijado a mano y el que usan las cosechas de ese mes."""
+    cfg = _config_cosecha(db)
+    r_cos = _get_regla_cuentas(db, "cosecha", "produccion")
+    cta = db.query(models.CuentaContable).get(r_cos[1]) if r_cos else None
+    hoy = date.today()
+    a, m = hoy.year, hoy.month
+    filas, calculados = [], {}
+    for _ in range(meses):
+        calculados[(a, m)] = calc = calculados.get((a, m)) or valor_calculado_mes(db, a, m)
+        fijado = db.query(models.ValorFrutaMes).filter_by(anio=a, mes=m).first()
+        filas.append({**calc, "valor_fijado": _f(fijado.valor_kg) if fijado else None,
+                      "observacion": fijado.observacion if fijado else None,
+                      "cosechas_del_mes": valor_para_fecha(db, date(a, m, 1), calculados)})
+        a, m = _mes_anterior(a, m)
+    return {
+        "valor_razonable": bool(cfg.valor_razonable), "costo_venta_kg": _f(cfg.costo_venta_kg),
+        "vigente_hoy": valor_para_fecha(db, hoy, calculados),
+        "cuenta_regla": ({"codigo": cta.codigo, "nombre": cta.nombre, "tipo": cta.tipo,
+                          "es_ingreso": (cta.tipo or "").lower() == "ingreso"} if cta else None),
+        "meses": filas,
+    }
+
+
+@router.get("/valor-razonable/para-fecha")
+def valor_razonable_para_fecha(fecha: date, db: Session = Depends(get_db), _=Depends(auth.get_current_user)):
+    """Con qué valor por kg entraría hoy la fruta a granel cosechada en `fecha`."""
+    cfg = _config_cosecha(db)
+    return {"valor_razonable": bool(cfg.valor_razonable), "valor": valor_para_fecha(db, fecha)}
+
+
+@router.put("/valor-razonable/config")
+def configurar_valor_razonable(data: ConfigCosechaIn, db: Session = Depends(get_db),
+                               current_user: models.Usuario = Depends(auth.require_admin)):
+    """Activar o no la valoración a valor razonable: es una política contable, la decide un admin."""
+    cfg = _config_cosecha(db)
+    antes = {"valor_razonable": bool(cfg.valor_razonable), "costo_venta_kg": _f(cfg.costo_venta_kg)}
+    cfg.valor_razonable, cfg.costo_venta_kg = data.valor_razonable, data.costo_venta_kg
+    audit.log(db, current_user, "CONFIGURAR", "COSECHA", "valor-razonable",
+              f"Valor razonable de la cosecha {'activado' if data.valor_razonable else 'desactivado'}; "
+              f"costos de venta RD$ {data.costo_venta_kg:,.4f}/kg",
+              {"antes": antes, "despues": data.model_dump()})
+    db.commit()
+    return {"valor_razonable": bool(cfg.valor_razonable), "costo_venta_kg": _f(cfg.costo_venta_kg)}
+
+
+@router.put("/valor-razonable/{anio}/{mes}")
+def fijar_valor_mes(anio: int, mes: int, data: ValorMesIn, db: Session = Depends(get_db),
+                    current_user: models.Usuario = Depends(auth.require_admin)):
+    """Fija a mano el valor de mercado por kg de las cosechas de un mes (o lo borra)."""
+    if not 1 <= mes <= 12 or not 2000 <= anio <= 2100:
+        raise HTTPException(400, "Mes o año inválido")
+    if data.valor_kg is not None and data.valor_kg <= 0:
+        raise HTTPException(400, "El valor por kg debe ser mayor que cero")
+    fijado = db.query(models.ValorFrutaMes).filter_by(anio=anio, mes=mes).first()
+    if data.valor_kg is None:
+        if fijado:
+            db.delete(fijado)
+    elif fijado:
+        fijado.valor_kg, fijado.observacion, fijado.usuario_id = data.valor_kg, data.observacion, current_user.id
+    else:
+        db.add(models.ValorFrutaMes(anio=anio, mes=mes, valor_kg=data.valor_kg,
+                                    observacion=data.observacion, usuario_id=current_user.id))
+    audit.log(db, current_user, "CONFIGURAR", "COSECHA", f"valor-{anio}-{mes:02d}",
+              (f"Valor de la fruta de {mes:02d}/{anio} fijado en RD$ {data.valor_kg:,.4f}/kg"
+               if data.valor_kg is not None else f"Valor fijado de {mes:02d}/{anio} borrado: vuelve al calculado"),
+              data.model_dump())
+    db.commit()
+    return {"ok": True, "cosechas_del_mes": valor_para_fecha(db, date(anio, mes, 1))}
+
+
+def _registrar_cosecha(db: Session, data: CosechaIn, current_user,
+                       valor_kg: Optional[float] = None) -> models.Cosecha:
     """Valida y registra una cosecha con su entrada a inventario y su asiento, sin confirmar.
 
-    La usan el registro manual y la importación de liquidaciones.
+    La usan el registro manual y la importación de liquidaciones. Con valor razonable activo,
+    la fruta a granel entra al valor del mes (o a `valor_kg`, que da la importación a partir
+    de las mismas liquidaciones); la ya clasificada, al costo de su producto.
     """
     campo = db.query(models.Campo).filter(models.Campo.id_campo == data.campo_id).first()
     if not campo or campo.activo is False:
@@ -367,6 +522,10 @@ def _registrar_cosecha(db: Session, data: CosechaIn, current_user) -> models.Cos
     total_kg = 0.0
     lineas_asiento, total_asiento = [], Decimal("0")
     r_cos = _get_regla_cuentas(db, "cosecha", "produccion")
+    vr = None
+    if _config_cosecha(db).valor_razonable and any(calibres[l.calibre_id].es_granel for l in lineas_in):
+        vr = ({"valor_kg": round(valor_kg, 4), "origen": "liquidaciones importadas"} if valor_kg is not None
+              else valor_para_fecha(db, data.fecha))
     for l in lineas_in:
         cal = calibres[l.calibre_id]
         linea = models.CosechaLinea(cosecha_id=cos.id, calibre_id=cal.id, kg=l.kg,
@@ -383,8 +542,15 @@ def _registrar_cosecha(db: Session, data: CosechaIn, current_user) -> models.Cos
                     f"{cal.nombre}: su producto {cal.producto_id} no existe, está inactivo o no lleva "
                     "inventario. Corríjalo en Cosecha → Calibres o en Productos."))
         if prod:
-            # Entra al costo estándar del producto del calibre (su costo unitario).
-            costo = _f(prod.costo_unitario)
+            # Al valor razonable del mes si está activo y es fruta a granel; si no (o si aún no
+            # hay ningún valor), al costo estándar del producto del calibre.
+            if vr and cal.es_granel:
+                costo, base = vr["valor_kg"], f"Valor razonable ({vr['origen']})"
+            else:
+                costo = _f(prod.costo_unitario)
+                base = ("Costo estándar (sin valor razonable aún)" if _config_cosecha(db).valor_razonable
+                        and cal.es_granel else "Costo estándar")
+            linea.base_valor = base[:80]
             nuevo_costo = _recalc_avg_cost(prod, l.kg, costo)
             nuevo_stock = _f(prod.stock_actual) + l.kg
             mov = models.MovimientoInventario(
@@ -392,7 +558,7 @@ def _registrar_cosecha(db: Session, data: CosechaIn, current_user) -> models.Cos
                 motivo="Cosecha", cantidad=l.kg, costo_unitario=round(costo, 4),
                 costo_promedio_post=round(nuevo_costo, 4), stock_post=round(nuevo_stock, 4),
                 lote=f"{data.campo_id}/{data.fecha:%Y%m%d}", referencia=numero,
-                observacion=f"Cosecha {numero} — {campo.nombre or data.campo_id} — {cal.nombre}",
+                observacion=f"Cosecha {numero} — {campo.nombre or data.campo_id} — {cal.nombre} — {base}",
                 fecha=datetime.combine(data.fecha, datetime.now().time()),
                 usuario_id=current_user.id,
             )
@@ -423,10 +589,12 @@ def _registrar_cosecha(db: Session, data: CosechaIn, current_user) -> models.Cos
     if lineas_asiento:
         lineas_asiento.append({"cuenta_id": r_cos[1], "debe": 0, "haber": total_asiento,
                                "campo_id": data.campo_id,
-                               "descripcion_linea": f"Producción agrícola {numero}"})
+                               "descripcion_linea": (f"Medición a valor razonable {numero}" if vr
+                                                     else f"Producción agrícola {numero}")})
         asiento = _crear_asiento_auto(
             db, data.fecha, "COS", numero,
-            f"Cosecha {numero} — {campo.nombre or data.campo_id} — {total_kg:,.2f} kg",
+            f"Cosecha {numero} — {campo.nombre or data.campo_id} — {total_kg:,.2f} kg"
+            + (f" a valor razonable RD$ {vr['valor_kg']:,.2f}/kg ({vr['origen']})" if vr else ""),
             lineas_asiento, current_user.nombre, requerido=True,
         )
         cos.asiento_id = asiento.id if asiento else None

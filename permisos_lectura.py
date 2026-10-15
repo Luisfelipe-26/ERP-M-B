@@ -89,6 +89,8 @@ LECTURAS = {
     "/api/cosecha/precios/vigente": ('cosecha',),
     "/api/cosecha/resumen": ('cosecha',),
     "/api/cosecha/temporadas": ('cosecha', 'ventas'),
+    "/api/cosecha/valor-razonable": ('cosecha',),
+    "/api/cosecha/valor-razonable/para-fecha": ('cosecha',),
     "/api/cosecha/verificar-carencia": ('cosecha',),
     "/api/cuentas-bancarias": ('efectivo_banco',),
     "/api/dashboard/briefing": ('dashboard',),

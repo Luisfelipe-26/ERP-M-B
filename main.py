@@ -300,6 +300,7 @@ def run_migrations():
         "ALTER TABLE cobros ADD COLUMN IF NOT EXISTS tasa_cambio NUMERIC(10,4)",
         # Calibre "a granel": fruta sin clasificar (la clasifica la planta del cliente)
         "ALTER TABLE calibres ADD COLUMN IF NOT EXISTS es_granel BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE cosecha_lineas ADD COLUMN IF NOT EXISTS base_valor VARCHAR(80)",
         # Planificación de Labores — relación con OT
         "ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS planificacion_id INTEGER REFERENCES planificaciones_labores(id)",
         "CREATE INDEX IF NOT EXISTS ix_ordenes_trabajo_planificacion_id ON ordenes_trabajo(planificacion_id)",

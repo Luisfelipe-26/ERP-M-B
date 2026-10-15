@@ -735,7 +735,7 @@ def importar_liquidaciones(data: ImportarIn, dry_run: bool = Query(True), db: Se
     liquidación con los kg y precios del reporte; por cada número de factura, una factura
     que agrupa sus liquidaciones. Todo o nada; en modo prueba solo devuelve el resumen.
     """
-    from routers.cosecha import CosechaIn, CosechaLineaIn, _registrar_cosecha
+    from routers.cosecha import CosechaIn, CosechaLineaIn, _config_cosecha, _registrar_cosecha
     cli = db.query(models.Cliente).get(data.cliente_id)
     if not cli or cli.activo is False:
         raise HTTPException(400, "Cliente no existe o está inactivo")
@@ -807,6 +807,18 @@ def importar_liquidaciones(data: ImportarIn, dry_run: bool = Query(True), db: Se
             cal.activo = True
             cal_ids[txt] = cal.id
 
+        # Valor razonable de la cosecha importada: lo que pagó la planta por kg en el mes, en
+        # pesos a la tasa de cada factura, menos los costos de venta. Son precios reales.
+        costo_venta_kg = _f(_config_cosecha(db).costo_venta_kg)
+        acum: dict = {}
+        for f in data.filas:
+            tasa = (data.facturas[f.factura].tasa_cambio or 1) if moneda == "USD" else 1
+            k = (f.fecha.year, f.fecha.month)
+            venta, kg = acum.get(k, (0.0, 0.0))
+            acum[k] = (venta + f.kg * f.precio * tasa, kg + f.kg)
+        valor_mes = {k: max(v / kg - costo_venta_kg, 0) for k, (v, kg) in acum.items() if kg}
+        resumen["valor_razonable_kg"] = {f"{m:02d}/{a}": round(v, 4) for (a, m), v in valor_mes.items()}
+
         liq_por_factura: dict = {}
         for (ref, campo_txt), filas in sorted(grupos.items(), key=lambda g: (min(f.fecha for f in g[1]), g[0])):
             campo_id = data.campos[campo_txt]
@@ -821,7 +833,7 @@ def importar_liquidaciones(data: ImportarIn, dry_run: bool = Query(True), db: Se
                         lineas=[CosechaLineaIn(calibre_id=granel.id, kg=kg_total)],
                         observaciones=f"Cargada desde la liquidación {ref} de {cli.nombre}",
                         forzar_carencia=data.forzar_carencia, justificacion_carencia=data.justificacion_carencia,
-                    ), current_user)
+                    ), current_user, valor_kg=valor_mes.get((fecha.year, fecha.month)))
                     resumen["cosechas"] += 1
                 d = _registrar_despacho(db, DespachoIn(
                     cliente_id=cli.id, fecha=fecha, campo_id=campo_id, temporada=temporada, conduce=ref,
