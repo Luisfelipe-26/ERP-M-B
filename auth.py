@@ -1,3 +1,4 @@
+import calendar
 from datetime import datetime, timedelta
 from typing import Optional, Callable
 from jose import JWTError, jwt
@@ -64,9 +65,16 @@ def exigir_contrasena_segura(password: str, email: str = "", nombre: str = ""):
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
+    ahora = datetime.utcnow()
+    expire = ahora + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    # iat: cuándo se abrió la sesión, para cerrarla si después cambia la contraseña.
+    to_encode.update({"exp": expire, "iat": calendar.timegm(ahora.utctimetuple())})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def marcar_cambio_de_clave(user: models.Usuario):
+    """Las sesiones abiertas antes de este momento dejan de valer (ver get_current_user)."""
+    user.clave_cambiada_en = datetime.utcnow()
 
 
 def _get_user_permissions(user: models.Usuario) -> set:
@@ -113,6 +121,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(models.Usuario).filter(models.Usuario.email == email).first()
     if user is None or not user.activo:
         raise credentials_exception
+    # Una sesión abierta antes del último cambio de contraseña ya no vale: si alguien la tenía
+    # (otro equipo, una sesión robada), cambiar la clave la cierra. Las sesiones sin fecha son
+    # de antes de este control y solo caducan si la clave cambió después.
+    if user.clave_cambiada_en is not None:
+        emitido = payload.get("iat")
+        if not isinstance(emitido, (int, float)) or emitido < calendar.timegm(user.clave_cambiada_en.utctimetuple()):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Su sesión se cerró porque la contraseña cambió. Inicie sesión de nuevo.",
+                headers={"WWW-Authenticate": "Bearer"})
     return user
 
 

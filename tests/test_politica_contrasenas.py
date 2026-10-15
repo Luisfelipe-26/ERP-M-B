@@ -157,3 +157,45 @@ def test_adivinar_la_actual_tiene_limite(entorno):
 def test_sin_sesion_no_se_cambia(entorno):
     _, c, _ = entorno
     assert c.post("/api/auth/cambiar-contrasena", json={"actual": "x", "nueva": "Lote7-riego-norte"}).status_code == 401
+
+
+# ─── Cambiar la contraseña cierra las sesiones abiertas ──────────────────────
+
+def test_cambiar_la_propia_cierra_las_otras_sesiones(entorno):
+    import time
+    db, c, _ = entorno
+    _, vieja = _con_clave(db, "rosa@test.local", "Clave-vieja-2025")
+    time.sleep(1.1)                                           # iat va en segundos
+    r = c.post("/api/auth/cambiar-contrasena", json={"actual": "Clave-vieja-2025", "nueva": "Lote7-riego-norte"}, headers=vieja)
+    nueva = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    r = c.get("/api/auth/me", headers=vieja)
+    assert r.status_code == 401 and "contraseña cambió" in r.json()["detail"], "la otra sesión quedó cerrada"
+    assert c.get("/api/auth/me", headers=nueva).status_code == 200, "la del que la cambió sigue"
+
+
+def test_restablecer_cierra_las_sesiones_de_ese_usuario(entorno):
+    import time
+    db, c, h_admin = entorno
+    u, h_rosa = _con_clave(db, "rosa@test.local", "Clave-vieja-2025")
+    _, h_otro = _con_clave(db, "otro@test.local", "Otra-clave-2025")
+    time.sleep(1.1)
+    assert c.post(f"/api/admin/usuarios/{u.id}/reset-password", json={"password": "Lote7-riego-norte"}, headers=h_admin).status_code == 200
+    assert c.get("/api/auth/me", headers=h_rosa).status_code == 401
+    assert c.get("/api/auth/me", headers=h_otro).status_code == 200, "a los demás no les afecta"
+    assert c.get("/api/auth/me", headers=h_admin).status_code == 200
+    login = c.post("/api/auth/login", json={"email": "rosa@test.local", "password": "Lote7-riego-norte"}).json()
+    assert c.get("/api/auth/me", headers={"Authorization": f"Bearer {login['access_token']}"}).status_code == 200
+
+
+def test_las_sesiones_de_antes_del_control_siguen_hasta_un_cambio(entorno):
+    """Un token sin fecha de emisión (de antes de este cambio) vale mientras la clave no cambie."""
+    from datetime import datetime, timedelta
+    from jose import jwt
+    db, c, _ = entorno
+    u, _ = _con_clave(db, "rosa@test.local", "Clave-vieja-2025")
+    sin_fecha = jwt.encode({"sub": u.email, "exp": datetime.utcnow() + timedelta(hours=1)}, auth.SECRET_KEY, algorithm=auth.ALGORITHM)
+    h = {"Authorization": f"Bearer {sin_fecha}"}
+    assert c.get("/api/auth/me", headers=h).status_code == 200
+    auth.marcar_cambio_de_clave(u)
+    db.commit()
+    assert c.get("/api/auth/me", headers=h).status_code == 401

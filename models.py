@@ -67,6 +67,7 @@ class Usuario(Base):
     perfil_id = Column(Integer, ForeignKey("perfiles_acceso.id"))
     activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, server_default=func.now())
+    clave_cambiada_en = Column(DateTime)      # UTC; las sesiones anteriores dejan de valer
     perfil = relationship("PerfilAcceso")
     roles = relationship("Rol", secondary=usuario_roles, back_populates="usuarios", order_by="Rol.nombre")
 

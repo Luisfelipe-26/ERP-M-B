@@ -2,7 +2,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from auth import get_current_user, require_admin, get_password_hash, _get_user_permissions, exigir_contrasena_segura
+from auth import (get_current_user, require_admin, get_password_hash, _get_user_permissions,
+                  exigir_contrasena_segura, marcar_cambio_de_clave)
 import models
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -170,5 +171,6 @@ def reset_password(usuario_id: int, data: dict, db: Session = Depends(get_db),
         raise HTTPException(400, "password es requerido")
     exigir_contrasena_segura(data["password"], u.email, u.nombre)
     u.hashed_password = get_password_hash(data["password"])
+    marcar_cambio_de_clave(u)            # cierra las sesiones abiertas de ese usuario
     db.commit()
-    return {"ok": True, "msg": f"Contraseña de {u.nombre} actualizada"}
+    return {"ok": True, "msg": f"Contraseña de {u.nombre} actualizada; sus sesiones abiertas se cerraron"}

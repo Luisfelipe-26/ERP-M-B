@@ -136,9 +136,12 @@ def cambiar_contrasena(data: CambioContrasena, request: Request, db: Session = D
         raise HTTPException(status_code=400, detail="La contraseña nueva debe ser distinta de la actual")
     auth.exigir_contrasena_segura(data.nueva, user.email, user.nombre)
     user.hashed_password = auth.get_password_hash(data.nueva)
-    audit.log(db, user, "CAMBIAR_CONTRASENA", "USUARIO", user.email, f"{user.nombre} cambió su contraseña")
+    auth.marcar_cambio_de_clave(user)
+    audit.log(db, user, "CAMBIAR_CONTRASENA", "USUARIO", user.email,
+              f"{user.nombre} cambió su contraseña; se cerraron sus otras sesiones")
     db.commit()
-    return {"ok": True, "msg": "Contraseña actualizada"}
+    # Las demás sesiones se cierran; esta sigue con un token nuevo.
+    return {"ok": True, "msg": "Contraseña actualizada", "access_token": auth.create_access_token({"sub": user.email})}
 
 
 @router.get("/me")
